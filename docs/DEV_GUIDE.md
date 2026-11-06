@@ -656,6 +656,8 @@ executed / execution_failed`，另有 `canceled` / `superseded`。
 | `run start <关卡> <token>` | **只由选关卡登记表触发**。token 匹配且 `pending` 且未过期 → 关卡白名单 → 锁 → 拒绝窗 → 预检 → 状态改 `dispatched` → 删登记 → 收卡 → `Popen maa_daily.py now <token>`。过期就地收卡（硬闸门） |
 | `run expire <token> [--after 秒]` | 过期哨兵（`run now` 派的脱离会话子进程）：睡够后若仍 `pending` 且到期 → `expired` + 删登记 + PATCH 收卡；幂等 |
 | `run local <关卡> <开关 JSON> [--force]` | **只给 Wado's MAA**（`dispatch_gui()`，Discord 够不着）。不发选关卡：关卡白名单 → 开关校验（`fight/infrast/recruit/mall/award/annihilation`，只认真布尔，五项全关拒绝）→ 锁 → 拒绝窗（`--force` 只跳过这一条，锁冲突永远不能强行）→ 预检 → 收掉 Discord 上没选的选关卡（`superseded`）→ 写 `manual_run.json`（`dispatched` + `tasks` / `annihilation` / `source` / `forced`）→ `Popen maa_daily.py now <token>`。`maa_daily.apply_local_switches()` 只把开关叠到这一场的计划上，不进 `plan.json`（M4） |
+| `copilot preview <关>` | **只给 Wado's MAA**（5～20 秒，不进 Discord 的 20 秒回执路径，不变量 #6）。持 `copilot_search.lock`、森空岛刷新失败直接报错（不降级）、绕过 12h 缓存搜全部候选，返回每份是否完全满足（`maa_copilot.is_perfect()`，和 `pick_perfect_candidate()` 同一条判据）、缺什么，自动选中第一份完全满足的。预览存 `copilot/previews/<token>.json`（30 分钟，**不在 `searches/` 下**） |
+| `copilot go <token> [作业 id]` | 只接受预览里**完全满足**的那份（默认最优）→ `dispatch_blocker()`（被挡什么都不写）→ 发「已排程」卡（能取消本轮）→ 写 `searches/<新 token>.json` 为 `queued` → `dispatch_batch()`。同一次预览只能派一次 |
 | `run recommend <token>` | 推荐补写（同上，脱离会话）：`current_farming_result` → `auto_stage`，仍 `pending` 才 PATCH 卡片写「缺口推荐」并给该选项打 🎯；算不出写「推荐暂不可用」 |
 | `log tail` | 读 `last_run.summary`；若是旧版格式则回读 log 用 `extract_summary` 重建 |
 | `copilot card` | 发抄作业一览卡（§3）。只读本地 + 一次 Discord POST，同步做完 |

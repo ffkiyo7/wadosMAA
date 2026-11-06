@@ -50,6 +50,10 @@ CACHE_DIR = COPILOT_DIR / "cache"
 SEARCHES_DIR = COPILOT_DIR / "searches"
 SEARCH_LOCK_PATH = COPILOT_DIR / "copilot_search.lock"
 PREPARED_DIR = COPILOT_DIR / "prepared"
+# Wado's MAA 的抄作业预览（`copilot preview`）。**不放在 `SEARCHES_DIR` 下**：那里的每个
+# `*.json` 都会被当成一轮搜索，被 watcher 和 `prune_expired_searches()` 处理。
+PREVIEWS_DIR = COPILOT_DIR / "previews"
+PREVIEW_TTL = timedelta(minutes=30)
 
 PRTS_BASE = "https://prts.maa.plus"
 CACHE_TTL = timedelta(hours=12)
@@ -703,6 +707,18 @@ def execution_uri(
     return f"file://{PREPARED_DIR}/{cand_id}.json", True
 
 
+def is_perfect(candidate: dict[str, Any]) -> bool:
+    """「完全满足」的唯一判据：`ratio == 1.0` 且无软硬缺口（不变量 #15 / #18）。
+
+    `pick_perfect_candidate()` 和 Wado's MAA 的抄作业预览（`copilot preview` / `go`）共用它。
+    """
+    return (
+        candidate.get("ratio") == 1.0
+        and not candidate.get("gaps")
+        and not candidate.get("soft_gaps")
+    )
+
+
 def pick_perfect_candidate(
     stage: str,
     stage_id: str,
@@ -720,11 +736,7 @@ def pick_perfect_candidate(
         stage_id, stage, config, roster, limit=1000, use_cache=False
     )
     for candidate in candidates:
-        if (
-            candidate.get("ratio") == 1.0
-            and not candidate.get("gaps")
-            and not candidate.get("soft_gaps")
-        ):
+        if is_perfect(candidate):
             return candidate, "", []
     if not candidates:
         return None, f"{stage} 在 prts.plus 上暂时没有作业", []
@@ -1325,7 +1337,7 @@ LIVE_ROUND_STATUSES = frozenset({"scheduled", "queued", "executing"})
 
 
 def ensure_private_dirs() -> None:
-    for path in (COPILOT_DIR, CACHE_DIR, SEARCHES_DIR, PREPARED_DIR):
+    for path in (COPILOT_DIR, CACHE_DIR, SEARCHES_DIR, PREPARED_DIR, PREVIEWS_DIR):
         path.mkdir(parents=True, exist_ok=True)
         os.chmod(path, 0o700)
 

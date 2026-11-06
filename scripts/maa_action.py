@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -1447,6 +1449,181 @@ def schedule_sync() -> tuple[bool, str, dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# 抄作业预览（K13）—— 只给 Wado's MAA 用：先搜、给人看全部候选，点「确认开打」才派发
+# ---------------------------------------------------------------------------
+
+PREVIEW_CANDIDATE_LIMIT = 60
+
+
+def _preview_path(token: str) -> Path:
+    return maa_copilot.PREVIEWS_DIR / f"{token}.json"
+
+
+def _prune_previews(now: datetime) -> None:
+    for path in maa_copilot.PREVIEWS_DIR.glob("*.json"):
+        state = load_json(path, {})
+        try:
+            expires = datetime.fromisoformat(str(state.get("expires_at")))
+        except (AttributeError, TypeError, ValueError):
+            expires = now - timedelta(seconds=1)
+        if now > expires:
+            path.unlink(missing_ok=True)
+
+
+def copilot_preview(stage: str) -> tuple[bool, str, dict[str, Any]]:
+    """`copilot preview <关>`：只搜不派发，返回全部候选（是否完全满足、缺什么）和一个 token。
+
+    搜索要 5～20 秒，**只给 GUI 用**，不进 Discord 的 20 秒回执路径（不变量 #6）。森空岛刷新
+    失败照旧直接报错，不降级（不变量 #18）；只有完全满足的作业能被选（`maa_copilot.is_perfect`）。
+    """
+    from maa_copilot_worker import _stage_cost  # 理智查表只有一份实现（不变量 #45）
+
+    config = load_config()
+    activity_key = str(load_json(WATCH_PATH, {}).get("activity_key") or "")
+    prefix = maa_copilot._activity_prefix(activity_key)
+    targets, refusal, _ = _expand_copilot_targets([stage], config, prefix, activity_key)
+    if refusal:
+        return False, refusal, {}
+    if len(targets) != 1:
+        return False, "预览一次只看一关，请选具体的关卡而不是区域。", {}
+    target = targets[0]
+    code, stage_id = target["stage"], target["stage_id"]
+    now = now_beijing()
+    maa_copilot.ensure_private_dirs()
+    with maa_copilot.SEARCH_LOCK_PATH.open("a+", encoding="utf-8") as lock_file:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return False, "已有另一项作业正在匹配，请稍后再试。", {}
+        import maa_skland
+
+        try:
+            maa_skland.refresh_roster()
+        except Exception as exc:  # noqa: BLE001 — (a) 转译：任何失败都包成回执，不降级
+            return False, f"森空岛练度与理智刷新失败，不降级预览：{type(exc).__name__}: {exc}", {}
+        roster = maa_copilot.load_roster()
+        candidates = maa_copilot.search_copilots(
+            stage_id, code, config, roster, limit=1000, use_cache=False
+        )
+        cost = _stage_cost(stage_id, code, config)
+    shown = candidates[:PREVIEW_CANDIDATE_LIMIT]
+    perfect = [int(c["id"]) for c in candidates if maa_copilot.is_perfect(c)]
+    best = perfect[0] if perfect else None
+    token = _new_search_token()
+    blocker = dispatch_blocker(config, "", now_beijing())
+    state = {
+        "token": token,
+        "status": "previewed",
+        "stage": code,
+        "stage_id": stage_id,
+        "modes": target["modes"],
+        "sanity_cost": cost,
+        "activity_key": activity_key if prefix and code.startswith(f"{prefix}-") else "",
+        "candidates": [c for c in candidates if int(c["id"]) in perfect][:PREVIEW_CANDIDATE_LIMIT],
+        "best_id": best,
+        "created_at": now.isoformat(),
+        "expires_at": (now + maa_copilot.PREVIEW_TTL).isoformat(),
+    }
+    _prune_previews(now)
+    atomic_write_json(_preview_path(token), state)
+    os.chmod(_preview_path(token), 0o600)
+    data = {
+        "token": token,
+        "stage": code,
+        "modes": target["modes"],
+        "sanity_cost": cost,
+        "best_id": best,
+        "blocker": blocker,
+        "expires_at": state["expires_at"],
+        "total": len(candidates),
+        "candidates": [
+            {**{k: c.get(k) for k in ("id", "title", "uploader", "ratio", "gaps", "soft_gaps",
+                                      "views", "rating_ratio", "minimum_required")},
+             "perfect": maa_copilot.is_perfect(c)}
+            for c in shown
+        ],
+    }
+    if best is None:
+        head = f"{code} 搜到 {len(candidates)} 份作业，没有完全满足练度的，不能开打。"
+    else:
+        head = f"{code} 搜到 {len(candidates)} 份作业，{len(perfect)} 份完全满足，已选中最优的一份。"
+    return True, head + (f"\n现在不能派发：{blocker}" if blocker else ""), data
+
+
+def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]:
+    """`copilot go <token> [作业 id]`：按预览里选中的**完全满足**的那份派发（K13）。
+
+    过同一个闸门 `dispatch_blocker()`；被挡什么都不写。派发走手动轮的同一条路：
+    发「已排程」卡（Discord 上能「取消本轮」）→ `queued` → `dispatch_batch()`。
+    """
+    if not maa_copilot.SEARCH_TOKEN_RE.fullmatch(token or ""):
+        return False, "预览 token 不对。", {}
+    preview = load_json(_preview_path(token), {})
+    if not isinstance(preview, dict) or preview.get("status") != "previewed":
+        return False, "这次预览已失效（用过了或过期），请重新预览。", {}
+    now = now_beijing()
+    try:
+        expires = datetime.fromisoformat(str(preview.get("expires_at")))
+    except (TypeError, ValueError):
+        expires = now - timedelta(seconds=1)
+    if now > expires:
+        _preview_path(token).unlink(missing_ok=True)
+        return False, "这次预览已过期，请重新预览（作业和练度都可能变了）。", {}
+    pool = {int(c["id"]): c for c in preview.get("candidates") or [] if isinstance(c, dict)}
+    wanted = int(chosen) if chosen.isdigit() else preview.get("best_id")
+    candidate = pool.get(int(wanted)) if isinstance(wanted, int) else None
+    if candidate is None or not maa_copilot.is_perfect(candidate):
+        return False, "只能选完全满足练度、没有任何缺口的作业。", {}
+    cost = preview.get("sanity_cost")
+    if not isinstance(cost, int):
+        return False, f"{preview.get('stage')} 的理智消耗查不到，拒绝执行。", {}
+    config = load_config()
+    blocker = dispatch_blocker(config, "", now)
+    if blocker:
+        return False, f"{blocker}；请日常 / 对表结束后再点。", {"blocked": blocker}
+    if not (SCRIPTS_DIR / "maa_copilot_worker.py").is_file():
+        return False, "maa_copilot_worker.py 尚未部署。", {}
+    code = str(preview["stage"])
+    entries = [
+        {"stage": code, "stage_id": preview["stage_id"], "mode": mode,
+         "candidate": candidate, "sanity_cost": cost}
+        for mode in preview.get("modes") or ["normal"]
+    ]
+    search = _new_search_token()
+    maa_copilot.ensure_private_dirs()
+    message_id = publish_round(
+        search, entries, config, title=f"🤖 已排程：{code}",
+        note=f"Wado's MAA 预览后确认开打：作业 {candidate['id']}「{candidate.get('title', '')}」。",
+    )
+    state = {
+        "token": search,
+        "status": "queued",
+        "stage": code,
+        "stage_id": preview["stage_id"],
+        "modes": preview.get("modes") or ["normal"],
+        "targets": [{"stage": code, "stage_id": preview["stage_id"],
+                     "modes": preview.get("modes") or ["normal"]}],
+        "entries": entries,
+        "message_id": message_id,
+        "created_at": now.isoformat(),
+        "expires_at": (now + maa_copilot.SEARCH_TTL).isoformat(),
+        "execution_requested_at": now.isoformat(),
+        "source": action_source(),
+        "activity_key": preview.get("activity_key") or "",
+    }
+    atomic_write_json(_search_path(search), state)
+    preview["status"] = "dispatched"
+    preview["search_token"] = search
+    atomic_write_json(_preview_path(token), preview)
+    dispatch_batch(search)
+    return (
+        True,
+        f"▶️ 已派发 {code}（作业 {candidate['id']}），Discord 上有「已排程」卡，可以取消本轮。",
+        {"token": search, "stage": code, "candidate_id": candidate["id"]},
+    )
+
+
+# ---------------------------------------------------------------------------
 # 配置与持久默认值（K3 / K5）—— 只给 Wado's MAA 用
 # ---------------------------------------------------------------------------
 
@@ -1665,6 +1842,10 @@ def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
         return defaults_set(argv[2], *argv[3:])
     if argv[:2] == ["plan", "refresh-card"] and len(argv) == 3 and valid_phase(argv[2]):
         return plan_refresh_card(argv[2])
+    if argv[:2] == ["copilot", "preview"] and len(argv) == 3:
+        return copilot_preview(argv[2])
+    if argv[:2] == ["copilot", "go"] and len(argv) in (3, 4):
+        return copilot_go(argv[2], argv[3] if len(argv) == 4 else "")
     if argv[:2] == ["run", "local"] and 4 <= len(argv) <= 5:
         return run_local(argv[2], argv[3], *argv[4:])
     if argv == ["schedule", "show"]:
