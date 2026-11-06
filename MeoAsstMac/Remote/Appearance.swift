@@ -39,7 +39,9 @@ enum AppearanceKeys {
     static let glass = "GlassCards"
 }
 
-/// 窗口背景：按当前浅色 / 深色挑一张图。没设图就什么都不画（用系统默认背景）。
+/// 窗口背景：按当前浅色 / 深色挑一张图。
+/// 没设图、或者图读不出来时，画系统的窗口底色。`containerBackground(for: .window)` 会顶掉系统底色，
+/// 这里要是什么都不画，窗口就是透明的，会直接露出桌面。
 struct WindowBackground: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(AppearanceKeys.lightImage) private var lightPath = ""
@@ -65,6 +67,8 @@ struct WindowBackground: View {
                 }
                 .frame(width: proxy.size.width, height: proxy.size.height)
                 .clipped()
+            } else {
+                Color(nsColor: .windowBackgroundColor)
             }
         }
         .ignoresSafeArea()
