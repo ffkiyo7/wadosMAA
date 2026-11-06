@@ -23,7 +23,7 @@ struct CopilotContent: View {
         var children: [Item]?
 
         var name: String {
-            url.deletingPathExtension().lastPathComponent
+            url.deletingPathExtension().lastPathComponent.repairingCP437Mojibake
         }
     }
 
@@ -402,6 +402,22 @@ extension CopilotContent.Item {
 }
 
 // MARK: - Convenience Methods
+
+// Wado's MAA：内置作业改读 maa-cli 的资源目录后，中文文件名在磁盘上就是乱码——
+// maa-cli 解压资源包时没按 UTF-8 解析 zip 里的文件名，按 CP437 存了下来（「日」→「µùÑ」）。
+// 这里只修显示，不改文件：那是 maa-cli 全机共用的目录。
+// 本来就正常的中文名编不进 CP437，西文名编进去也不是合法 UTF-8，都会原样返回。
+private extension String {
+    var repairingCP437Mojibake: String {
+        guard contains(where: { !$0.isASCII }) else { return self }
+        let cp437 = String.Encoding(rawValue: CFStringConvertEncodingToNSStringEncoding(
+            CFStringEncoding(CFStringEncodings.dosLatinUS.rawValue)))
+        guard let bytes = precomposedStringWithCanonicalMapping.data(using: cp437),
+              let repaired = String(data: bytes, encoding: .utf8)
+        else { return self }
+        return repaired
+    }
+}
 
 extension FileManager {
     func copyCopilotToExternalDirectory(at url: URL) throws -> URL {
