@@ -12,12 +12,13 @@ import time
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 
 import maa_depot
 import maa_playcover
 from maa_common import (
     BEIJING,
+    DEFAULT_TASKS,
     LAST_RUN_PATH,
     LAST_RUN_SCHEMA_VERSION,
     MAA_CONFIG_DIR,
@@ -1637,6 +1638,12 @@ def manual_run_stage(manual_token: str) -> str | None:
     请求必须是 `manual_run.json` 里**这个 token** 且已 `dispatched`；对不上返回 None，
     调用方不跑。token 为空（终端直接 `maa_daily.py now`）不走这里（M6）。
     """
+    request = manual_run_request(manual_token)
+    return None if request is None else str(request.get("stage") or "")
+
+
+def manual_run_request(manual_token: str) -> dict[str, Any] | None:
+    """整份手动场请求（关 + Wado's MAA「这一次」的环节开关）；对不上返回 None。"""
     with state_lock():
         state = check_schema(
             "manual_run.json", load_json(MANUAL_RUN_PATH, {}), MANUAL_RUN_SCHEMA_VERSION
@@ -1648,7 +1655,27 @@ def manual_run_stage(manual_token: str) -> str | None:
         or "stage" not in state
     ):
         return None
-    return str(state.get("stage") or "")
+    return state
+
+
+def apply_local_switches(plan: Plan, request: dict[str, Any]) -> Plan:
+    """把 `run local` 的「这一次」开关叠到本场计划上（K12）。
+
+    `tasks` 只认五个已知环节、只认真布尔，缺的照默认；剿灭关掉时带上原因进战报。
+    选关卡（Discord）派发的请求没有这两个字段，原样返回。
+    """
+    result: dict[str, Any] = dict(plan)
+    tasks = request.get("tasks")
+    if isinstance(tasks, dict):
+        merged = dict(result.get("tasks") or DEFAULT_TASKS)
+        for key in DEFAULT_TASKS:
+            if isinstance(tasks.get(key), bool):
+                merged[key] = tasks[key]
+        result["tasks"] = merged
+    if request.get("annihilation") is False and result.get("annihilation") is not False:
+        result["annihilation"] = False
+        result["annihilation_skip_reason"] = "这一次手动场关掉了剿灭"
+    return cast(Plan, result)
 
 
 def report_manual_run_mismatch(
@@ -1692,17 +1719,19 @@ def execute(phase: Phase, manual_token: str = "") -> int:
     # 手动场 `now` 没有场次覆盖：带 token 时刷选关卡上选的关（PLAN_MANUAL_RUN M4，
     # 不带 drops 上限和后备关）；不带 token 是终端排障入口，刷 defaults.json（M6）。
     base_plan = effective_plan(started, phase)
+    request: dict[str, Any] = {}
     if phase == "now" and manual_token:
-        manual_stage = manual_run_stage(manual_token)
-        if manual_stage is None:
+        found = manual_run_request(manual_token)
+        if found is None:
             report_manual_run_mismatch(config, token, channel_id, manual_token)
             return 1
-        base_plan["stage"] = manual_stage
+        request = found
+        base_plan["stage"] = str(found.get("stage") or "")
         base_plan["stage_source"] = "discord"
         base_plan["farming_drops"] = {}
         base_plan["farming_fallback_stage"] = ""
     plan = attach_sanity_yield(
-        attach_annihilation(base_plan, started, last_run_state),
+        apply_local_switches(attach_annihilation(base_plan, started, last_run_state), request),
         config,
         started,
     )

@@ -695,6 +695,106 @@ class ManualRunCardTests(unittest.TestCase):
             self.assertIsNone(plan)
             self.assertIn("手动未启动", alerts[-1][3]["embeds"][0]["title"])
 
+    # ---- run local（Wado's MAA 的「开始」，K12）------------------------
+
+    ALL_ON = json.dumps({"fight": True, "infrast": True, "recruit": True, "mall": True,
+                         "award": True, "annihilation": True})
+
+    def _local(self, *argv, **kwargs):
+        with self._stack(kwargs.pop("locked", False), kwargs.pop("config", None),
+                         kwargs.pop("now", None), None), \
+                patch.dict("os.environ", {"MAA_ACTION_SOURCE": "gui"}):
+            return maa_action.run_local(*argv)
+
+    def test_run_local_dispatches_straight_away_with_this_runs_switches(self) -> None:
+        switches = json.dumps({"mall": False, "annihilation": False})
+        ok, message, data = self._local("CE-6", switches)
+        self.assertTrue(ok, message)
+        state = self._state()
+        self.assertEqual(state["status"], "dispatched")
+        self.assertEqual(state["stage"], "CE-6")
+        self.assertEqual(state["tasks"], {"fight": True, "infrast": True, "recruit": True,
+                                          "mall": False, "award": True})
+        self.assertIs(state["annihilation"], False)
+        self.assertEqual(state["source"], "gui")
+        self.assertEqual(self.popen, [[sys.executable, str(self.scripts / "maa_daily.py"), "now", state["token"]]])
+        self.assertEqual(data["token"], state["token"])
+        self.assertIn("跳过信用商店、剿灭", message)
+        self.assertEqual(self.posted, [])  # 不发选关卡
+
+    def test_run_local_supersedes_a_pending_discord_card(self) -> None:
+        self._send_card()
+        old = self._state()["token"]
+        self.posted.clear()
+        ok, _, _ = self._local("1-7", self.ALL_ON)
+        self.assertTrue(ok)
+        self.assertNotEqual(self._state()["token"], old)
+        self.assertFalse([k for k in self._registry() if k.startswith(maa_action.MANUAL_RUN_BUTTON_PREFIX)])
+        self.assertTrue(self.posted)  # 旧卡被 PATCH 收起
+
+    def test_run_local_keeps_every_gate(self) -> None:
+        cases = [
+            (("rm -rf", self.ALL_ON), {}),
+            (("1-7", "{"), {}),
+            (("1-7", json.dumps({"stone": True})), {}),
+            (("1-7", json.dumps({"fight": "yes"})), {}),
+            (("1-7", json.dumps({k: False for k in maa_common.DEFAULT_TASKS})), {}),
+            (("1-7", self.ALL_ON), {"locked": True}),
+            (("1-7", self.ALL_ON), {"now": datetime(2026, 9, 9, 7, 45, tzinfo=BEIJING)}),
+            (("1-7", self.ALL_ON, "--yolo"), {}),
+        ]
+        with patch.object(maa_action, "_activity_output_allows", return_value=False):
+            for argv, kwargs in cases:
+                with self.subTest(argv=argv, kwargs=kwargs):
+                    ok, _, _ = self._local(*argv, **kwargs)
+                    self.assertFalse(ok)
+        self.assertFalse(self.manual.exists())
+        self.assertEqual(self.popen, [])
+
+    def test_force_only_lifts_the_scheduled_run_blackout(self) -> None:
+        near = datetime(2026, 9, 9, 7, 45, tzinfo=BEIJING)
+        ok, message, data = self._local("1-7", self.ALL_ON, now=near)
+        self.assertFalse(ok)
+        self.assertEqual(data["blocked"], "blackout")
+        ok, message, _ = self._local("1-7", self.ALL_ON, "--force", now=near)
+        self.assertTrue(ok, message)
+        self.assertTrue(self._state()["forced"])
+        self.assertIn("强行开跑", message)
+        ok, _, data = self._local("1-7", self.ALL_ON, "--force", locked=True)
+        self.assertFalse(ok)
+        self.assertEqual(data["blocked"], "locked")
+
+    def test_the_daily_applies_the_local_switches_only_to_that_run(self) -> None:
+        token = "b" * 12
+        seen: dict[str, Any] = {}
+
+        def capture(plan, *_args, **_kwargs):
+            seen["plan"] = dict(plan)
+            raise RuntimeError("stop-here")
+
+        state = {"token": token, "status": "dispatched", "stage": "CE-6",
+                 "tasks": {"fight": True, "infrast": False, "recruit": "no", "mall": True, "award": True},
+                 "annihilation": False}
+        maa_common.atomic_write_json(self.manual, state)
+        with patch.object(maa_daily, "MANUAL_RUN_PATH", self.manual), patch.object(
+            maa_daily, "state_lock", return_value=contextlib.nullcontext()
+        ), patch.object(maa_daily, "load_config", return_value={"channel_id": "123"}), patch.object(
+            maa_daily, "discord_token", return_value="t"
+        ), patch.object(maa_daily, "effective_plan", lambda at, phase: maa_common.normalize_plan({"stage": "1-7"})
+        ), patch.object(maa_daily, "attach_annihilation", lambda plan, *a, **k: {**plan, "annihilation": True}
+        ), patch.object(maa_daily, "attach_sanity_yield", side_effect=capture):
+            with self.assertRaisesRegex(RuntimeError, "stop-here"):
+                maa_daily.execute("now", token)
+        plan = seen["plan"]
+        self.assertEqual(plan["stage"], "CE-6")
+        self.assertFalse(plan["tasks"]["infrast"])
+        self.assertTrue(plan["tasks"]["recruit"])  # 不是真布尔：照默认
+        self.assertFalse(plan["annihilation"])
+        self.assertIn("关掉了剿灭", plan["annihilation_skip_reason"])
+        # Discord 选关卡派发的请求没有开关：原样。
+        self.assertEqual(maa_daily.apply_local_switches(maa_common.normalize_plan({}), {"stage": ""}),
+                         maa_common.normalize_plan({}))
+
     def test_the_daily_without_a_token_keeps_the_defaults(self) -> None:
         code, plan, alerts = self._execute("", {"token": "a" * 12, "status": "dispatched", "stage": "CE-6"})
         self.assertEqual(code, "reached-plan")

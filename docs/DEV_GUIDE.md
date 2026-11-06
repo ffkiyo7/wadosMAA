@@ -655,6 +655,7 @@ executed / execution_failed`，另有 `canceled` / `superseded`。
 | `run now` | **不开跑**。抢锁探测 → 拒绝窗（`manual_run_blackout_minutes`，默认 30）→ 预检 → 作废上一张 pending 选关卡 → 发「🎯 手动场选关」卡（选项 = `maa_plan_card._stage_choices()`，无 default）→ 写 `manual_run.json`（`pending`，10 分钟 TTL）→ `Popen` 过期哨兵 + 推荐补写后返回（`PLAN_MANUAL_RUN.md`） |
 | `run start <关卡> <token>` | **只由选关卡登记表触发**。token 匹配且 `pending` 且未过期 → 关卡白名单 → 锁 → 拒绝窗 → 预检 → 状态改 `dispatched` → 删登记 → 收卡 → `Popen maa_daily.py now <token>`。过期就地收卡（硬闸门） |
 | `run expire <token> [--after 秒]` | 过期哨兵（`run now` 派的脱离会话子进程）：睡够后若仍 `pending` 且到期 → `expired` + 删登记 + PATCH 收卡；幂等 |
+| `run local <关卡> <开关 JSON> [--force]` | **只给 Wado's MAA**（`dispatch_gui()`，Discord 够不着）。不发选关卡：关卡白名单 → 开关校验（`fight/infrast/recruit/mall/award/annihilation`，只认真布尔，五项全关拒绝）→ 锁 → 拒绝窗（`--force` 只跳过这一条，锁冲突永远不能强行）→ 预检 → 收掉 Discord 上没选的选关卡（`superseded`）→ 写 `manual_run.json`（`dispatched` + `tasks` / `annihilation` / `source` / `forced`）→ `Popen maa_daily.py now <token>`。`maa_daily.apply_local_switches()` 只把开关叠到这一场的计划上，不进 `plan.json`（M4） |
 | `run recommend <token>` | 推荐补写（同上，脱离会话）：`current_farming_result` → `auto_stage`，仍 `pending` 才 PATCH 卡片写「缺口推荐」并给该选项打 🎯；算不出写「推荐暂不可用」 |
 | `log tail` | 读 `last_run.summary`；若是旧版格式则回读 log 用 `extract_summary` 重建 |
 | `copilot card` | 发抄作业一览卡（§3）。只读本地 + 一次 Discord POST，同步做完 |
@@ -979,7 +980,9 @@ Discord 肉鸽卡和 `hermes:btn:maa-roguelike:` 前缀、`roguelike.json`、原
   manual_run.json 手动场选关请求（单文件、同一时刻只有一个）：{token, status ∈ pending/
                   dispatched/expired/superseded, stage, choices, recommendation,
                   recommended_stage, message_id, created_at, expires_at(+10min), …}
-                  手动关**只经它**传给 `maa_daily.py now <token>`，不进 plan.json
+                  手动关**只经它**传给 `maa_daily.py now <token>`，不进 plan.json；
+                  Wado's MAA 的 `run local` 另带 tasks / annihilation（这一次的环节开关）、
+                  source、forced
   last_run.json   最近一次运行状态 + threads[] + 资源更新时间戳
   activity_watch.json 当前活动 + 本轮 token + 每关搜索失败退避（stage_state）+
                       idle/searching/waiting/done/scheduled/dispatched/running 状态

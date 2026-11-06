@@ -644,6 +644,102 @@ def run_start(stage: str, token: str) -> tuple[bool, str]:
     )
 
 
+# 「这一次」的环节开关（K12）：`tasks.*` 五项加剿灭。只对这一场手动场生效，不进 plan.json。
+LOCAL_RUN_SWITCHES = (*maa_common.DEFAULT_TASKS, "annihilation")
+
+
+def _local_run_switches(raw: str) -> dict[str, bool]:
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"环节开关不是合法的 JSON：{exc.msg}") from exc
+    if not isinstance(value, dict) or set(value) - set(LOCAL_RUN_SWITCHES):
+        raise ValueError(f"环节开关只接受 {' / '.join(LOCAL_RUN_SWITCHES)}")
+    if any(not isinstance(item, bool) for item in value.values()):
+        raise ValueError("环节开关只能是 true / false")
+    switches = {key: bool(value.get(key, True)) for key in LOCAL_RUN_SWITCHES}
+    if not any(switches[key] for key in maa_common.DEFAULT_TASKS):
+        raise ValueError("五个环节全关了，这一场什么都不做")
+    return switches
+
+
+def run_local(stage: str, raw_switches: str, *flags: str) -> tuple[bool, str, dict[str, Any]]:
+    """Wado's MAA 的「开始」（K4 / K12）：不发选关卡，直接按 GUI 给的关和环节派发。
+
+    走的是和选关卡同一条路：写 `manual_run.json`（`dispatched` + 这一次的 `tasks`）→
+    `maa_daily.py now <token>`。所以照样持 `run.lock`、摆窗口、截图核验、发 Discord 开跑和战报；
+    参数只对这一场生效，不进 `plan.json`（M4）。定时场优先照旧（M10）；`--force` 只跳过这一条，
+    由 GUI 在用户确认后传，锁冲突永远不能强行。
+    """
+    force = "--force" in flags
+    if set(flags) - {"--force"}:
+        return False, "只认 --force 一个选项。", {}
+    config = load_config()
+    if not valid_stage(stage, config):
+        return False, "关卡不在白名单：只接受常规关卡格式（如 CE-6、1-7）、空串（上次的本）或当前活动关。", {}
+    try:
+        switches = _local_run_switches(raw_switches)
+    except ValueError as exc:
+        return False, str(exc), {}
+    if is_run_locked():
+        phase, running = _running_context()
+        return False, f"{phase}已经在跑 {running}，等它结束后再开。", {"blocked": "locked"}
+    now = now_beijing()
+    reason = manual_run_blackout_reason(config, now)
+    if reason and not force:
+        return False, f"⛔ {reason}", {"blocked": "blackout", "reason": reason}
+    script = SCRIPTS_DIR / "maa_daily.py"
+    if not script.is_file():
+        return False, "maa_daily.py 尚未部署。", {}
+    try:
+        require_executable(config, "maa_bin", "/opt/homebrew/bin/maa", "maa-cli")
+        maa_playcover.verify_game_installed(config)
+    except RuntimeError as exc:
+        return False, f"暂时不能运行：{exc}", {}
+    warning = ""
+    try:
+        # Discord 上还挂着一张没选的选关卡：收掉，免得两边各派一场。
+        _retire_manual_run(config, "superseded", "已被 Wado's MAA 的手动场取代")
+    except Exception as exc:  # noqa: BLE001 — (c) 收卡尽力而为，本地状态已先改掉
+        warning = f"；旧选关卡收起失败：{type(exc).__name__}: {exc}"
+    token = _new_search_token()
+    tasks = {key: switches[key] for key in maa_common.DEFAULT_TASKS}
+    state: dict[str, Any] = {
+        "token": token,
+        "status": "dispatched",
+        "stage": stage,
+        "tasks": tasks,
+        "annihilation": switches["annihilation"],
+        "source": action_source(),
+        "forced": bool(reason) and force,
+        "created_at": now.isoformat(),
+        "dispatched_at": now.isoformat(),
+        "updated_at": now.isoformat(),
+        "expires_at": (now + MANUAL_RUN_TTL).isoformat(),
+    }
+    with state_lock():
+        _save_manual_run(state)
+    subprocess.Popen(
+        [sys.executable, str(script), "now", token],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    skipped = [TASK_NAMES[key] for key in maa_common.DEFAULT_TASKS if not tasks[key]]
+    if not switches["annihilation"] and tasks["fight"]:
+        skipped.append("剿灭")
+    tail = f"，跳过{'、'.join(skipped)}" if skipped else ""
+    forced = "（已确认在定时场前强行开跑）" if state["forced"] else ""
+    return (
+        True,
+        f"▶️ 已派发手动场，刷 {plan_stage_label(state)}{tail}{forced}；"
+        f"开跑消息稍后出现在 Discord{warning}。",
+        {"token": token, "stage": stage, "tasks": tasks, "annihilation": switches["annihilation"]},
+    )
+
+
 def run_expire(token: str, after: int = 0) -> tuple[bool, str]:
     """到期收卡（M-d）。幂等：不是这个 token 的 pending 请求、或还没到期，就什么都不做。"""
     if after > 0:
@@ -1557,6 +1653,8 @@ def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
         return defaults_show()
     if argv[:2] == ["defaults", "set"] and len(argv) in (4, 5):
         return defaults_set(argv[2], *argv[3:])
+    if argv[:2] == ["run", "local"] and 4 <= len(argv) <= 5:
+        return run_local(argv[2], argv[3], *argv[4:])
     if argv == ["schedule", "show"]:
         return schedule_show()
     if argv[:2] == ["schedule", "set"] and len(argv) == 4:
