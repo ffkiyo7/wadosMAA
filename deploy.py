@@ -102,6 +102,8 @@ PRESERVED_RUNTIME_CACHE_KEYS = (
 # 这本身就是一种**不升版本号的迁移**：只删键、不改既有键的含义，新旧脚本都能读，
 # 所以不必动 `schema_version`。要改既有键的含义 / 结构时才走 `CONFIG_MIGRATIONS`。
 RETIRED_CONFIG_KEYS = (
+    # 肉鸽整套移除（K16），改用 Wado's MAA 里的上游肉鸽。
+    "roguelike_run_timeout",
     "clearing_enabled",
     "clearing_manual_after_days",
     "clearing_annihilation_sanity",
@@ -230,9 +232,7 @@ SCRIPT_NAMES = (
     "maa_copilot.py",
     "maa_farming.py",
     "maa_gamedata.py",
-    "maa_roguelike.py",
     "maa_copilot_worker.py",
-    "maa_roguelike_worker.py",
     "maa_skland.py",
 )
 # swiftc 编译产物：线上是二进制，`--check` 只查存在。

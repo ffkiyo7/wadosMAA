@@ -282,7 +282,7 @@ def game_is_online(config: Config) -> tuple[bool, str]:
     """游戏是不是已经开着——也就是「用户此刻在玩」？
 
     在**每一条自动链路**抢到 `run.lock` 之后、`launch_game()` 之前调用（日常 am/pm、
-    抄作业 `run-batch`、Depot、肉鸽）：任何失败路径都会 `close_game()`，开着就跑
+    抄作业 `run-batch`、Depot）：任何失败路径都会 `close_game()`，开着就跑
     等于把正在玩的人踢下线。MaaTools 跑在游戏进程里，进程不在端口必然不在，
     所以只看进程一个信号。
 

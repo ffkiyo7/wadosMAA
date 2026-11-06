@@ -1,6 +1,6 @@
 """状态文件 `schema_version`（DEV_GUIDE §6.1）的单测。
 
-覆盖 `config.json` / `plan.json` / `last_run.json` / `manual_run.json` / `roguelike.json`：
+覆盖 `config.json` / `plan.json` / `last_run.json` / `manual_run.json`：
 每个文件都有「旧格式无版本号照常能读」「未知高版本」两类用例，外加写入点带版本号、
 `deploy_state()` 的 config 迁移。全部在临时目录里，不碰真实 `~/.hermes`。
 """
@@ -29,7 +29,6 @@ import maa_common  # noqa: E402
 import maa_daily  # noqa: E402
 import maa_farming  # noqa: E402
 import maa_plan_card  # noqa: E402
-import maa_roguelike  # noqa: E402
 import deploy  # noqa: E402
 
 
@@ -131,7 +130,7 @@ class CheckSchemaTests(unittest.TestCase):
 class EveryReadIsCheckedTests(unittest.TestCase):
     """不变量 #58：读这几份状态文件的 `load_json()` 必须直接包在 `check_schema()` 里。"""
 
-    GUARDED_PATHS = {"CONFIG_PATH", "PLAN_PATH", "LAST_RUN_PATH", "MANUAL_RUN_PATH", "STATE_PATH"}
+    GUARDED_PATHS = {"CONFIG_PATH", "PLAN_PATH", "LAST_RUN_PATH", "MANUAL_RUN_PATH"}
 
     def test_every_state_read_goes_through_check_schema(self) -> None:
         checked = 0
@@ -150,7 +149,7 @@ class EveryReadIsCheckedTests(unittest.TestCase):
                     continue
                 names = {n.id for n in ast.walk(node.args[0]) if isinstance(n, ast.Name)}
                 guarded = names & self.GUARDED_PATHS
-                if not guarded or (script.name != "maa_roguelike.py" and guarded == {"STATE_PATH"}):
+                if not guarded:
                     continue
                 parent = parents.get(node)
                 with self.subTest(script=script.name, line=node.lineno):
@@ -333,32 +332,6 @@ class ManualRunSchemaTests(TempDirTestCase):
         maa_action._save_manual_run({"token": "abc", "status": "pending"})
         self.assertEqual(read(self.path)["schema_version"], maa_common.MANUAL_RUN_SCHEMA_VERSION)
         self.assertEqual(maa_action._load_manual_run()["status"], "pending")
-
-
-class RoguelikeSchemaTests(TempDirTestCase):
-    def setUp(self) -> None:
-        super().setUp()
-        self.path = self.dir / "roguelike.json"
-
-    def test_a_legacy_state_without_a_version_loads(self) -> None:
-        write(self.path, {"status": maa_roguelike.RUNNING, "theme": "Sami"})
-        state = maa_roguelike.load_state(self.path)
-        self.assertEqual(state["status"], maa_roguelike.RUNNING)
-        self.assertEqual(state["theme"], "Sami")
-
-    def test_an_unknown_newer_state_refuses(self) -> None:
-        write(self.path, {"schema_version": FUTURE, "status": maa_roguelike.IDLE})
-        with self.assertRaisesRegex(maa_common.SchemaVersionError, "roguelike.json"):
-            maa_roguelike.load_state(self.path)
-
-    def test_a_broken_state_still_reads_as_empty(self) -> None:
-        write(self.path, ["not", "an", "object"])
-        self.assertEqual(maa_roguelike.load_state(self.path)["status"], maa_roguelike.IDLE)
-        self.assertEqual(maa_roguelike.load_state(self.dir / "missing.json")["status"], maa_roguelike.IDLE)
-
-    def test_save_stamps_the_version(self) -> None:
-        maa_roguelike.save_state(maa_roguelike.load_state(self.path), self.path)
-        self.assertEqual(read(self.path)["schema_version"], maa_roguelike.STATE_SCHEMA_VERSION)
 
 
 class DeployConfigMigrationTests(TempDirTestCase):

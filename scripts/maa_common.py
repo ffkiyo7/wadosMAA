@@ -51,7 +51,6 @@ MANUAL_RUN_PATH = STATE_DIR / "manual_run.json"
 MANUAL_RUN_TTL = timedelta(minutes=10)
 # 状态文件格式版本（DEV_GUIDE §6.1）。写入时带上，读取时过 `check_schema()`：
 # 缺字段视作 1，更高的未知版本——config / plan / manual_run 拒跑，last_run 告警宽读。
-# `roguelike.json` 的版本号在 `maa_roguelike.STATE_SCHEMA_VERSION`。
 # **改了某个文件的格式**：把它的版本号 +1，并在调用处给 `check_schema()` 传上
 # `{旧版本: 迁移函数}`；config.json 的迁移另放 `deploy.py` 的 `CONFIG_MIGRATIONS`。
 CONFIG_SCHEMA_VERSION = 1
@@ -204,7 +203,6 @@ class Config(TypedDict, total=False):
     skland_roster_refresh_days: int
     auto_copilot_min_lead_minutes: int
     auto_copilot_max_attempts_per_day: int
-    roguelike_run_timeout: int
     annihilation_sanity: int
     depot_timeout: int
     operbox_timeout: int
@@ -272,9 +270,9 @@ class LastRunThread(TypedDict, total=False):
 
 
 class LastRun(TypedDict, total=False):
-    """`last_run.json`：日常 / 抄作业 / 肉鸽 / depot / 资源更新都往里 merge。
+    """`last_run.json`：日常 / 抄作业 / depot / 资源更新都往里 merge。
 
-    `phase` 不是 `Phase`：抄作业和肉鸽写的是 `copilot-<token>` / `roguelike-<token>`。
+    `phase` 不是 `Phase`：抄作业写的是 `copilot-<token>`。
     """
 
     schema_version: int

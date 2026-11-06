@@ -1575,14 +1575,12 @@ class EmulatorProbeSharedTests(unittest.TestCase):
 
     def test_there_is_exactly_one_probe_implementation(self) -> None:
         import maa_copilot_worker
-        import maa_roguelike_worker
 
         for module in (
             maa_daily,
             maa_depot,
             maa_action,
             maa_copilot_worker,
-            maa_roguelike_worker,
         ):
             with self.subTest(module=module.__name__):
                 # 调用方只经 `maa_playcover.game_is_online()` 走，不留自己的同名引用。

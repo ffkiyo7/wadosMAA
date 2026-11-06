@@ -181,15 +181,13 @@ stdout 不投递到 Discord（消息由脚本自己用 Discord REST API 发）�
 | `scripts/maa_copilot.py` | 抄作业领域层（纯函数）：关卡索引、prts 客户端、匹配打分、目标集合、**本地作业记账**（`ledger.json`）、已排程卡 | 被 action/watch/worker/plan_card import | — |
 | `scripts/maa_copilot_worker.py` | 抄作业后台：`search <token>` 手动搜一关并直接排程；`run-batch <token>` **一条执行链**串行连抄一轮 | 仅由 `maa_action.py` / `maa_activity_watch.py` 派发 | 搜索 5~20s；一关 8~15 分钟 |
 | `scripts/maa_farming.py` | **素材权重领域层**：一图流 / 企鹅物流抓取层（缓存在 `state/maa/farming/`）+ 三项加权分纯函数（稀缺 / 缺口 / 效率）+ 候选关集合（D5）+ `stage_ap_cost()` 兜底 | 被 plan_card / activity_watch import | 有缓存 <0.5s；冷缓存 3~10s（下 1.4 MB matrix） |
-| `scripts/maa_roguelike.py` | **肉鸽领域层**（纯函数 + 一份状态文件）：主题 / 模式 / 难度 / 分队字典、下拉选项、`render_task_toml()`、上游输出解析、配置卡 | 被 action / roguelike worker import | — |
-| `scripts/maa_roguelike_worker.py` | **肉鸽后台**：`run <token>` 抢锁 → 开机 → **一局一个子进程**地循环 → 逐局进度 → 汇总战报 | 仅由 `maa_action.py` 派发 | 一局十几~几十分钟 × N |
 | `scripts/maa_clearing.py` | 作业链领域层（近纯函数）：条目形态（`#raid` 后缀）、上游导航键闸门、理智预算与排轮、搜索失败退避记账、通关判据 | 被 action/watch/worker/plan_card import | — |
 | `scripts/maa_skland.py` | 森空岛协议：stdlib HMAC 签名、grant→cred 链、练度与理智拉取、`link`（stdin 收 token） | 本机终端；手动搜索强制刷新（失败即失败）；watcher 在「有未执行的关」的 tick 刷新；每关开打前再刷一次 | 秒级 |
 | `scripts/ocrbox.swift` | macOS Vision OCR 小工具（编译为 `~/.hermes/scripts/ocrbox`），watchdog 识别接管弹窗 | 被 worker 调用 | <1s/次 |
 | `deploy.py` | 幂等部署 + 给 Hermes 打本地补丁 + 备份 + 编译 ocrbox | 人工 | 秒级 |
 | `skills/games/maa-operator/SKILL.md` | 约束 LLM 只能走 `maa_action.py` 的护栏 | gateway 按频道绑定加载 | — |
-| `scripts/maa_playcover.py` | **设备层**（§0.5）：探测、开游戏、等 MaaTools、摆窗口、截图、点击、关游戏 | 被日常 / Depot / 抄作业 / 肉鸽 import | — |
-| `tests/test_*.py` | stdlib 单测，不碰游戏（§0.5），按领域分文件：`test_plan` / `test_plan_card` / `test_daily` / `test_depot` / `test_farming` / `test_activity_watch` / `test_clearing` / `test_copilot` / `test_copilot_worker` / `test_roguelike` / `test_skland` / `test_deploy` / `test_playcover` / `test_state_schema` / `test_isolation`；共用桩在 `tests/_helpers.py`，隔离层在 `tests/_isolation.py`（§9） | 人工 | 约 6s |
+| `scripts/maa_playcover.py` | **设备层**（§0.5）：探测、开游戏、等 MaaTools、摆窗口、截图、点击、关游戏 | 被日常 / Depot / 抄作业 import | — |
+| `tests/test_*.py` | stdlib 单测，不碰游戏（§0.5），按领域分文件：`test_plan` / `test_plan_card` / `test_daily` / `test_depot` / `test_farming` / `test_activity_watch` / `test_clearing` / `test_copilot` / `test_copilot_worker` / `test_skland` / `test_deploy` / `test_playcover` / `test_state_schema` / `test_isolation`；共用桩在 `tests/_helpers.py`，隔离层在 `tests/_isolation.py`（§9） | 人工 | 约 6s |
 | `.github/workflows/tests.yml` | CI：macOS 上 3.11 / 3.12 × 两种 HOME 跑单测，外加 ruff + pyright（§9「CI」） | push 到 `playcover` / PR | 几分钟 |
 
 ---
@@ -483,7 +481,7 @@ executed / execution_failed`，另有 `canceled` / `superseded`。
    关掉，等于把正在玩的用户踢出游戏。`now` 不走这条闸门（用户明确要求照跑）。
    探测预算 5s、失败按离线处理照常执行——**宁可误抢一次设备，也不能因为探测自己坏了
    就永久停摆**（不变量 #24）。
-   **实现只有一份**，在 `maa_playcover.py`：日常、抄作业 `run-batch`、Depot、肉鸽四条自动
+   **实现只有一份**，在 `maa_playcover.py`：日常、抄作业 `run-batch`、Depot 三条自动
    链路共用它（四期 D18）。`maa_daily.report_game_busy()` 只是把日常的文案与
    `last_run` 字段套进 `maa_common.report_game_busy()` 的薄封装。
    > 别和第 7 步之后的 `settle_game_window()` 搞混：那个在**开游戏之后**跑，确认窗口在台前；
@@ -664,11 +662,6 @@ executed / execution_failed`，另有 `canceled` / `superseded`。
 | `copilot status <token>` | 只读这一轮的状态 |
 | `copilot cancel <token>` | 只在 `scheduled` / `queued` 可取消；开跑后按钮已被收起 |
 | `copilot auto <off\|on\|status>` | 暂停 / 恢复 watcher 的自动作业（不变量 #55）；同步做完 |
-| `roguelike card` | 发肉鸽配置卡（§5.7）。只读本地 + 一次 Discord POST，同步做完 |
-| `roguelike set <theme\|mode\|difficulty\|squad> <值>` | 只写 `roguelike.json.pending`，**不派发**；`theme` 额外重发一张卡 |
-| `roguelike start` | 过 `dispatch_blocker()` → 冻结 `params` → `Popen(roguelike worker run <token>)` |
-| `roguelike stop` / `abort` | 只写 `stop_requested_at` / `abort_requested_at`（<20s），真正收手在 worker |
-| `roguelike status` | 只读汇报本轮参数与逐局结果 |
 
 `maa_action.py` 还导出两个**给别的进程用**的函数（它是唯一的派发入口）：
 `publish_round()`（发「已排程」卡 + 登记它唯一的取消按钮）与 `dispatch_batch(token)`
@@ -814,8 +807,6 @@ executed / execution_failed`，另有 `canceled` / `superseded`。
    现在的写法：写完标记 `handle.flush()` → 记下 `os.fstat(handle.fileno()).st_size`
    → 事后 `_log_since(log_path, offset)` 从这个**字节偏移**读。按偏移切比按标记
    `rsplit` 稳：偏移是标记落盘之后取的，同一个标记出现两次也不怕。
-   （`maa_roguelike_worker._run_one_exploration()` 本来就对：它把标记写在一个
-   **单独的 `with` 块**里，块退出即 flush，才开第二个 handle 给子进程。）
 10. **解锁预检是单向的**（`zone_progress_warning`）：森空岛的 zone 进度含剧情关、
    `stage_id` 序号只数战斗关——两把尺子。因此只有 `cleared < seq`（突袭必锁）和
    `cleared < seq-1`（关卡必锁）两个方向成立；**有警告 = 基本锁着，没警告 = 不知道**，
@@ -968,119 +959,11 @@ executed / execution_failed`，另有 `canceled` / `superseded`。
 
 ---
 
-## 5.7 链路五：肉鸽（`maa_roguelike.py` + `maa_roguelike_worker.py`）
+## 5.7 链路五：肉鸽（已移除）
 
-**手动触发、上游全托管、优雅停止**（四期 D19，spike C 的结论全文在
-`docs/spikes/roguelike-2026-09-08.md`）。肉鸽**不消耗理智**，不进理智预算、
-不触发日常让路；但它一样开模拟器、一样持 `run.lock`，所以闸门一条不少。
-
-```
-聊天「刷肉鸽」
-  → maa_action.py roguelike card       只读本地，一次 POST，同步做完（<20s）
-      ├─ 收旧卡：retire_discord_components(roguelike.json.message_id) → 删旧登记
-      ├─ state_lock() 下 merge 写 hermes:btn:maa-roguelike:{theme,mode,difficulty,squad}-select
-      │                            + {start,stop,abort}
-      └─ 发卡（4 个下拉 + 1 行 3 个按钮 = 正好 5 行）→ message_id 写回 roguelike.json
-  下拉选中 → select_args → roguelike set <字段> <值> → 只写 pending
-      └─ 字段是 theme 时：整份 pending 重置成新主题的默认 + **重发一张卡**
-  「▶️ 开始」→ roguelike start → dispatch_blocker() → 冻结 params → Popen(worker)
-                       │
-                       ▼
-      maa_roguelike_worker.py run <token>
-   ├─ run_lock(blocking=False)：抢不到 → 灰卡 + 状态回 idle
-   ├─ emulator_is_online()：在线 → 灰卡，什么都不碰（不变量 #24）
-   ├─ while：
-   │    读 abort_requested_at / stop_requested_at（**局间**才读 stop）
-   │    _next_round_blocker()  blackout / Depot 窗口 → 不开新局
-   │      首局就被挡 → 一次都不开机，灰卡「本轮未启动：<原因>」+ 照发战报
-   │    首局（且只有首局）走开机链：open_emulator / wait_for_android
-   │                                / verify_game_installed / settle_android_runtime
-   │    _isolated_config() 写 tasks/roguelike.toml（**StartUp → Roguelike**，每局都跑）
-   │    Popen([maa, run, roguelike, --user-resource, --batch, -v])
-   │      └─ 每 2s 轮询 abort_requested_at 与单局超时 → terminate() → wait(10) → kill()
-   │    parse_run_output() → 追加 runs[] → 发一条进度
-   │    储备满（TraderInvestSystemFull）/ 连续 2 局 Roguelike Error → 收尾
-   └─ 截图 → close_everything() → 汇总战报（局数 / 耗时 / 上游 summary 段 / 停止原因）
-```
-
-**为什么走 `maa run` 任务文件而不是 `maa roguelike` 子命令**（spike C 第 1、6.7~6.10 节）：
-maa-cli 0.7.5 的 `Theme` 枚举里**没有 `BlackFlow`**、`mode` 硬校验 `0..=5`
-（MaaCore 另有 `6/7/10001/20001/30001`）、`stop_when_investment_full` 与 Sami 的
-`use_foldartal` 两处默认值和协议**相反**、Phantom 主题的 `--difficulty` 被直接丢弃，
-还有 12 个 MaaCore 字段 CLI 覆盖不到（`blackflow_strategy` 就在里面）。
-任务文件的 `[tasks.params]` 是自由 JSON/TOML 透传，一次绕开全部这些坑；
-写法照 `_navigation_config()`：临时 `MAA_CONFIG_DIR`，只读上游 resource、只写临时目录。
-
-**每局的任务链以 `StartUp` 开头**（2026-09-11 真机事故的修复）：开机链
-（`open_emulator / wait_for_android / verify_game_installed / settle_android_runtime`）
-只负责拉起**模拟器**，项目里从来没有一步去启动明日方舟——拉起游戏的一直是
-MaaCore 的 `StartUp`（`daily.toml` 第一段、抄作业的 `NAV_TOML_TEMPLATE` 第一段）。
-肉鸽的任务文件最初漏了这一段，真机现象是：模拟器冷启成功、停在 Android 桌面，
-MaaCore 直接 `Roguelike Start → Roguelike Error`，37 秒退出码 1，连挂两局后
-worker 按「连续 2 局上游报错」收尾判失败（`runs/2026-09-11-roguelike-*.log`）。
-现在 `render_task_toml()` 渲染的是 `StartUp`（`client_type = "Official"`,
-`start_game_enabled = true`）→ `Roguelike` 两段，**放在领域层而不是 worker**：
-每局一个子进程、MaaCore 每次都销毁重连，没有「上一局已经登录过」这种跨进程状态可依赖，
-和抄作业写法一致且只有一处单测。
-第 2 局及之后是**幂等**的：上游 `StartUp` 在游戏已在前台时不重复启动，走「确认停在
-主界面」那条链（抄作业连抄多关就靠下一关的 `StartUp` 从上一关结算页回主界面，
-2026-09-09 03:06 SR-5 → SR-6 的真机日志；另见 §11.13 补跑那条）。上一局用尽
-`starts_count` 时 MaaCore 停在**主题入口页**，同一条 `EndOfAction → ClickCorner`
-返回链适用；万一认不出来，`StartUp Error` 之后 MaaCore 仍会继续跑 `Roguelike`，
-而 `<Theme>@Roguelike@Begin` 自带善后链，最坏只是白花几十秒。
-**「第 2 局的 StartUp 从主题入口页回主界面」尚未真机验收。**
-输出侧的适配：`parse_run_output()` 认 `StartUp Error` 写进 `startup_failed`，
-并在**整局什么都没发生**时把结论收敛成 `error`——否则它落进 `unknown`，
-worker 的「连续 2 局报错就收尾」闸门不生效，会一局接一局空转。
-
-**为什么每局一个子进程**（spike C 第 3.4~3.5 节）：MaaCore 只有两个「干净收手点」——
-`starts_count` 用尽（**准备开第 N+1 局的那一刻**停，即第 N 局已结算、人在主题入口页）
-和投资达标 / 储备满时的 `exit_then_stop(abandon=true)`；而 `AsstStop` 是**立即中止**，
-停在哪算哪，也没有 API 能在运行中把 `starts_count` 改小。所以
-`starts_count = 1` + worker 在**局间**读停止标志，就是「收到指令后本局结束再停」的
-全部实现。每局重连开销实测约 1 秒（asst.log 两次子进程 0.9 / 1.2 s），相对一局
-十几分钟可以忽略；换来的是每局一条进度、每局一个天然取消点、单局崩了不带走整轮。
-
-**为什么 `Popen` 而不是 `subprocess.run(timeout=)`**（spike C 第 6.6 节）：
-`subprocess.run` 超时走的是 `kill()`（SIGKILL），MaaCore 来不及 destroy，
-模拟器会被留在地图里。maa-cli 收到 **SIGTERM** 才走 `bail!("Interrupted by user!")`
-那条路（第二次同类信号会被内核直接杀掉），所以中止一律
-`terminate()` → `wait(10)` → 万不得已才 `kill()`。
-
-**同主题重启约束**（spike C 第 3.3 节，上游 issue #13245）：上游
-`<Theme>@Roguelike@Begin` 的 `Continue → ExitThenAbandon → AbandonConfirm` 善后链
-**只在同主题下**成立，跨主题会死循环。所以一局开跑**之前**就先把
-`dirty = true` / `last_theme = <主题>` 落盘（进程被杀也留得住），只有
-`Roguelike Completed` **且**退出码 0 才清掉；`dirty` 时 `roguelike start`
-拒绝换主题并告诉用户先用同主题跑一局收尾。
-
-**崩溃残留的自愈**（`round_is_stale()`）：worker 整轮（含局间）都持着 `run.lock`，
-所以「状态说 `running` **但锁是空的** **且** 状态 10 分钟没更新过」只可能是 worker 进程
-没了（崩溃 / 被 kill / 重启）。这时 `roguelike start` 与 `roguelike set` 放行，
-`start` 直接按新的一轮重开并在回执里说明。两条判据缺一不可：只看锁会把
-「`roguelike start` 写完状态、worker 还没抢到锁」那几秒误判成崩溃。
-`dirty` / `last_theme` **不清**——残局还在游戏里。
-
-**输出解析**（spike C 第 4 节，`maa_roguelike.parse_run_output()`）：
-一局开始 `Start exploration N times`、一局结算 `Gain N exp during this exploration`、
-放弃 `Exploration Abandoned`、投资 `Deposit a / b / c originium ingots`（储备上限 999）、
-储备满 `TraderInvestSystemFull`、干净结束 `Roguelike Completed`、
-被中断 `Roguelike Stopped`、出错 `Roguelike Error`、
-游戏没起来 `StartUp Error`（→ `startup_failed`，见上）。
-`RoguelikeInvestmentReachLimit / ReachFull` 两个回调 maa-cli 不打印（要 `-vvv`），
-所以「投资满因此收手」靠 `TraderInvestSystemFull` + 随后的 `Roguelike Completed` 判。
-结尾的 `Explorations: … Summary:` 段由 `parse_summary()` 拆成字段、
-`summary_fields()` 渲染成中文——**不能整段贴进 Discord**（不变量 #9）。
-
-**卡片为什么是 4 个下拉**：Discord 一张卡最多 5 个 action row，select 独占一行，
-每个 select ≤ 25 项。主题 6 项、模式 ≤4 项、难度 ≤21 项（不指定 + MAX + n..0，
-上限 Phantom/Sami/BlackFlow 15、Mizuki/Sarkaz/JieGarden 18）、分队 ≤19 项
-（主题专属 + 通用 6 个 + 高规格，**只有 BlackFlow 不加高规格**）——正好塞得下。
-职业组（`roles`）不占 UI，按主题映射（傀影 `取长补短`，其余 `稳扎稳打`）；
-`core_char` 留空让上游按练度选；`use_support` **永不传**。
-**黑流树海是例外**：MaaCore v6.17.0 起它只有三个策略，模式下拉直接映射
-`blackflow_strategy`（`burn` / `investment` / `baby_animal`，后者带
-`blackflow_cultivation_target = swaddled_cat` 且 `mode = 30001`）。
+2026-11-06 起 maa-remote 的肉鸽整套删除（K16）：`maa_roguelike.py`、worker、`roguelike *` 命令、
+Discord 肉鸽卡和 `hermes:btn:maa-roguelike:` 前缀、`roguelike.json`、原不变量 #46–#50。
+改用 Wado's MAA 里的上游肉鸽（它照样先抢 `run.lock`，见 §12）。
 
 ---
 
@@ -1118,16 +1001,6 @@ worker 的「连续 2 局报错就收尾」闸门不生效，会一局接一局�
   copilot/searches/<token>.json 一轮的执行清单 `entries: [{stage, stage_id, mode,
                       candidate, sanity_cost}]` + scheduled_at + 状态机（25h TTL）
   copilot/card.json 上一张抄作业卡的 message_id（0600）。**不能放进 copilot/searches/**
-  roguelike.json  肉鸽一轮的全部状态（0600）：{status: idle|running|stopping, theme,
-                  params（开始那一刻冻结的 MaaCore 参数）, pending（卡上选了但还没开始的）,
-                  token, message_id（上一张卡）, started_at,
-                  runs: [{n, started_at, ended_at, outcome, invest, exp, detail}],
-                  stop_requested_at, abort_requested_at, last_theme, dirty, updated_at}
-                  `updated_at` 不是装饰：`round_is_stale()` 靠「状态说在跑 + 锁是空的 +
-                  它超过 10 分钟没动」认出崩掉的 worker，否则一次崩溃会把功能永久锁死
-                  **两个进程同时写它**：按钮写 pending / 两个停止标志，worker 写
-                  runs / dirty / status，所以一律走 `maa_roguelike.update_state()`
-                  （`state_lock` 下 read-modify-write），不许整份覆盖
   run.lock        flock 独占锁（执行）
   last_run.lock   flock 独占锁（保护 last_run.json 的跨进程 read-modify-write）
   am/ pm/         空目录，仅用于给 cron 传场次
@@ -1177,7 +1050,7 @@ result = normalize_plan(result)             ← 再规范化一次
 
 ### 6.1 状态文件格式版本（`schema_version`）
 
-`config.json` / `plan.json` / `last_run.json` / `manual_run.json` / `roguelike.json` 顶层带
+`config.json` / `plan.json` / `last_run.json` / `manual_run.json` 顶层带
 `schema_version`（整数，现在都是 1）。`depot.json`（`maa_depot.SCHEMA_VERSION`）、
 `copilot/ledger*.json`（`maa_copilot.LEDGER_SCHEMA_VERSION`）早就有自己的版本号，约定一致。
 
@@ -1186,7 +1059,6 @@ result = normalize_plan(result)             ← 再规范化一次
 | `config.json` | `maa_common.CONFIG_SCHEMA_VERSION` | 种子 `state/config.json` 经 `deploy_state()` merge；运行时改写保留原值 | **拒跑**（`load_config()` 抛）；`deploy_state()` 拒绝部署 |
 | `plan.json` | `PLAN_SCHEMA_VERSION` | `maa_action._save_override()`、`maa_plan_card.apply_auto_stage()`、种子 | **拒跑** |
 | `manual_run.json` | `MANUAL_RUN_SCHEMA_VERSION` | `maa_action._save_manual_run()` | **拒跑** |
-| `roguelike.json` | `maa_roguelike.STATE_SCHEMA_VERSION` | `maa_roguelike.save_state()` | **拒跑**（`load_state()` 抛；结构不对仍读成空状态） |
 | `last_run.json` | `LAST_RUN_SCHEMA_VERSION` | `merge_last_run()`、`cleanup_old_threads()`、种子 | stderr 告警一条，按现有 normalize **宽读**（它只用于汇报） |
 
 读的规则都在 `maa_common.check_schema(name, value, current, migrations=None, *, strict=True)`：
@@ -1252,7 +1124,6 @@ result = normalize_plan(result)             ← 再规范化一次
 | `auto_copilot_min_lead_minutes` | `40` | 距下一场日常不足这么多分钟就不再开新的一关（比黑名单宽，因为它要覆盖整关） |
 | `auto_copilot_max_attempts_per_day` | `2` | 同一「关 + 模式」当天失败 / 未确认这么多次后，**当天不再自动排它**（卡上写「🚫 今日已尝试 N 次」），次日自动恢复。手动从下拉重打不受限。`0` = 不限制 |
 | `copilot_raid_switch_task` | `""`（关闭） | 从普通难度切到突袭用的上游任务名。**留空 = 突袭功能整体关闭**：活动关只排普通，worker 拿到突袭条目一律 `skipped`，绝不跑 `maa copilot`。重新启用见下方 |
-| `roguelike_run_timeout` | `3600`（1 小时） | 肉鸽**单局**子进程的上限。超了走 `terminate()`（SIGTERM），不是 SIGKILL，好让 MaaCore 有机会收手。整轮的长度由 blackout / Depot 窗口约束，不在这里叠加 |
 | `annihilation_sanity` | `25` | 排作业理智预算时为每日剿灭预留的理智 |
 | `farming_stage_table` | 见下 | 材料 → 关卡的手工映射 |
 | `farming_manual_weights` | 见下 | 冷启动/零消耗时的手工权重，数值越大越优先 |
@@ -1357,7 +1228,7 @@ python3 deploy.py --check                  # 只读：脚本/技能/maa-cli 配�
 | `Arknights` | `~/Library/Containers/io.playcover.PlayCover/Applications/com.hypergryph.arknights.app/Info.plist` |
 | `MaaTools` | **只记录，不进 `--check`**：VERN 要游戏在跑才读得到（§0.5）。记录里 `checked_by_deploy: false` |
 
-**更新流程**（每次真机跑通一场日常 / 抄作业 / 肉鸽之后）：
+**更新流程**（每次真机跑通一场日常 / 抄作业之后）：
 
 1. `python3 deploy.py --check`，看 `versions` 里哪些 `match: false`；
 2. 确认这次跑通用的就是这些版本，把 `config/verified_versions.json` 对应项的 `version` 改成 `installed`、
@@ -1497,7 +1368,7 @@ cron 表达式是 **UTC**（`config.yaml: timezone: Etc/UTC`），所以 Depot �
 | 21 | 森空岛失败文案必须带原始错误：`link` 修不了网络故障，不能让用户照着错的指引跑 | `fetch_roster()` 的 `detail` + `test_link_guidance_keeps_the_original_failure_cause` |
 | 22 | Depot 只有退出成功、任务 Completed、存在 `done=true` 非空库存且模拟器清理成功时才可替换真值；过程回调、识别失败和清理失败都不得污染旧快照 | `maa_depot.run_depot()` / `parse_depot_output()` + Depot 回归测试 |
 | 23 | Depot 不得在计划卡链路内运行；独立 cron 每日只做 7 天到期检查。任何日常抢锁失败都必须写 `last_lock_conflict_*`、发 Discord 并返回失败；`merge_last_run()` 必须持专用锁，不能用陈旧整份文件覆盖持锁任务的新状态 | `maa_depot.main()` / `maa_daily.report_lock_conflict()` / `maa_common.last_run_lock()` + 调度与锁冲突回归测试 |
-| 24 | **每一条自动链路**（日常 `am`/`pm`、抄作业 `run-batch`、Depot、肉鸽）在拿到 `run.lock` 之后、`launch_game()` 之前探测游戏进程：在跑即判定「用户正在玩」并跳过本次，且**必须发 Discord 并写 `last_run.json`**（日常写 `status=skipped` + `skip_reason=game_busy`，Depot 写 `depot_status="skipped_busy"` 且**不动 `snapshot_at`**，抄作业把这一轮放回 `scheduled` 让 watcher 稍后重试），文案要给出出路。日常的 `now` **永不**被探测跳过。探测**永不抛异常**（失败按离线处理照常执行）、总预算 `game_probe_timeout` 默认 5s，且**不得复用** `wait_for_game()`（120s）或 `settle_game_window()`（那是开游戏后的窗口体检，用途不同）。**实现只允许有一份**，在 `maa_playcover.py` | `maa_playcover.game_is_online()` + `maa_common.report_game_busy()` + `maa_daily.AUTO_PHASES` + `test_playcover.ProbeTests` / `GameProbeTests` / `EmulatorProbeSharedTests.test_there_is_exactly_one_probe_implementation` |
+| 24 | **每一条自动链路**（日常 `am`/`pm`、抄作业 `run-batch`、Depot）在拿到 `run.lock` 之后、`launch_game()` 之前探测游戏进程：在跑即判定「用户正在玩」并跳过本次，且**必须发 Discord 并写 `last_run.json`**（日常写 `status=skipped` + `skip_reason=game_busy`，Depot 写 `depot_status="skipped_busy"` 且**不动 `snapshot_at`**，抄作业把这一轮放回 `scheduled` 让 watcher 稍后重试），文案要给出出路。日常的 `now` **永不**被探测跳过。探测**永不抛异常**（失败按离线处理照常执行）、总预算 `game_probe_timeout` 默认 5s，且**不得复用** `wait_for_game()`（120s）或 `settle_game_window()`（那是开游戏后的窗口体检，用途不同）。**实现只允许有一份**，在 `maa_playcover.py` | `maa_playcover.game_is_online()` + `maa_common.report_game_busy()` + `maa_daily.AUTO_PHASES` + `test_playcover.ProbeTests` / `GameProbeTests` / `EmulatorProbeSharedTests.test_there_is_exactly_one_probe_implementation` |
 | 25 | `state/config.json` 里**由线上进程写回的运行时缓存键**（当前 `maa_core_version`、`maa_cli_version`、`activity_stages`）必须列入 `deploy.PRESERVED_RUNTIME_CACHE_KEYS`：线上已有值一律保留，仓库种子**只在首次部署时兜底**。**新增此类键时必须同步加进这个元组**，否则每次 `deploy.py` 都会用种子盖掉线上真值（2026-09-02 已实际发生过一次） | `deploy.PRESERVED_RUNTIME_CACHE_KEYS` / `deploy_state()` + `test_every_known_runtime_cache_key_is_preserved_on_deploy`（手工清单比对，漏加即红）、`test_deploy_keeps_live_runtime_caches_and_seeds_only_when_absent` |
 | 26 | 「刷理智」与「每日剿灭」是 `render_daily_toml()` 里**两个独立开关**（`plan["farming"]` / `plan["annihilation"]`，`tasks.fight` 仍是二者的总开关）。理智让路**只摘刷理智、永远保留剿灭**（周上限 1800 合成玉、代理卡驱动，摘掉纯亏）。**估算失败一律照常刷**——宁可多刷一场，也不能因为读不出数就一整天什么都不打 | `render_daily_toml` 的两个 `if` + `attach_sanity_yield()` + `SanityYieldTests` |
 | 27 | 理智让路的判据**只有一条**：估算理智 < 默认关 `apCost`。森空岛不可用、关卡不在 `stages.json`、任何异常 → `farming = True`。让路时必须在开跑消息里写明理由（`farming_skip_reason`），不许静默 | `maa_daily.attach_sanity_yield()` + `SanityYieldTests.test_an_unreadable_estimate_farms_as_usual` / `test_a_throwing_probe_never_takes_the_farming_block_away` |
@@ -1519,11 +1390,7 @@ cron 表达式是 **UTC**（`config.yaml: timezone: Etc/UTC`），所以 Depot �
 | 43 | 外部数据（一图流 / 企鹅物流）的抓取层**任何失败都不抛**，只返回缓存或空并把原因写进 `degraded_reasons`，由计划卡显示；四份缓存落 `state/maa/farming/`（0600、`atomic_write_json`），`matrix.json` 走 **ETag 条件请求**（`max-age=7200` 不可信），`stage/info` 1h TTL、`item/v7/value` 24h TTL。统一 UA `maa-remote/4 (+仓库地址)`，卡片带一行「数据来源：明日方舟一图流 / 企鹅物流（CC BY-NC 4.0）」。**数据不 vendor 进仓库**（许可），**单测一条都不许碰网**——桩数据手写 | `maa_farming.load_market_data()` / `_fetch_cached()` / `SOURCE_LINE` + `FarmingFetchTests` |
 | 44 | Fight 的 `drops` 上限**只在有实测缺口时写**（`maa_farming.drops_cap()`：冷启动、缺口 ≤ 0、拿不到 itemId 一律空表），itemId 必须过 `maa_common.SAFE_ITEM_ID_RE`（它会原样变成 TOML 表键）。**第二个 Fight 块永远不带 `drops`**，而且只在第一块有上限时才渲染——没上限的话第一块本来就打到理智不足。两个块的 `medicine/stone/series` 由 `_fight_block()` 一处写死，任务链顺序不变（紧挨着，在剿灭之后、基建之前）。战报里第二块的 key 是 `Fight2` 而不是 `Fight`（共用 key 会让没跑过的第二块被 `"Fight Completed"` 这条通配判成完成），掉落用 `farming_sections()` 合并两段 | `maa_daily.render_daily_toml()` / `_drops_table()` / `_fight_block()` / `FARMING_TASK_NAMES` / `farming_sections()` + `FarmingDropsTests` |
 | 45 | 理智查表是**两级 fail-closed**：先上游 `stages.json`（`maa_copilot.stage_sanity_cost()`），拿不到再查一图流 `stage/info` 的**本地缓存**（`maa_farming.stage_ap_cost()`，**只读缓存、绝不发请求**——watcher 每 15 分钟一 tick，不能在这条路径上等网络）。两处都查不到仍然返回 `None`，条目不入轮（不变量 #28）。第二级是为 **EX 关**加的：上游 `stages.json` 里根本没有 `XX-EX-n` | `maa_activity_watch.cost_lookup()` + `FarmingExCostFallbackTests` |
-| 46 | 肉鸽的执行路线是 **`maa run` 任务文件**（`type = "Roguelike"`，临时 `MAA_CONFIG_DIR`），不是 `maa roguelike` 子命令——CLI 缺 `BlackFlow`、`mode` 硬限 0..5、两处默认值与协议相反、Phantom 丢 `--difficulty`。任务链必须是 **`StartUp`（`client_type = "Official"`, `start_game_enabled = true`）→ `Roguelike`**——开机链只拉模拟器，拉起游戏的只能是 `StartUp`（2026-09-11 事故）。渲染出的 params 必须含 **`starts_count = 1`**（每局一个子进程是「本局结束后再停」的全部实现）、`investment_enabled` / `stop_when_investment_full = true`、`core_char = ""`，**永不出现 `use_support` / `use_nonfriend_support`** | `maa_roguelike.resolve_params()` / `render_task_toml()` + `RoguelikeTaskFileTests` |
-| 47 | **停止只在局间生效**：`roguelike stop` 只写 `stop_requested_at`（<20s 返回），worker 打完当前这一局、在派下一局之前才读它。**只有 `abort` 才碰子进程**（写 `abort_requested_at`，worker 每 2s 轮询到就 `terminate()`），并且必须在战报和回执里说明「当前局作废」 | `maa_action._request_roguelike_stop()` / `maa_roguelike_worker._run_locked()` + `RoguelikeWorkerTests.test_stop_between_runs_lets_the_current_one_finish` / `test_an_abort_ends_the_round_and_marks_it_dirty` |
-| 48 | 肉鸽子进程**只许** `Popen` + `terminate()` + `wait(timeout)` + 万不得已 `kill()`，**不许 `subprocess.run(timeout=)`**：后者超时走 SIGKILL，MaaCore 来不及 destroy，模拟器会留在地图里。单局上限是 `roguelike_run_timeout`（默认 3600），整轮长度由 blackout / Depot 窗口约束 | `maa_roguelike_worker._run_one_exploration()` + `RoguelikeSubprocessTests`（AST 断言全模块没有 `subprocess.run`） |
-| 49 | **`dirty` 时不许换主题**：上游 `<Theme>@Roguelike@Begin` 的善后链只在同主题下成立，跨主题会死循环（issue #13245）。一局开跑**之前**就先落盘 `dirty = true` + `last_theme`（进程被杀也留得住），只有 **`Roguelike Completed` 且退出码 0** 才清掉——只看退出码会让被中断的一局被当成收过尾的 | `maa_roguelike.dirty_theme_conflict()` / `parse_run_output()` + `RoguelikeCardTests.test_a_dirty_run_refuses_to_switch_theme` / `RoguelikeOutputTests.test_only_completed_plus_exit_zero_counts_as_clean` |
-| 50 | 肉鸽卡用 `hermes:btn:maa-roguelike:` 前缀：它**不在** `hermes:btn:maa:` 之下（07:50 那趟整段清扫碰不到），也**不在** `hermes:btn:maa-copilot:` 之下（`prune_expired_searches()` 碰不到）。发新卡的顺序与 #14b 相同：「PATCH 旧卡组件 → 删旧登记 → merge 写新登记 → 发卡 → 记新 message_id」。**换主题必须重发卡**——模式 / 难度 / 分队的选项都随主题变，留着旧卡等于让人从上一个主题的分队里挑 | `maa_roguelike.BUTTON_PREFIX` / `maa_action._send_roguelike_card()` + `RoguelikeCardTests.test_the_roguelike_prefix_survives_both_sweeps` / `test_changing_the_theme_reposts_the_card_and_drops_the_old_registry` |
+| 46–50 | 已移除：原肉鸽的五条（K16，2026-11-06）。编号不复用 | — |
 | 51 | **配置里的字符串列表写进任务文件前必须过白名单**：`config.mall_buy_first` / `mall_blacklist` 由 `_mall_item_list()` 逐项过 `SAFE_MALL_ITEM_RE`（中日文 / 拉丁字母 / 数字 / `·`，≤20 字），不合规的项**静默丢弃**而不是抛异常（渲染器抛异常 = 整场日常没得跑）。同理布尔开关走 `_toml_bool()`，只有真正的 `true` 才写 `true`。渲染器不接受任何没校验过的外部字符串——`drops` 的表键早已这么办（`SAFE_ITEM_ID_RE`，不变量 #44） | `maa_daily._mall_item_list()` / `SAFE_MALL_ITEM_RE` / `_toml_bool()` + `AwardAndMallOptionTests` |
 | 52 | **空 `activity_key` 永远不动活动账本**：非活动关（资源本 / 主线）的记账落 `ledger-standalone.json`，`ensure_ledger("")` 既不归档也不新开活动账本，`ledger_path()` 与 `ensure_ledger()` 必须拿同一个 key 算落点。原来空 key 会把当期账本归档 + 新开空账本，下一 tick watcher 再归档回来，真实通关记录散进归档文件 | `maa_copilot.ledger_path()` / `ensure_ledger()` + `maa_copilot_worker._batch_run_locked()` + `LedgerTests.test_a_non_activity_stage_never_archives_the_running_ledger` / `CopilotBatchExecutionTests.test_a_non_activity_round_writes_only_the_standalone_ledger` |
 | 53 | **练度后备快照读不到的字段一律按「不满足」**（fail-closed，D12）：`roster.source == "operbox"` 时技能与模组要求记**硬**缺口。后备只在 `skland_unavailable()` 有话说时才写，落**单独的** `roster-operbox.json`（绝不覆盖森空岛那份），`load_roster()` 取 `fetched_at` 更新的一份，所以森空岛一恢复它就退场。OperBox 失败不得影响 Depot 的库存真值 | `maa_copilot.load_roster()` / `check_op_requirements()` / `maa_depot.skland_unavailable()` / `run_operbox()` + `OperBoxFallbackTests` / `OperBoxRosterTests` |
@@ -1531,7 +1398,7 @@ cron 表达式是 **UTC**（`config.yaml: timezone: Etc/UTC`），所以 Depot �
 | 55 | **森空岛读不到就不自动排轮**（2026-10-11 改写：以前「刷新失败沿用缓存照排」，过期一个月的缓存里没有当期活动的 zone 进度，YW-4 没解锁也被排上）。**开打前的环境故障**（森空岛读不到、理智消耗查不到、开机 / ADB 炸了且一关都没进）worker 写进这一轮的 `prefight_error`，watcher 按北京日计数（`activity_watch.json` 的 `prefight_failures`），达到 `auto_copilot_max_prefight_failures_per_day`（默认 2）当天停排、只发一条——它们**不记账**，不另记就永远到不了 `daily_cap`。「理智不够」不是环境故障，不计数。「暂停自动作业」开关在 `copilot/auto_pause.json`：只管 `source == activity-watch` 的轮，暂停时作废 `scheduled` / `queued` 的一轮，**不中断正在打的那一关**、下一关开打前停；`copilot auto on` 同时清掉当天的开打前停排。按钮 custom_id 固定为 `hermes:btn:maa-copilot:auto:off|on`，不受按 token 清扫的影响 | `maa_activity_watch.run_once()` / `_count_prefight_failure()` / `_prefight_blocked()` + `maa_copilot_worker.PrefightError` + `maa_action.copilot_auto()` + `ActivityWatchTickTests` / `CopilotBatchExecutionTests.test_a_prefight_environment_failure_is_marked_on_the_round` / `CopilotAutoPauseCommandTests` |
 | 56 | **森空岛每日体检**挂在计划卡后面（早 07:50 / 晚 21:50，活动监控可能被暂停所以不挂那里）：每个北京日探一次，失败就发「🔑 森空岛登录已过期」（或「⚠️ 读取失败」），**一天最多一条**、恢复之前天天发；Discord 发送失败不记「今天已查」，晚场重试。体检自身的异常**不许拖垮计划卡**。`refresh_roster()` 成功一次就清掉 `skland.json` 的 `last_error` | `maa_skland.daily_health_check()` / `maa_plan_card._skland_health_notice()` + `SklandDailyHealthTests` |
 | 57 | **当期活动关的导航只有三小步自写，都只写进 `_isolated_config()` 的临时目录**：① 借锚点的上游链进活动、点进普通区域，把点关那一步换成只识别（方案 B，停在地图上）；② 剧情关挡路时在地图上点开它、跳过剧情；③ EX / S 区域按游戏数据里的区域名（`zone_table.zoneNameSecond`）在屏幕上找入口，相似度必须严格高于同活动其它区域名才点。**每一步之后都要在屏幕上认出目标区域的关卡代号**（`CopilotZoneReady`）才算到位，认不出就停下、按第一关失败记账。找关、编队、打仗全交给 MaaCore 的 `copilot_list`。教学关、没作业也没通关的关挡在前面时整轮从那里截断（`plan_segments()`），watcher 排轮前就截掉（`trim_unreachable()`），不为够不着的关开模拟器 | `maa_copilot_worker.ActivityNavigator` / `_run_activity_round()` / `maa_clearing.plan_segments()` / `zone_button()` + `CopilotListPlanTests` / `CopilotZoneEntryTests` / `CopilotListRoundTests` / `CopilotReachableTargetTests` |
-| 58 | **状态文件读时校验 `schema_version`、写时带上**（§6.1）：缺字段视作 1；会驱动动作的 `config` / `plan` / `manual_run` / `roguelike` 读到未知更高版本**拒跑**，只用于汇报的 `last_run` 告警后宽读。读 `config` / `plan` / `manual_run` / `last_run` 的每个地方都过 `check_schema()`，不许直接拿 `load_json()` 的结果用。`config.json` 的版本号随种子走，迁移只在 `deploy_state()`，`schema_version` 不得进 `PRESERVED_RUNTIME_CACHE_KEYS` | `maa_common.check_schema()` / `*_SCHEMA_VERSION` + `maa_roguelike.STATE_SCHEMA_VERSION` + `deploy.migrate_live_config()` / `CONFIG_MIGRATIONS` + `tests/test_state_schema.py` |
+| 58 | **状态文件读时校验 `schema_version`、写时带上**（§6.1）：缺字段视作 1；会驱动动作的 `config` / `plan` / `manual_run` 读到未知更高版本**拒跑**，只用于汇报的 `last_run` 告警后宽读。读 `config` / `plan` / `manual_run` / `last_run` 的每个地方都过 `check_schema()`，不许直接拿 `load_json()` 的结果用。`config.json` 的版本号随种子走，迁移只在 `deploy_state()`，`schema_version` 不得进 `PRESERVED_RUNTIME_CACHE_KEYS` | `maa_common.check_schema()` / `*_SCHEMA_VERSION` + `deploy.migrate_live_config()` / `CONFIG_MIGRATIONS` + `tests/test_state_schema.py` |
 | 59 | **主页入口永不切界面主题，纯源石兑换弹窗只点 ✗**：用户资源层 9 个 `<入口>-Entry` 的 `onErrorNext` 不得含 `SwitchTheme`；`OriginiteExchangeCancel` 的 `specificRect` 必须整个落在弹窗左半边（x ≤ 940，✓ 从 958 起）；`<入口>Sanrio` 必须带 `rectMove` 把点击收进模板中间、离边至少 1/5（终端离上沿 ≥ 25px） | `config/maa-cli/resource/tasks/tasks.json` + `test_sanrio_theme_entries_never_switch_theme_and_ship_their_templates` / `test_originite_exchange_popup_is_only_ever_cancelled` |
 
 ---
@@ -1754,7 +1621,7 @@ action 一律钉 commit SHA（行尾注释写 tag），升级时 SHA 和注释�
 | 早场改的关晚上也生效了 / 改一场把另一场也改了 | 看 `plan.json` 的 `sessions`：是不是被写成了旧的顶层 `stage`。写路径只有 `maa_action._save_override(phase, …)` 和 `maa_plan_card.apply_auto_stage(result, phase)` 两处 |
 | 卡片上没有「活动截止」这一行 | 是设计：`~/Library/Caches/com.loong.maa/StageActivityV2.json` 读不出来就整行不显示。跑一次 `maa activity Official` 让它刷出来，或用 `config.maa_activity_cache` 指到别处 |
 | 说「抄作业」发的卡下拉是空的 | 一览里每关都标了「⛔ 上游无导航」——下拉只放上游写了导航定义的关（不变量 #37）。等热更新带来导航定义，或改抄资源本 / 主线 |
-| 日常/抄作业/Depot/肉鸽报「明日方舟正在运行」 | 探测命中了（不变量 #24）。`pgrep -fl com.hypergryph.arknights.app` 看是不是真有残留进程；确实是残留就退出游戏再重试。日常想强行跑就说「现在跑」 |
+| 日常/抄作业/Depot 报「明日方舟正在运行」 | 探测命中了（不变量 #24）。`pgrep -fl com.hypergryph.arknights.app` 看是不是真有残留进程；确实是残留就退出游戏再重试。日常想强行跑就说「现在跑」 |
 | 卡片「为什么」写着「⚠️ 降级：… 抓取失败」 | 一图流 / 企鹅都没连上。`ls -l ~/.hermes/state/maa/farming/` 看缓存的 `fetched_at` 有多旧；本机手验：`curl -sI https://cos.yituliu.cn/arknights/stage-drop/matrix.json` 与 `curl -sS -X POST https://backend.yituliu.cn/item/v7/value -H 'Content-Type: application/json' -d '{}' \| head -c 200`。**抓不到不会让卡片消失**，只会让稀缺 / 效率两项退化 |
 | 活动期间卡片说资源本「不在本场候选集里」 | 这是设计（D5 / 不变量 #42）：活动期理智 all in 活动关。想刷资源本就从下拉手动选，手动选的关不受这条限制、也不带 `drops` 上限 |
 | 一场日常里只看到一个 Fight 段 | `runs/<date>-<phase>.json` 里 `plan.farming_drops` 是不是空的。冷启动、缺口 ≤ 0、或者用户手动选过关时**本来就不写上限**，第二个块也就不渲染（不变量 #44） |
@@ -1771,12 +1638,6 @@ action 一律钉 commit SHA（行尾注释写 tag），升级时 SHA 和注释�
 | 某关今天不再被自动排、卡上写「🚫 今日已尝试 N 次」 | 当日上限命中（`auto_copilot_max_attempts_per_day`，默认 2）。次日自动恢复；想现在就重打，从抄作业卡的下拉手动选它（手动路径不受这条限制）。`copilot/ledger.json` 的 `attempts` 是计数依据 |
 | 突袭那次总是失败 | 现状（2026-10-19 起）：种子改回 `ChangeToRaidDifficulty`，突袭默认开启。活动关走多作业路径，难度由 `copilot_list` 的 `is_raid` 切，YW-EX-1 / EX-2 突袭真机通过；`switch_to_raid()` 那一趟只剩逐关路径在用。以前默认空串 = **突袭功能关闭**。要重新启用先看 `runs/<date>-copilot-<token>.log` 里 `# raid-switch` 那段有没有 `Custom Completed`；2026-09-09 实测是 `Custom Error`（详情页上根本没有突袭控件），详见 §5.5 第 3 条 |
 | 卡上写「✅ 已通（突袭功能未启用）」 | 不是缺陷：`copilot_raid_switch_task` 为空，这一关只按普通难度判通关。想补突袭要先把开关配好并真机验一关（清单在 `docs/PLAN_PHASE4.md`） |
-| 点了「肉鸽停」还在跑 | 这是设计（不变量 #47）：停止只在**局间**生效，当前这一局会打完。要立刻停就点「⏏️ 立即中止」——那一局作废。看 `roguelike.json` 的 `stop_requested_at` 有没有写进去 |
-| 肉鸽开始被拒「上次 X 主题没有干净结束」 | `roguelike.json` 的 `dirty = true`（不变量 #49）。用**同一个主题**跑一局，上游自己会 `Continue → ExitThenAbandon` 收掉残局，干净结束后 `dirty` 清零，就能换主题了 |
-| 肉鸽一局都没跑就收尾了 | 战报的「停止原因」是答案：blackout（距 08:00 / 22:00 不足 `copilot_blackout_minutes`）、Depot 对表窗口（京 04:20–05:00）、游戏在跑。肉鸽不耗理智，所以**不会**是理智问题 |
-| 肉鸽说「已经在跑了」但频道里什么都没发生 | worker 进程没了。`roguelike.json` 的 `status` 停在 `running` 而 `run.lock` 是空的、且 `updated_at` 超过 10 分钟时，再点一次「▶️ 开始」就会按新的一轮重开（`round_is_stale()`）。**不要手改状态文件**——等这 10 分钟或直接再点一次 |
-| 肉鸽每局 35~40 秒就 `Roguelike Error`、收尾截图是模拟器桌面 | 游戏根本没被拉起来：任务文件少了开头那段 `StartUp`（2026-09-11 事故，已修）。确认 `maa_roguelike.render_task_toml()` 渲染的第一个任务是 `type = "StartUp"` + `start_game_enabled = true`，并跑一次 `deploy.py --check` 看线上是不是旧版本。日志里的特征是 `Connected` 之后直接 `Roguelike Start → Roguelike Error`，中间没有 `StartUp Completed` |
-| 肉鸽一直点空 / 进错主题 | 手册要求把目标主题**置顶在终端**，自动导航「不保证长期可用」（社区 issue #13245 就是界园被认成萨卡兹）。先在游戏里置顶，再看 `runs/<date>-roguelike-<token>.log` |
 | 自动确认提示理智读取失败 | 森空岛凭据已过期或 API 变化；只在本机终端重新跑 `maa_skland.py link`，不要把 token 发到 Discord |
 | 森空岛挂了之后作业全被判「练度不满足」 | 这是设计（不变量 #53）：练度退到了 `copilot/roster-operbox.json`，它读不到技能专精与模组，凡是有这两项要求的作业一律算不满足。`maa_skland.py link` 修好森空岛，下一次刷新后备就自动退场 |
 | 森空岛挂着，`roster-operbox.json` 却一直不出现 | 后备只在 **Depot 那趟**（每周一次，京 04:30）顺手跑。看 `last_run.depot_operbox_note`：没有这行说明 `skland_unavailable()` 判定森空岛还能用（`roster.json` 还没到 `skland_roster_refresh_days`），有这行就写着失败原因 |
