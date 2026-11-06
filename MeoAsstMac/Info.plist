@@ -22,11 +22,5 @@
 			</dict>
 		</dict>
 	</dict>
-	<key>SUEnableInstallerLauncherService</key>
-	<true/>
-	<key>SUFeedURL</key>
-	<string>https://maa-release.hguandl.com/macos/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>M7+pTisnfp6xtF7c6MK5ggzCD/5m0Xxvh0IGRVa/0TM=</string>
 </dict>
 </plist>

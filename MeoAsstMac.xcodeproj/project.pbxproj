@@ -11,8 +11,6 @@
 		3EB4092748599A93340E9EA0 /* DailyStageTipView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 73E79DFED4846D03780097D7 /* DailyStageTipView.swift */; };
 		830565483042DD6C0077CD3D /* JBird in Frameworks */ = {isa = PBXBuildFile; productRef = 830565473042DD6C0077CD3D /* JBird */; };
 		8307A5CF3030157700A82FF7 /* PixelPainter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8307A5CE3030157600A82FF7 /* PixelPainter.swift */; };
-		830C3D1C29BC7D8600B13A9F /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 830C3D1B29BC7D8600B13A9F /* Sparkle */; };
-		830C3D1E29BC7DE200B13A9F /* CheckForUpdatesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 830C3D1D29BC7DE200B13A9F /* CheckForUpdatesView.swift */; };
 		831100C43026440D00554899 /* NewViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 831100C33026440D00554899 /* NewViewModel.swift */; };
 		831597123028DF98008C7EDF /* CapsulePicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 831597113028DF98008C7EDF /* CapsulePicker.swift */; };
 		8315B0BD290E48F300AE7FDC /* StartupSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8315B0BC290E48F300AE7FDC /* StartupSettingsView.swift */; };
@@ -105,7 +103,6 @@
 		83D3283328F2F1BE00018D10 /* MallSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83D3283228F2F1BE00018D10 /* MallSettingsView.swift */; };
 		83D3283728F2FA5B00018D10 /* InfrastSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83D3283628F2FA5B00018D10 /* InfrastSettingsView.swift */; };
 		83D3283928F3048E00018D10 /* RoguelikeSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83D3283828F3048E00018D10 /* RoguelikeSettingsView.swift */; };
-		83DD50B729BE393C000E84E7 /* UpdaterSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83DD50B629BE385A000E84E7 /* UpdaterSettingsView.swift */; };
 		83E9D137294B74440091D1FF /* OpenCV.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 83E9D133294B74230091D1FF /* OpenCV.xcframework */; };
 		83E9D138294B74440091D1FF /* OpenCV.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 83E9D133294B74230091D1FF /* OpenCV.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		83E9D139294B74460091D1FF /* ONNXRuntime.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 83E9D135294B74270091D1FF /* ONNXRuntime.xcframework */; };
@@ -155,7 +152,6 @@
 		714ED6EEFCEED065D64918F3 /* SwitchThemeSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwitchThemeSettingsView.swift; sourceTree = "<group>"; };
 		73E79DFED4846D03780097D7 /* DailyStageTipView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DailyStageTipView.swift; sourceTree = "<group>"; };
 		8307A5CE3030157600A82FF7 /* PixelPainter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PixelPainter.swift; sourceTree = "<group>"; };
-		830C3D1D29BC7DE200B13A9F /* CheckForUpdatesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CheckForUpdatesView.swift; sourceTree = "<group>"; };
 		830C3D1F29BC86EE00B13A9F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		831100C33026440D00554899 /* NewViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewViewModel.swift; sourceTree = "<group>"; };
 		831597113028DF98008C7EDF /* CapsulePicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CapsulePicker.swift; sourceTree = "<group>"; };
@@ -250,7 +246,6 @@
 		83D3283228F2F1BE00018D10 /* MallSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MallSettingsView.swift; sourceTree = "<group>"; };
 		83D3283628F2FA5B00018D10 /* InfrastSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InfrastSettingsView.swift; sourceTree = "<group>"; };
 		83D3283828F3048E00018D10 /* RoguelikeSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RoguelikeSettingsView.swift; sourceTree = "<group>"; };
-		83DD50B629BE385A000E84E7 /* UpdaterSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdaterSettingsView.swift; sourceTree = "<group>"; };
 		83E9D133294B74230091D1FF /* OpenCV.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = OpenCV.xcframework; path = ../../build/OpenCV.xcframework; sourceTree = "<group>"; };
 		83E9D135294B74270091D1FF /* ONNXRuntime.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = ONNXRuntime.xcframework; path = ../../build/ONNXRuntime.xcframework; sourceTree = "<group>"; };
 		83E9ED962DF693B20069CFE9 /* OTAFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OTAFetcher.swift; sourceTree = "<group>"; };
@@ -276,7 +271,6 @@
 				830565483042DD6C0077CD3D /* JBird in Frameworks */,
 				83782A2D2CFFB00000A32BDD /* LegacyUserTasks in Frameworks */,
 				834374AC2EB61ACA002CC2D3 /* MaaUtils.xcframework in Frameworks */,
-				830C3D1C29BC7D8600B13A9F /* Sparkle in Frameworks */,
 				833F7B2A29A34C440001DB2D /* fastdeploy_ppocr.xcframework in Frameworks */,
 				831D2489293C9CE3005AC1CE /* MaaCore.xcframework in Frameworks */,
 				83E9D139294B74460091D1FF /* ONNXRuntime.xcframework in Frameworks */,
@@ -339,7 +333,6 @@
 		8329858D29EDAC1C009F7ED5 /* Main Menu */ = {
 			isa = PBXGroup;
 			children = (
-				830C3D1D29BC7DE200B13A9F /* CheckForUpdatesView.swift */,
 				8329858B29EDA8DB009F7ED5 /* OpenLogFileView.swift */,
 				83477CB129FEA12300A5FF99 /* TaskCommands.swift */,
 			);
@@ -514,7 +507,6 @@
 			children = (
 				8334777928F3A14A00499D0A /* ConnectionSettingsView.swift */,
 				838FF82129FBB9E3000566A0 /* GameSettingsView.swift */,
-				83DD50B629BE385A000E84E7 /* UpdaterSettingsView.swift */,
 				92EB82862A0CD315006DD9D2 /* SystemSettingsView.swift */,
 			);
 			path = Settings;
@@ -565,7 +557,6 @@
 			);
 			name = MAA;
 			packageProductDependencies = (
-				830C3D1B29BC7D8600B13A9F /* Sparkle */,
 				8347B5AA2CDF89CC00AEB627 /* ZIPFoundation */,
 				83782A2C2CFFB00000A32BDD /* LegacyUserTasks */,
 				830565473042DD6C0077CD3D /* JBird */,
@@ -601,7 +592,6 @@
 			);
 			mainGroup = 833786C228F188D800D39D6F;
 			packageReferences = (
-				830C3D1A29BC7D8600B13A9F /* XCRemoteSwiftPackageReference "Sparkle" */,
 				8347B5A92CDF89CC00AEB627 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
 				832D14953042F6C40000C09B /* XCRemoteSwiftPackageReference "JBird" */,
 			);
@@ -654,7 +644,6 @@
 				83661E2C29F77CFF007793CA /* VideoRecogView.swift in Sources */,
 				8337870228F1D95F00D39D6F /* Maa.swift in Sources */,
 				832985B929EF9D50009F7ED5 /* MAAContent.swift in Sources */,
-				830C3D1E29BC7DE200B13A9F /* CheckForUpdatesView.swift in Sources */,
 				832985B029EEF483009F7ED5 /* ReclamationConfiguration.swift in Sources */,
 				833786CF28F188D800D39D6F /* MeoAsstMacApp.swift in Sources */,
 				83CFD47129EAACD7000428A1 /* MAATask.swift in Sources */,
@@ -676,7 +665,6 @@
 				83B8E0D93053131B00AB0B56 /* HGCalendar.swift in Sources */,
 				8334777A28F3A14A00499D0A /* ConnectionSettingsView.swift in Sources */,
 				92F78D4F2A0B361C00999BD0 /* TaskTimerManager.swift in Sources */,
-				83DD50B729BE393C000E84E7 /* UpdaterSettingsView.swift in Sources */,
 				92CDF6222A065E55005669EC /* Codeable+JSON.swift in Sources */,
 				83264A3E29EC22DE0074E33A /* MAAViewModel.swift in Sources */,
 				92F78D4D2A0A7B2E00999BD0 /* TaskTimerView.swift in Sources */,
@@ -944,14 +932,6 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		830C3D1A29BC7D8600B13A9F /* XCRemoteSwiftPackageReference "Sparkle" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/sparkle-project/Sparkle";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.0.0;
-			};
-		};
 		832D14953042F6C40000C09B /* XCRemoteSwiftPackageReference "JBird" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/vsanthanam/JBird.git";
@@ -974,11 +954,6 @@
 		830565473042DD6C0077CD3D /* JBird */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = JBird;
-		};
-		830C3D1B29BC7D8600B13A9F /* Sparkle */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 830C3D1A29BC7D8600B13A9F /* XCRemoteSwiftPackageReference "Sparkle" */;
-			productName = Sparkle;
 		};
 		832D14963042F6C40000C09B /* JBird */ = {
 			isa = XCSwiftPackageProductDependency;
