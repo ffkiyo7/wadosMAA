@@ -21,6 +21,7 @@ from maa_common import (
     CONFIG_PATH,
     CONFIG_SCHEMA_VERSION,
     PLAN_PATH,
+    PLAN_PHASES,
     PLAN_SCHEMA_VERSION,
     WATCH_PATH,
     Config,
@@ -35,6 +36,9 @@ from maa_common import (
     effective_plan,
     is_plan_phase,
     load_config,
+    session_label,
+    session_schedule,
+    session_time,
     load_json,
     maa_subprocess_env,
     medicine_label,
@@ -48,8 +52,19 @@ from maa_common import (
 
 BUTTON_PREFIX = "hermes:btn:maa:"
 CARD_TITLE_PREFIX = "🌱 MAA 今日计划"
-# 一天两张卡（D1）：07:50 的早场卡跟随上游更新，21:50 的晚场卡不跟。
-PHASE_TITLES = {"am": "早场 08:00", "pm": "晚场 22:00"}
+# 一天两张卡（D1）：早场卡跟随上游更新，晚场卡不跟。卡在开跑前
+# `PLAN_CARD_LEAD_MINUTES` 发（默认 07:50 / 21:50），场次时间按 `config.session_schedule`。
+
+
+def phase_title(phase: str) -> str:
+    """「早场 08:00」。读不到配置时按默认时间写，标题不该拖垮整张卡。"""
+    try:
+        config: Config = load_config()
+    except RuntimeError:
+        config = {}
+    return session_label(config, phase)
+
+
 # MaaCore 的活动时间缓存（`maa activity` 按 etag 拉取的那份），地基事实 E。
 DEFAULT_STAGE_ACTIVITY_PATH = (
     Path.home() / "Library" / "Caches" / "com.loong.maa" / "StageActivityV2.json"
@@ -80,7 +95,6 @@ def select_phase(
     与 `maa_daily.select_phase()` 同一套做法——Hermes 的 `--script` 不支持 argv，
     cron 靠 `--workdir ~/.hermes/state/maa/{am,pm}` 传场次。
     """
-    # `is_plan_phase()` 与 `PHASE_TITLES` 的键是同一组（am / pm）。
     if len(argv) == 1 and is_plan_phase(argv[0]):
         return argv[0]
     if argv:
@@ -684,7 +698,7 @@ def _stage_select(
     return {
         "type": 3,
         "custom_id": custom_id,
-        "placeholder": f"🎯 选择{PHASE_TITLES[phase]}要刷的关卡",
+        "placeholder": f"🎯 选择{phase_title(phase)}要刷的关卡",
         "min_values": 1,
         "max_values": 1,
         "options": options,
@@ -880,7 +894,7 @@ def build_components(
         ("▶️ 恢复本场", "unskip", 3, ["plan", "skip-today", "off", phase])
         if plan.get("skip")
         else (
-            f"⏭️ 跳过本场（{PHASE_TITLES[phase]}）",
+            f"⏭️ 跳过本场（{phase_title(phase)}）",
             "skip",
             4,
             ["plan", "skip-today", "on", phase],
@@ -1031,7 +1045,7 @@ def build_embed(
             }
         )
     return {
-        "title": f"{CARD_TITLE_PREFIX} · {PHASE_TITLES[phase]}",
+        "title": f"{CARD_TITLE_PREFIX} · {phase_title(phase)}",
         "description": "从下拉菜单选择本场要刷的关卡；今天的覆盖会在明天自动失效。",
         "color": 0x57F287,
         "fields": fields,
@@ -1171,6 +1185,18 @@ def copilot_card_stages(
     return rows, in_activity
 
 
+def copilot_card_footer(config: Config) -> str:
+    times = " / ".join(
+        session_time(config, phase)
+        for phase in PLAN_PHASES
+        if session_schedule(config)[phase]["enabled"]
+    )
+    minutes = max(0, int(config.get("copilot_blackout_minutes", 25)))
+    if not times or minutes == 0:
+        return "抄作业与日常互斥"
+    return f"抄作业与日常互斥 · {times} 前 {minutes} 分钟不接受"
+
+
 def copilot_card_view(
     config: Config, at: datetime | None = None
 ) -> tuple[dict[str, Any], list[tuple[str, str, str]]]:
@@ -1207,7 +1233,7 @@ def copilot_card_view(
         ),
         "color": 0x5865F2,
         "fields": fields,
-        "footer": {"text": "抄作业与日常互斥 · 08:00 / 22:00 前 25 分钟不接受"},
+        "footer": {"text": copilot_card_footer(config)},
         "timestamp": (at or now_beijing()).isoformat(),
     }
     return embed, options[:25]

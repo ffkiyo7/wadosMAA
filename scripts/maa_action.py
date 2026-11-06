@@ -16,8 +16,10 @@ from typing import TYPE_CHECKING, Any, cast
 if TYPE_CHECKING:
     from typing import TypeGuard  # 3.10+，只在注解里用（见 maa_common）
 
+import maa_common
 import maa_copilot
 import maa_playcover
+import maa_schedule
 from maa_common import (
     BUTTONS_PATH,
     DEFAULT_MANUAL_RUN_BLACKOUT_MINUTES,
@@ -30,6 +32,7 @@ from maa_common import (
     PLAN_PATH,
     PLAN_PHASES,
     PLAN_SCHEMA_VERSION,
+    PHASE_NAMES,
     PLAN_SESSION_FIELDS,
     SCRIPTS_DIR,
     WATCH_PATH,
@@ -38,6 +41,7 @@ from maa_common import (
     PlanFile,
     PlanPhase,
     SessionOverride,
+    action_source,
     atomic_write_json,
     check_schema,
     discord_request,
@@ -53,6 +57,9 @@ from maa_common import (
     plan_stage_label,
     require_executable,
     retire_discord_components,
+    session_label,
+    session_time,
+    session_within,
     state_lock,
 )
 
@@ -61,18 +68,26 @@ STAGE_PATTERN = re.compile(r"^[A-Za-z0-9]{1,8}-\d{1,2}$")
 ACTIVITY_STAGE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,30}-\d{1,2}$")
 # 场次的中文说法。只有这两个场次能被覆盖；`now` 是手动场，没有覆盖可写——
 # 它的关来自选关卡（`manual_run.json`，PLAN_MANUAL_RUN.md M4），不进 `plan.json`。
-PHASE_LABELS = {"am": "早场（08:00）", "pm": "晚场（22:00）"}
 
 
-def emit(ok: bool, message: str) -> None:
+def phase_label(phase: str, config: Config | None = None) -> str:
+    """「早场（08:00）」：时间按 `config.session_schedule`，不再写死。"""
+    cfg: Config = config if config is not None else load_config()
+    hhmm = session_time(cfg, phase)
+    name = PHASE_NAMES.get(phase, "本场")
+    return f"{name}（{hhmm}）" if hhmm else name
+
+
+def emit(ok: bool, message: str, data: dict[str, Any] | None = None) -> None:
     # Persistent button runner accepts at most 8192 bytes and parses only JSON.
-    raw = json.dumps({"ok": ok, "message": message}, ensure_ascii=False)
+    # 带 `data` 的回执只有 GUI 读（它读完整 stdout），不受这个上限；但 message 照样截。
+    payload: dict[str, Any] = {"ok": ok, "message": message}
+    raw = json.dumps(payload, ensure_ascii=False)
     if len(raw.encode("utf-8")) > 7900:
-        raw = json.dumps(
-            {"ok": ok, "message": message[:1800] + "\n…（已截断）"},
-            ensure_ascii=False,
-        )
-    print(raw)
+        payload["message"] = message[:1800] + "\n…（已截断）"
+    if data is not None:
+        payload["data"] = data
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 def _activity_output_allows(stage: str, config: Config) -> bool:
@@ -144,7 +159,7 @@ def _save_override(phase: PlanPhase, key: str, value: Any, **extra: Any) -> Plan
         session = cast("dict[str, Any]", plan["sessions"].setdefault(phase, {}))  # pyright: ignore[reportTypedDictNotRequiredAccess]  # _today_override() 一定带 sessions
         session[key] = value
         session.update(extra)
-        session["source"] = "discord"
+        session["source"] = action_source()
         session["updated_at"] = now.isoformat()
         plan["updated_at"] = now.isoformat()
         plan["schema_version"] = PLAN_SCHEMA_VERSION
@@ -171,9 +186,9 @@ def _confirmation(plan: Plan, was_running: bool, phase: PlanPhase) -> str:
     now = now_beijing()
     stage = plan_stage_label(plan)
     medicine = medicine_label(str(plan.get("medicine", "none")))
-    label = PHASE_LABELS.get(phase, "本场")
+    label = phase_label(phase)
     other = "、".join(
-        PHASE_LABELS[other_phase] for other_phase in PLAN_PHASES if other_phase != phase
+        phase_label(other_phase) for other_phase in PLAN_PHASES if other_phase != phase
     )
     if plan.get("skip"):
         # 这条回执对 set-stage 和 skip-today 通用，所以跳过时也报一下这场记的关：
@@ -200,7 +215,7 @@ def _confirmation(plan: Plan, was_running: bool, phase: PlanPhase) -> str:
 
 
 def _reject_phase(phase: str) -> tuple[bool, str]:
-    return False, f"场次只接受 am（早场 08:00）或 pm（晚场 22:00），收到 {phase[:20]!r}。"
+    return False, f"场次只接受 am（早场）或 pm（晚场），收到 {phase[:20]!r}。"
 
 
 def set_stage(stage: str, phase: str) -> tuple[bool, str]:
@@ -266,7 +281,7 @@ def show_plan() -> tuple[bool, str]:
             else "不清理智，只收菜（基建 / 公招 / 商店 / 领奖）"
         )
         lines.append(
-            f"· {PHASE_LABELS[phase]}：{plan_stage_label(plan)}（{origin}）；{status}"
+            f"· {phase_label(phase)}：{plan_stage_label(plan)}（{origin}）；{status}"
         )
     return (
         True,
@@ -287,7 +302,7 @@ MANUAL_RUN_PENDING_TEXT = "计算中…"
 def manual_run_blackout_reason(
     config: Config, at: datetime | None = None
 ) -> str | None:
-    """定时场优先（M10）：距 08:00 / 22:00 不足 N 分钟，手动场不发卡也不派发。
+    """定时场优先（M10）：距下一场开着的定时场不足 N 分钟，手动场不发卡也不派发。
 
     与 `_copilot_blackout_reason()` 同构但另开配置键：手动日常一场约 14 分钟，
     加上卡片 10 分钟有效期，默认 30 比抄作业的 25 宽。0 = 关闭。
@@ -298,16 +313,12 @@ def manual_run_blackout_reason(
     )
     if minutes == 0:
         return None
-    now = at or now_beijing()
-    for hour in (8, 22):
-        target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if now > target:
-            target = target + timedelta(days=1)
-        if (target - now).total_seconds() / 60 <= minutes:
-            return (
-                f"距 {hour:02d}:00 日常场次不足 {minutes} 分钟，定时场优先，"
-                "请在日常结束后再手动跑。"
-            )
+    hit = session_within(config, minutes, at or now_beijing())
+    if hit:
+        return (
+            f"距{session_label(config, hit[0])} 不足 {minutes} 分钟，定时场优先，"
+            "请在日常结束后再手动跑。"
+        )
     return None
 
 
@@ -459,7 +470,7 @@ def _spawn_action(args: list[str]) -> None:
 def _skipped_sessions_note() -> str:
     # 跳过是按场次的（D2），所以这里要逐场看，不能再说「今天设了跳过」。
     skipped = [
-        PHASE_LABELS[phase]
+        phase_label(phase)
         for phase in PLAN_PHASES
         if effective_plan(phase=phase).get("skip")
     ]
@@ -764,22 +775,17 @@ def _invalidate_search_card(token: str, config: Config) -> str:
     return ""
 
 
-def _copilot_blackout_reason(config: Config) -> str | None:
-    """Refuse to start a copilot run close to the 08:00/22:00 daily runs."""
+def _copilot_blackout_reason(config: Config, at: datetime | None = None) -> str | None:
+    """Refuse to start a copilot run close to the next scheduled daily run."""
     minutes = max(0, int(config.get("copilot_blackout_minutes", 25)))
     if minutes == 0:
         return None
-    now = now_beijing()
-    for hour in (8, 22):
-        target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if now > target:
-            target = target + timedelta(days=1)
-        delta = (target - now).total_seconds() / 60
-        if delta <= minutes:
-            return (
-                f"距 {hour:02d}:00 日常场次不足 {minutes} 分钟，"
-                "为避免互斥抢占，请在日常结束后再抄作业。"
-            )
+    hit = session_within(config, minutes, at or now_beijing())
+    if hit:
+        return (
+            f"距{session_label(config, hit[0])} 不足 {minutes} 分钟，"
+            "为避免互斥抢占，请在日常结束后再抄作业。"
+        )
     return None
 
 
@@ -796,23 +802,19 @@ def min_lead_reason(config: Config, at: datetime | None = None) -> str | None:
     """距下一场日常还够不够**开新的一关**（四期 2c 的时间预算）。
 
     与 `copilot_blackout_minutes` 是两条不同的闸门：blackout 管「能不能开这一轮」，
-    这条管「一轮里还能不能再开一关」——一关十来分钟，撞上 08:00/22:00 会让日常
+    这条管「一轮里还能不能再开一关」——一关十来分钟，撞上早晚场会让日常
     抢不到锁。默认 40 分钟，比 blackout（25）宽，因为它要覆盖整关而不只是启动。
     watcher 派发前查一次（省得派出去立刻收尾），worker 每关开始前再查一次。
     """
     minutes = max(0, int(config.get("auto_copilot_min_lead_minutes", DEFAULT_MIN_LEAD_MINUTES)))
     if minutes == 0:
         return None
-    now = at or now_beijing()
-    for hour in (8, 22):
-        target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
-        if now > target:
-            target = target + timedelta(days=1)
-        if (target - now).total_seconds() / 60 <= minutes:
-            return (
-                f"距 {hour:02d}:00 日常场次不足 {minutes} 分钟，本轮到此收尾，"
-                "剩下的关留给下一轮。"
-            )
+    hit = session_within(config, minutes, at or now_beijing())
+    if hit:
+        return (
+            f"距{session_label(config, hit[0])} 不足 {minutes} 分钟，本轮到此收尾，"
+            "剩下的关留给下一轮。"
+        )
     return None
 
 
@@ -1256,6 +1258,91 @@ def copilot_card() -> tuple[bool, str]:
     return True, f"🤖 抄作业卡已发，共 {len(options)} 关可选{warning}。"
 
 
+# ---------------------------------------------------------------------------
+# 场次时间与 cron（K6）—— 只给 Wado's MAA 用，不进 Discord 登记表
+# ---------------------------------------------------------------------------
+
+
+def _hermes_bin(config: Config) -> str:
+    return require_executable(
+        config, "hermes_bin", str(Path.home() / ".local" / "bin" / "hermes"), "hermes"
+    )
+
+
+def _schedule_text(report: dict[str, Any]) -> str:
+    lines = []
+    for phase, item in report["sessions"].items():
+        state = "开" if item["enabled"] else "关"
+        drift = [
+            f"{maa_schedule.SCRIPT_NAMES[script]} cron 是 {task['expr'] or '（找不到）'}"
+            f"{'' if task['enabled'] else '（暂停）'}"
+            for script, task in item["cron"].items()
+            if not task["in_sync"]
+        ]
+        tail = f"；与配置不一致：{'、'.join(drift)}" if drift else ""
+        lines.append(f"· {PHASE_NAMES[phase]} {item['time']}（{state}）{tail}")
+    return "场次时间：\n" + "\n".join(lines)
+
+
+def schedule_show() -> tuple[bool, str, dict[str, Any]]:
+    report = maa_schedule.schedule_report(load_config())
+    return True, _schedule_text(report), report
+
+
+def _schedule_write(
+    phase: str, *, time_value: str | None = None, enabled: bool | None = None
+) -> tuple[bool, str, dict[str, Any]]:
+    if not valid_phase(phase):
+        ok, message = _reject_phase(phase)
+        return ok, message, {}
+    config = load_config()
+    current = maa_common.session_schedule(config)
+    slot = dict(current[phase])
+    if time_value is not None:
+        slot["time"] = time_value
+    if enabled is not None:
+        slot["enabled"] = enabled
+    try:
+        updated = maa_common.validate_session_schedule({**current, phase: slot})
+    except ValueError as exc:
+        return False, str(exc), {}
+    if updated == current and config.get("session_schedule") == updated:
+        changed_config = config
+    else:
+        changed_config = maa_common.update_config({"session_schedule": updated}, action_source())
+    label = maa_common.session_label(changed_config, phase)
+    try:
+        notes = maa_schedule.sync_phase(
+            changed_config, phase, _hermes_bin(changed_config), toggle=enabled is not None
+        )
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+        report = maa_schedule.schedule_report(changed_config)
+        return False, f"{label}已写进配置，但 cron 没同步上：{exc}。修好后点「同步 cron」。", report
+    report = maa_schedule.schedule_report(changed_config)
+    state = "开" if updated[phase]["enabled"] else "关"
+    synced = f"cron：{'；'.join(notes)}" if notes else "cron 本来就是这个时间"
+    return True, f"{label}（{state}）已保存；{synced}。", report
+
+
+def schedule_set(phase: str, value: str) -> tuple[bool, str, dict[str, Any]]:
+    return _schedule_write(phase, time_value=value)
+
+
+def schedule_toggle(phase: str, enabled: bool) -> tuple[bool, str, dict[str, Any]]:
+    return _schedule_write(phase, enabled=enabled)
+
+
+def schedule_sync() -> tuple[bool, str, dict[str, Any]]:
+    """只把 cron 的**时间**对齐到配置，不碰暂停状态。"""
+    config = load_config()
+    hermes = _hermes_bin(config)
+    notes: list[str] = []
+    for phase in PLAN_PHASES:
+        notes.extend(maa_schedule.sync_phase(config, phase, hermes))
+    report = maa_schedule.schedule_report(config)
+    return True, ("cron 已同步：" + "；".join(notes)) if notes else "cron 和配置一致。", report
+
+
 def copilot_auto(value: str) -> tuple[bool, str]:
     """`copilot auto off|on|status`：暂停 / 恢复 watcher 的自动作业。
 
@@ -1357,6 +1444,22 @@ def copilot_status(token: str) -> tuple[bool, str]:
     return True, "⏳ 等待匹配……"
 
 
+def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
+    """只给 Wado's MAA 用的命令：回执多带一个 `data`（结构化结果）。
+
+    这些命令**不进 Discord 登记表**，也不在技能的命令清单里；不是这类命令返回 None。
+    """
+    if argv == ["schedule", "show"]:
+        return schedule_show()
+    if argv[:2] == ["schedule", "set"] and len(argv) == 4:
+        return schedule_set(argv[2], argv[3])
+    if argv[:2] in (["schedule", "enable"], ["schedule", "disable"]) and len(argv) == 3:
+        return schedule_toggle(argv[2], argv[1] == "enable")
+    if argv == ["schedule", "sync"]:
+        return schedule_sync()
+    return None
+
+
 def dispatch(argv: list[str]) -> tuple[bool, str]:
     if argv[:2] == ["plan", "set-stage"] and len(argv) == 4:
         return set_stage(argv[2], argv[3])
@@ -1407,11 +1510,15 @@ def dispatch(argv: list[str]) -> tuple[bool, str]:
 
 def main(argv: list[str]) -> int:
     try:
-        ok, message = dispatch(argv[1:])
+        gui = dispatch_gui(argv[1:])
+        if gui is not None:
+            ok, message, data = gui
+        else:
+            (ok, message), data = dispatch(argv[1:]), None
     except Exception as exc:  # noqa: BLE001 — (a) 进程顶层：任何失败都要变成 ok=false 回执交给技能
         emit(False, f"操作失败：{type(exc).__name__}: {exc}")
         return 1
-    emit(ok, message)
+    emit(ok, message, data)
     return 0 if ok else 2
 
 

@@ -60,9 +60,23 @@ MANUAL_RUN_SCHEMA_VERSION = 1
 # 选关卡自己的登记前缀：不在 `hermes:btn:maa:` 下（07:50 / 21:50 建卡整前缀清扫碰不到），
 # 也不在 `hermes:btn:maa-copilot:` 下（`prune_expired_searches()` 碰不到）。
 MANUAL_RUN_BUTTON_PREFIX = "hermes:btn:maa-now:"
-# 定时场优先（M10）：距 08:00 / 22:00 不足这么多分钟，手动场既不发卡也不派发。
+# 定时场优先（M10）：距早晚场开跑不足这么多分钟，手动场既不发卡也不派发。
 # 实测一场手动日常约 14 分钟 + 卡片 10 分钟有效期。
 DEFAULT_MANUAL_RUN_BLACKOUT_MINUTES = 30
+
+# 早晚场的开跑时间（K6）。`config.session_schedule` 可改，Wado's MAA 改时间时由
+# `maa_action schedule` 同步 Hermes cron；计划卡固定提前 `PLAN_CARD_LEAD_MINUTES`。
+# 各场时间限定在自己的半天里：早场 05:00–11:59，晚场 12:00–23:59。早场不早于 05:00
+# 是为了躲开 04:00 换日和 04:30 的 Depot 对表；晚场不过零点，是因为 `plan.json` 的
+# 覆盖按**当天**日期生效，过了零点的「晚场」会读到第二天的空覆盖。
+DEFAULT_SESSION_SCHEDULE: dict[str, dict[str, Any]] = {
+    "am": {"time": "08:00", "enabled": True},
+    "pm": {"time": "22:00", "enabled": True},
+}
+SESSION_WINDOWS = {"am": (5 * 60, 12 * 60), "pm": (12 * 60, 24 * 60)}
+SESSION_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+PLAN_CARD_LEAD_MINUTES = 10
+PHASE_NAMES = {"am": "早场", "pm": "晚场", "now": "手动场"}
 
 # Hermes' persistent-button patch intentionally has one global registry. MAA
 # must merge its keys under the same lock used by agent-book.
@@ -215,6 +229,8 @@ class Config(TypedDict, total=False):
     farming_scarcity_horizon_days: int
     farming_stage_table: dict[str, Any]
     farming_manual_weights: dict[str, Any]
+    session_schedule: dict[str, Any]
+    config_meta: dict[str, Any]
 
 
 class SessionOverride(TypedDict, total=False):
@@ -325,6 +341,99 @@ class LastRun(TypedDict, total=False):
 
 def now_beijing() -> datetime:
     return datetime.now(BEIJING)
+
+
+def session_minutes(value: object, phase: str) -> int | None:
+    """`"HH:MM"` → 当天第几分钟；格式不对或不在这一场的半天里返回 None。"""
+    match = SESSION_TIME_RE.fullmatch(value) if isinstance(value, str) else None
+    window = SESSION_WINDOWS.get(phase)
+    if not match or window is None:
+        return None
+    minutes = int(match.group(1)) * 60 + int(match.group(2))
+    return minutes if window[0] <= minutes < window[1] else None
+
+
+def validate_session_schedule(value: object) -> dict[str, dict[str, Any]]:
+    """`config set session_schedule` 的校验：两场都要有，时间合法，`enabled` 是布尔。
+
+    不合规就抛 `ValueError`（中文原因），不做任何猜测或修正。
+    """
+    if not isinstance(value, dict):
+        raise ValueError("session_schedule 必须是 {am: {...}, pm: {...}}")
+    result: dict[str, dict[str, Any]] = {}
+    for phase in PLAN_PHASES:
+        slot = value.get(phase)
+        if not isinstance(slot, dict) or set(slot) - {"time", "enabled"}:
+            raise ValueError(f"{PHASE_NAMES[phase]}只接受 time / enabled 两个字段")
+        if session_minutes(slot.get("time"), phase) is None:
+            low, high = SESSION_WINDOWS[phase]
+            raise ValueError(
+                f"{PHASE_NAMES[phase]}时间要写成 HH:MM，且在 "
+                f"{low // 60:02d}:{low % 60:02d}–{(high - 1) // 60:02d}:{(high - 1) % 60:02d} 之间"
+            )
+        enabled = slot.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"{PHASE_NAMES[phase]}的 enabled 只能是 true / false")
+        result[phase] = {"time": slot["time"], "enabled": enabled}
+    if set(value) - set(PLAN_PHASES):
+        raise ValueError("session_schedule 只有 am / pm 两场")
+    return result
+
+
+def session_schedule(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """读的时候**宽**：某一场写坏了只退回那一场的默认值，不让一个坏值拖垮日常。"""
+    raw = config.get("session_schedule")
+    result: dict[str, dict[str, Any]] = {}
+    for phase in PLAN_PHASES:
+        default = dict(DEFAULT_SESSION_SCHEDULE[phase])
+        slot = raw.get(phase) if isinstance(raw, dict) else None
+        if isinstance(slot, dict) and session_minutes(slot.get("time"), phase) is not None:
+            default["time"] = slot["time"]
+        if isinstance(slot, dict) and isinstance(slot.get("enabled"), bool):
+            default["enabled"] = slot["enabled"]
+        result[phase] = default
+    return result
+
+
+def session_time(config: Mapping[str, Any], phase: str) -> str:
+    """这一场的 `HH:MM`（`now` 没有固定时间，返回空串）。"""
+    if not is_plan_phase(phase):
+        return ""
+    return str(session_schedule(config)[phase]["time"])
+
+
+def session_label(config: Mapping[str, Any], phase: str) -> str:
+    """「早场 08:00」。"""
+    hhmm = session_time(config, phase)
+    return f"{PHASE_NAMES.get(phase, '本场')} {hhmm}".rstrip()
+
+
+def upcoming_sessions(
+    config: Mapping[str, Any], at: datetime | None = None
+) -> list[tuple[PlanPhase, datetime]]:
+    """开着的场次下一次开跑的时刻，按先后排。关掉的场次（K6）不算。"""
+    now = at or now_beijing()
+    result: list[tuple[PlanPhase, datetime]] = []
+    for phase, slot in session_schedule(config).items():
+        if not slot["enabled"] or not is_plan_phase(phase):
+            continue
+        hour, minute = (int(part) for part in str(slot["time"]).split(":"))
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now > target:
+            target = target + timedelta(days=1)
+        result.append((phase, target))
+    return sorted(result, key=lambda item: item[1])
+
+
+def session_within(
+    config: Mapping[str, Any], minutes: int, at: datetime | None = None
+) -> tuple[PlanPhase, str] | None:
+    """`minutes` 分钟内有没有一场要开跑：有就返回 `(场次, "HH:MM")`。"""
+    now = at or now_beijing()
+    for phase, target in upcoming_sessions(config, now):
+        if (target - now).total_seconds() / 60 <= minutes:
+            return phase, f"{target.hour:02d}:{target.minute:02d}"
+    return None
 
 
 def ensure_private_dir(path: Path) -> None:
@@ -539,6 +648,41 @@ def load_config() -> Config:
     if not isinstance(raw, dict):
         raise RuntimeError("config.json 必须是 JSON object")
     return cast(Config, raw)
+
+
+# 谁在改（K3：界面上要标「几点由 GUI / Discord 改」）。Wado's MAA 调 `maa_action` 时带
+# `MAA_ACTION_SOURCE=gui`；Discord 按钮和聊天不带，记成 discord。
+ACTION_SOURCES = ("gui", "discord")
+
+
+def action_source() -> str:
+    value = os.environ.get("MAA_ACTION_SOURCE", "")
+    return value if value in ACTION_SOURCES else "discord"
+
+
+def update_config(
+    updates: Mapping[str, Any], source: str, at: datetime | None = None
+) -> Config:
+    """改 `config.json` 里的几个键，顺手记下「谁、几点改的」（`config_meta`）。
+
+    只给 `maa_action config set` / `schedule` 用：值必须**已经校验过**。持
+    `state_lock()` 读改写，免得两边同时改丢字段；`config_meta` 里记过的键在
+    `deploy.py` 时保留线上值（用户改过的不被种子盖回去）。
+    """
+    now = at or now_beijing()
+    with state_lock():
+        current = check_schema("config.json", load_json(CONFIG_PATH, {}), CONFIG_SCHEMA_VERSION)
+        if not isinstance(current, dict):
+            raise RuntimeError("config.json 必须是 JSON object")
+        meta_raw = current.get("config_meta")
+        meta: dict[str, Any] = dict(meta_raw) if isinstance(meta_raw, dict) else {}
+        for key, value in updates.items():
+            current[key] = value
+            meta[key] = {"source": source, "updated_at": now.isoformat()}
+        current["config_meta"] = meta
+        current.setdefault("schema_version", CONFIG_SCHEMA_VERSION)
+        atomic_write_json(CONFIG_PATH, current)
+    return cast(Config, current)
 
 
 def require_executable(

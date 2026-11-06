@@ -234,6 +234,7 @@ SCRIPT_NAMES = (
     "maa_gamedata.py",
     "maa_copilot_worker.py",
     "maa_skland.py",
+    "maa_schedule.py",
 )
 # swiftc 编译产物：线上是二进制，`--check` 只查存在。
 COMPILED_HELPERS = ("ocrbox", "winmove")
@@ -354,10 +355,14 @@ def deploy_state(channel_id: str) -> None:
         current_config = migrate_live_config(
             current_config, desired_config.get("schema_version", 1)
         )
+    # Wado's MAA / `maa_action config set` 改过的键记在 `config_meta` 里（K3：状态只有一份）。
+    # 这些是用户的选择，部署不能拿种子盖回去；没改过的键照旧由仓库拥有。
+    meta = current_config.get("config_meta")
+    user_edited = tuple(meta) if isinstance(meta, dict) else ()
     preserved_runtime_caches = {
         key: current_config[key]
-        for key in PRESERVED_RUNTIME_CACHE_KEYS
-        if key in current_config
+        for key in (*PRESERVED_RUNTIME_CACHE_KEYS, *user_edited, "config_meta")
+        if key in current_config and key != "schema_version"
     }
     current_config.update(desired_config)
     current_config.update(preserved_runtime_caches)
