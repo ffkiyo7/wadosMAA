@@ -123,17 +123,22 @@ struct ToolsPage: View {
     }
 
     /// 只开「开始唤醒」和这一项，跑起来后把勾选还原。
+    /// `tryStartTasks()` 会挂起到 Core 开跑，这期间用户可能又改了勾选：只还原仍是我们设的那个值的项，
+    /// 用户动过的、新加的都不碰。
     private func runOnly(_ id: UUID) async {
         let saved = Dictionary(uniqueKeysWithValues: viewModel.tasks.map { ($0.id, $0.enabled) })
+        var forced: [UUID: Bool] = [:]
         viewModel.tasks = viewModel.tasks.map { task in
             var copy = task
             if case .startup = task.task { copy.enabled = task.enabled } else { copy.enabled = task.id == id }
+            forced[task.id] = copy.enabled
             return copy
         }
         await viewModel.tryStartTasks()
         viewModel.tasks = viewModel.tasks.map { task in
+            guard let original = saved[task.id], forced[task.id] == task.enabled else { return task }
             var copy = task
-            copy.enabled = saved[task.id] ?? task.enabled
+            copy.enabled = original
             return copy
         }
     }
