@@ -322,7 +322,7 @@ struct CopilotContent_Previews: PreviewProvider {
 // MARK: - File Paths
 
 extension URL {
-    static let bundledCopilotDirectory = Bundle.main.resourceURL!
+    static let bundledCopilotDirectory = MaaCliPaths.base
         .appending(path: "resource/")
         .appending(path: "copilot/")
 

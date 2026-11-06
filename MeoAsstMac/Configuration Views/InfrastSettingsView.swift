@@ -223,11 +223,7 @@ extension String {
     fileprivate static let plan_333_3 = bundledPath(for: "333_layout_for_Orundum_3_times_a_day.json")
 
     private static func bundledPath(for name: String) -> String {
-        Bundle.main.resourceURL?
-            .appendingPathComponent("resource")
-            .appendingPathComponent("custom_infrast")
-            .appendingPathComponent(name)
-            .path ?? ""
+        MaaCliPaths.resourceFile("custom_infrast/\(name)")?.path ?? ""
     }
 }
 

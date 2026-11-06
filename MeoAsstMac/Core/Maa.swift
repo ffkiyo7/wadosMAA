@@ -18,18 +18,21 @@ actor MAAProvider {
     private init() {}
 
     func loadResource(path: String) throws {
+        guard CorePreflight.coreLoaded else { throw MaaCoreError.coreUnavailable }
         guard AsstLoadResource(path).isTrue else {
             throw MaaCoreError.loadResourceFailed
         }
     }
 
     func setUserDirectory(path: String) throws {
+        guard CorePreflight.coreLoaded else { throw MaaCoreError.coreUnavailable }
         guard AsstSetUserDir(path).isTrue else {
             throw MaaCoreError.setUserDirectoryFailed
         }
     }
 
     func mapLevelCode(matching key: String) -> String? {
+        guard CorePreflight.extraCallersAvailable else { return nil }
         let mapLevelKey = key.withCString {
             AsstGetMapLevelKey($0)
         }
@@ -40,6 +43,7 @@ actor MAAProvider {
     }
 
     func itemName(for id: String) -> String {
+        guard CorePreflight.extraCallersAvailable else { return "" }
         let name = id.withCString {
             AsstGetItemName($0)
         }
@@ -64,6 +68,7 @@ actor MAAHandle {
     private var pendingCalls = [AsstAsyncCallId: CheckedContinuation<JSON, Error>]()
 
     init(options: MAAInstanceOptions = [:]) async throws {
+        guard CorePreflight.coreLoaded else { throw MaaCoreError.coreUnavailable }
         (messages, continuation) = AsyncStream<MaaMessage>.makeStream()
 
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
@@ -219,6 +224,8 @@ enum MAATaskType: String {
 }
 
 enum MaaCoreError: Error {
+    /// maa-cli 的 libMaaCore 没加载上（没装、或者 maa-cli 正在更新把 lib/ 删了）。弱链接下调用任何 Asst* 都会崩。
+    case coreUnavailable
     case loadResourceFailed
     case setUserDirectoryFailed
     case setInstanceOptionFailed

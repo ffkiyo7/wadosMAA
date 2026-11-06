@@ -1,0 +1,4 @@
+module MaaCore {
+    umbrella header "MaaCore.h"
+    export *
+}

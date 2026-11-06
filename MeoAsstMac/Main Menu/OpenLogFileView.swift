@@ -53,8 +53,9 @@ struct OpenLogFileView: View {
         AppPaths.coreUserDirectory
     }
 
+    /// 资源在 maa-cli 的目录里。
     private static var documentsDirectory: URL? {
-        AppPaths.support
+        MaaCliPaths.base
     }
 }
 

@@ -116,14 +116,6 @@ import SwiftUI
         }
     }
 
-    // MARK: - Update Settings
-
-    @AppStorage("AutoResourceUpdate") var autoResourceUpdate = false
-
-    @AppStorage("ResourceUpdateChannel") var resourceChannel = MAAResourceChannel.github
-
-    @Published var showResourceUpdate = false
-
     // MARK: - System Settings
 
     @AppStorage("MAAPreventSystemSleeping") var preventSystemSleeping = false {
@@ -176,6 +168,20 @@ import SwiftUI
 extension MAAViewModel {
     func initialize() async throws {
         status = .pending
+        guard CorePreflight.coreLoaded else {
+            logError("找不到 maa-cli 的 MaaCore（\(MaaCliPaths.lib.path)），可能没装或正在更新。等 maa-cli 更新完后重启 App。")
+            throw MaaCoreError.coreUnavailable
+        }
+        CorePreflight.recordLaunchIdentity()
+        if let version = CorePreflight.loadedVersion {
+            logTrace("MaaCore（maa-cli）：\(version)")
+            if !CorePreflight.isCompatible(version) {
+                logWarn("MaaCore \(version) 和头文件 \(CorePreflight.pinnedHeaderVersion) 不是同一个次版本，跑 tools/sync-maacore.sh 核对接口")
+            }
+        }
+        if !CorePreflight.extraCallersAvailable {
+            logWarn("MaaCore 缺少实验接口（AsstGetMapLevelKey / AsstGetItemName），关卡名和物品名显示会退化")
+        }
         try await MAAProvider.shared.setUserDirectory(path: Self.userDirectory.path)
         try await loadResource(channel: clientChannel)
         status = .idle
@@ -266,120 +272,74 @@ extension MAAViewModel {
         return NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
     }
 
-    /// Reloads the resources from the documents directory after update.
-    func reloadResources(channel: MAAClientChannel) async throws {
-        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        try await loadResource(url: documentsDirectory, channel: channel)
+    /// 资源更新（maa-cli 的 `hot-update` / `update`）之后重新加载一遍。
+    func reloadResources() async throws {
+        try await loadResource(channel: clientChannel)
     }
 
-    /// Load base resources and channel-specific resources.
+    /// 照搬 maa-cli 的加载顺序（S0a §7.6、S0b §2.2）：各层基础资源 → 各层的外服差异 → 各层的 iOS 平台差异。
+    /// 平台差异放在最后，会覆盖用户资源层，这一点和 maa-cli 一致；GUI 和 cron 跑的才是同一套资源。
     ///
-    /// Should be called by `loadResource(channel:)`.
-    private func loadResource(url: URL, channel: MAAClientChannel) async throws {
-        try await loadResource(url: url)
+    /// GUI 自己不再联网：没有包内资源、没有 Documents 资源、没有 OTA、没有 `latestVersion` 检查。
+    /// 更新只走 maa-cli（maa-remote 的 `upstream update`）。
+    private func loadResource(channel: MAAClientChannel) async throws {
+        let layers = MaaCliPaths.resourceLayers
+        guard !layers.isEmpty else {
+            logError("找不到 maa-cli 的资源目录：\(MaaCliPaths.base.path)/resource")
+            throw MaaCoreError.loadResourceFailed
+        }
+
+        for layer in layers {
+            try await MAAProvider.shared.loadResource(path: layer.path)
+        }
 
         if channel.isGlobal {
-            let extraResource = url.appendingPathComponent("resource")
-                .appendingPathComponent("global")
-                .appendingPathComponent(channel.rawValue)
-            if FileManager.default.fileExists(atPath: extraResource.path) {
-                try await loadResource(url: extraResource)
+            for layer in layers {
+                let extra = layer.appending(path: "resource/global/\(channel.rawValue)", directoryHint: .isDirectory)
+                if FileManager.default.fileExists(atPath: extra.appending(path: "resource").path) {
+                    try await MAAProvider.shared.loadResource(path: extra.path)
+                }
             }
         }
-    }
-
-    /// Core process to load resources at url.
-    ///
-    /// Should be called by `loadResource(url:channel:)`.
-    private func loadResource(url: URL) async throws {
-        try await MAAProvider.shared.loadResource(path: url.path)
 
         if touchMode == .MacPlayTools {
-            let platformResource = url.appendingPathComponent("resource")
-                .appendingPathComponent("platform_diff")
-                .appendingPathComponent("iOS")
-            if FileManager.default.fileExists(atPath: platformResource.path) {
-                try await MAAProvider.shared.loadResource(path: platformResource.path)
-            }
-        }
-    }
-
-    /// Fetches OTA resources for the specified channel.
-    private func fetchOTAResource(channel: MAAClientChannel) async throws {
-        let otaFetcher = OTAFetcher()
-        var files = [
-            (path: "resource/tasks.json", name: "resource/tasks/tasks.json"),
-            (path: "gui/StageActivityV2.json", name: "gui/StageActivityV2.json"),
-        ]
-        if channel.isGlobal {
-            files.append(
-                (
-                    path: "resource/global/\(channel.rawValue)/resource/tasks.json",
-                    name: "resource/global/\(channel.rawValue)/resource/tasks/tasks.json"
-                ))
-        }
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            for (path, name) in files {
-                group.addTask {
-                    try await otaFetcher.download(path: path, name: name)
+            for layer in layers {
+                let platform = layer.appending(path: "resource/platform_diff/iOS", directoryHint: .isDirectory)
+                if FileManager.default.fileExists(atPath: platform.appending(path: "resource").path) {
+                    try await MAAProvider.shared.loadResource(path: platform.path)
                 }
             }
-            try await group.waitForAll()
         }
-        let data = try otaFetcher.data(name: "gui/StageActivityV2.json")
-        let decoder = JSONDecoder()
-        stageActivities = try decoder.decode([String: MAAStageActivity].self, from: data)
+
+        logResourceVersion()
+        loadStageActivities()
     }
 
-    /// Load resources from bundled, user, and remote resources.
-    ///
-    /// Should be the outermost call to load resources.
-    private func loadResource(channel: MAAClientChannel) async throws {
-        let (preferUser, currentResourceVersion) = try resourceChannel.version()
-        try await loadResource(url: Bundle.main.resourceURL!, channel: channel)
-
-        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        if preferUser {
-            try await reloadResources(channel: channel)
+    private func logResourceVersion() {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .secondsSince1970
+        let head = MaaCliPaths.maaResourceHead().map { String($0.prefix(8)) } ?? "未知"
+        if let data = try? Data(contentsOf: MaaCliPaths.baseVersionFile),
+            let version = try? decoder.decode(MAAResourceVersion.self, from: data)
+        {
             logTrace(
                 """
-                外部资源版本：\(currentResourceVersion.title)
-                更新时间：\(currentResourceVersion.last_updated)
+                资源（maa-cli）：\(version.title)
+                基础资源更新时间：\(version.last_updated)
+                MaaResource：\(head)
                 """)
         } else {
-            logTrace(
-                """
-                内置资源版本：\(currentResourceVersion.title)
-                更新时间：\(currentResourceVersion.last_updated)
-                """)
+            logTrace("资源（maa-cli）：MaaResource \(head)")
         }
+    }
 
+    /// 活动日历读 maa-cli 刷新的那份（`maa activity` / `maa run` 会刷新），GUI 不自己下载。
+    private func loadStageActivities() {
         do {
-            try await fetchOTAResource(channel: channel)
-            let cachedBaseURL = documentsDirectory.appendingPathComponent("cache")
-            try await loadResource(url: cachedBaseURL, channel: channel)
+            let data = try Data(contentsOf: MaaCliPaths.stageActivityFile)
+            stageActivities = try JSONDecoder().decode([String: MAAStageActivity].self, from: data)
         } catch {
-            logError("关卡数据获取失败: \(error.localizedDescription)")
-        }
-
-        #if DEBUG
-        guard false else { return }
-        #endif
-
-        Task {
-            do {
-                let version = try await self.resourceChannel.latestVersion()
-                if version > currentResourceVersion.last_updated {
-                    logInfo("发现新资源版本：\(version)")
-                    if autoResourceUpdate {
-                        showResourceUpdate = true
-                    }
-                } else {
-                    logInfo("资源已是最新版本")
-                }
-            } catch {
-                logError("无法检查资源更新: \(error.localizedDescription)")
-            }
+            logError("活动日历读取失败: \(error.localizedDescription)")
         }
     }
 

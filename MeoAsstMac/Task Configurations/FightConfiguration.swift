@@ -92,17 +92,9 @@ struct FightConfiguration: MAATaskConfiguration {
             case "ko-kr": "YoStarKR"
             default: nil
             }
-        let url_base = Bundle.main.resourceURL!
-            .appendingPathComponent("resource")
-        let url_mid =
-            if let local {
-                url_base.appendingPathComponent("global")
-                    .appendingPathComponent(local)
-                    .appendingPathComponent("resource")
-            } else {
-                url_base
-            }
-        let url = url_mid.appendingPathComponent("item_index.json")
+        guard let url = MaaCliPaths.resourceFile("item_index.json", global: local) else {
+            throw CocoaError(.fileNoSuchFile)
+        }
         let data = try Data(contentsOf: url)
         let json = try JSONDecoder().decode([String: DropItem].self, from: data)
         for item in json {

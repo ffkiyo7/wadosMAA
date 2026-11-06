@@ -169,7 +169,7 @@ private struct AddPopover: View {
 }
 
 struct CopilotDetail_Previews: PreviewProvider {
-    static let url = Bundle.main.resourceURL!
+    static let url = MaaCliPaths.base
         .appendingPathComponent("resource")
         .appendingPathComponent("copilot")
         .appendingPathComponent("OF-1_credit_fight")
