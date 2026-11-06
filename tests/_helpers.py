@@ -25,6 +25,7 @@ import _isolation  # noqa: E402
 import maa_clearing  # noqa: E402
 import maa_common  # noqa: E402
 import maa_copilot  # noqa: E402
+import maa_daily  # noqa: E402
 import maa_farming  # noqa: E402
 import maa_gamedata  # noqa: E402
 import deploy  # noqa: E402
@@ -69,6 +70,9 @@ def start_module_patches() -> list:
         patch.object(maa_gamedata, "refresh_layout", side_effect=lambda *_a, **_k: (
             maa_gamedata.load_layout(), "")),
     ]
+    # 开跑前的上游硬拒会读真机的 `~/.config/maa-cli/cli.toml`：默认放行，
+    # 要测拦截的用例（`test_upstream`）自己 patch 回来。
+    patches.append(patch.object(maa_daily, "upstream_hard_block", return_value=""))
     for item in patches:
         item.start()
     return patches

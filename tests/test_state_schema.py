@@ -29,6 +29,7 @@ import maa_common  # noqa: E402
 import maa_daily  # noqa: E402
 import maa_farming  # noqa: E402
 import maa_plan_card  # noqa: E402
+import maa_upstream  # noqa: E402
 import deploy  # noqa: E402
 
 
@@ -130,7 +131,7 @@ class CheckSchemaTests(unittest.TestCase):
 class EveryReadIsCheckedTests(unittest.TestCase):
     """不变量 #58：读这几份状态文件的 `load_json()` 必须直接包在 `check_schema()` 里。"""
 
-    GUARDED_PATHS = {"CONFIG_PATH", "PLAN_PATH", "LAST_RUN_PATH", "MANUAL_RUN_PATH"}
+    GUARDED_PATHS = {"CONFIG_PATH", "PLAN_PATH", "LAST_RUN_PATH", "MANUAL_RUN_PATH", "UPSTREAM_PATH"}
 
     def test_every_state_read_goes_through_check_schema(self) -> None:
         checked = 0
@@ -186,7 +187,7 @@ class ConfigSchemaTests(TempDirTestCase):
         super().setUp()
         self.path = self.dir / "config.json"
         self.patch(maa_common, "CONFIG_PATH", self.path)
-        self.patch(maa_plan_card, "CONFIG_PATH", self.path)
+        self.patch(maa_upstream, "CONFIG_PATH", self.path)
 
     def test_a_legacy_config_without_a_version_loads(self) -> None:
         write(self.path, {"channel_id": "1"})
@@ -199,14 +200,14 @@ class ConfigSchemaTests(TempDirTestCase):
 
     def test_the_version_probe_keeps_the_version_and_refuses_a_newer_file(self) -> None:
         write(self.path, {"schema_version": 1, "maa_cli_version": "v0"})
-        maa_plan_card.persist_installed_versions({}, "v0.7.5", "v6.21.3")
+        maa_upstream.persist_installed_versions({}, "v0.7.5", "v6.21.3")
         self.assertEqual(
             read(self.path),
             {"schema_version": 1, "maa_cli_version": "v0.7.5", "maa_core_version": "v6.21.3"},
         )
         write(self.path, {"schema_version": FUTURE})
         with self.assertRaises(maa_common.SchemaVersionError):
-            maa_plan_card.persist_installed_versions({}, "v0.7.5", "")
+            maa_upstream.persist_installed_versions({}, "v0.7.5", "")
         self.assertEqual(read(self.path), {"schema_version": FUTURE})
 
 

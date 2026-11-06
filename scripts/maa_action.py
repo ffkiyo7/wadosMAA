@@ -23,6 +23,7 @@ import maa_copilot
 import maa_playcover
 import maa_schedule
 import maa_settings
+import maa_upstream
 from maa_common import (
     BUTTONS_PATH,
     DEFAULTS_PATH,
@@ -53,6 +54,8 @@ from maa_common import (
     effective_plan,
     is_plan_phase,
     is_run_locked,
+    lock_holder_text,
+    run_lock_holder,
     load_config,
     load_json,
     maa_subprocess_env,
@@ -1452,6 +1455,41 @@ def schedule_sync() -> tuple[bool, str, dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# 上游更新（K17–K20）—— 只给 Wado's MAA 用；更新逻辑本身只在 maa_upstream
+# ---------------------------------------------------------------------------
+
+
+def upstream_status(online: bool = False) -> tuple[bool, str, dict[str, Any]]:
+    """离线 < 2 秒；`--online` 再查 brew / MaaResource 远端，带代理 < 20 秒。"""
+    data = maa_upstream.status(load_config(), online=online)
+    return True, maa_upstream.status_text(data), data
+
+
+def upstream_update() -> tuple[bool, str, dict[str, Any]]:
+    """过闸门后派一个脱离会话的 worker 立即返回；GUI 每 2 秒轮询 `upstream status`。"""
+    config = load_config()
+    reason = maa_upstream.update_gate(config)
+    if not reason:
+        holder = run_lock_holder()
+        if holder is not None or is_run_locked():
+            reason = f"{lock_holder_text(holder) or '另一场'}正在用 maa-cli，等它跑完再更新"
+    if reason:
+        return False, f"⛔ 没有开始更新：{reason}", {"started": False, "blocked": reason}
+    worker = SCRIPTS_DIR / "maa_upstream.py"
+    if not worker.is_file():
+        return False, "maa_upstream.py 尚未部署", {"started": False, "blocked": "未部署"}
+    subprocess.Popen(
+        [sys.executable, str(worker), "update", "gui"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    return True, "⏳ 已开始上游更新（maa-cli → MaaCore → MaaResource），期间不能开跑。", {"started": True}
+
+
+# ---------------------------------------------------------------------------
 # 抄作业预览（K13）—— 只给 Wado's MAA 用：先搜、给人看全部候选，点「确认开打」才派发
 # ---------------------------------------------------------------------------
 
@@ -1859,6 +1897,10 @@ def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
         return schedule_toggle(argv[2], argv[1] == "enable")
     if argv == ["schedule", "sync"]:
         return schedule_sync()
+    if argv in (["upstream", "status"], ["upstream", "status", "--online"]):
+        return upstream_status(online=len(argv) == 3)
+    if argv == ["upstream", "update"]:
+        return upstream_update()
     return None
 
 

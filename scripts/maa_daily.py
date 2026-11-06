@@ -16,6 +16,7 @@ from typing import Any, TextIO, cast
 
 import maa_depot
 import maa_playcover
+from maa_upstream import hard_block as upstream_hard_block
 from maa_common import (
     BEIJING,
     DEFAULT_TASKS,
@@ -1025,6 +1026,35 @@ def report_game_busy(
     )
 
 
+def report_upstream_block(
+    token: str, channel_id: str, phase: Phase, reason: str, at: datetime
+) -> None:
+    """上游状态不对，本场不开游戏。失败要说出来（护栏 4）。"""
+    merge_last_run({
+        "status": "failed",
+        "phase": phase,
+        "startup_error": reason,
+        "summary": f"上游状态不对，本场没开跑：{reason}",
+        "finished_at": at.isoformat(),
+    })
+    discord_request(
+        token,
+        "POST",
+        f"/channels/{channel_id}/messages",
+        {
+            "embeds": [
+                {
+                    "title": f"⛔ MAA 日常·{PHASE_LABELS[phase]}没开跑：上游状态不对",
+                    "description": f"{reason[:1500]}\n\n未启动游戏。修好后可以「现在跑」补一场。",
+                    "color": 0xED4245,
+                    "timestamp": at.isoformat(),
+                }
+            ],
+            "allowed_mentions": {"parse": []},
+        },
+    )
+
+
 def verify_home_screenshot(path: Path) -> tuple[bool | None, str]:
     """Check that a captured screenshot really shows the game home page.
 
@@ -1842,6 +1872,13 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             )
             merge_last_run({"status": "skipped", "finished_at": now_beijing().isoformat()})
             return 0
+
+        # spike §6(c) 方案 B：开跑前离线查一次上游，只认「源被改了」和「不自洽」两种硬拒。
+        # 自动场和手动场都查；其余（不新鲜、上游有新版）只显示，不挡跑。
+        blocked = upstream_hard_block(config)
+        if blocked:
+            report_upstream_block(token, channel_id, phase, blocked, now_beijing())
+            return 1
 
         # PLAN_NAV_GATE B: the automatic phases must not take the device away
         # from a user who is playing — every failure path here would quit their

@@ -236,6 +236,7 @@ SCRIPT_NAMES = (
     "maa_skland.py",
     "maa_schedule.py",
     "maa_settings.py",
+    "maa_upstream.py",
 )
 # swiftc 编译产物：线上是二进制，`--check` 只查存在。
 COMPILED_HELPERS = ("ocrbox", "winmove")
@@ -913,15 +914,15 @@ def bundle_short_version(app: Path) -> str:
 
 
 def probe_maa_versions() -> tuple[str, str]:
-    """`(maa-cli, MaaCore)`，取不到的为空串。复用计划卡的 `maa version` 解析，避免两套。"""
+    """`(maa-cli, MaaCore)`，取不到的为空串。复用 `maa_upstream` 的 `maa version` 解析，避免两套。"""
     scripts = str(ROOT / "scripts")
     if scripts not in sys.path:
         sys.path.insert(0, scripts)
-    import maa_plan_card
+    import maa_upstream
 
     config = load_json(HERMES_HOME / "state" / "maa" / "config.json", {})
     # deploy 不 import maa_common；config.json 的形状由 read_maa_versions() 自己 .get() 兜底。
-    return maa_plan_card.read_maa_versions(cast(Any, config) if isinstance(config, dict) else {})
+    return maa_upstream.read_maa_versions(cast(Any, config) if isinstance(config, dict) else {})
 
 
 def probe_hermes_commit() -> str:

@@ -25,7 +25,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 # 必须先于任何 scripts/ 模块：把 HOME 换成临时目录，碰真实 home / 外网当场炸。
 import _isolation  # noqa: E402
 import _helpers  # noqa: E402
-import maa_plan_card  # noqa: E402
+import maa_upstream  # noqa: E402
 import maa_playcover  # noqa: E402
 import deploy  # noqa: E402
 from _helpers import needs_yaml  # noqa: E402
@@ -347,7 +347,7 @@ class DeployCheckTests(unittest.TestCase):
             calls.append(argv)
             return 0, "maa-cli v0.7.6\nMaaCore v6.22.0", ""
 
-        with patch.object(maa_plan_card, "_run_captured", side_effect=fake_run):
+        with patch.object(maa_upstream, "_run_captured", side_effect=fake_run):
             self.assertEqual(self.real_probe_maa_versions(), ("v0.7.6", "v6.22.0"))
         self.assertEqual(calls, [["/fake/maa", "version"]])
 

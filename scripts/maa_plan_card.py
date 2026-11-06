@@ -4,9 +4,7 @@ on-demand 抄作业 card, and maintain their persistent buttons."""
 
 from __future__ import annotations
 
-import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -15,11 +13,12 @@ from typing import Any
 
 import maa_copilot
 import maa_farming
+import maa_upstream
+from maa_upstream import format_update_summary
 from maa_common import (
     BEIJING,
     BUTTONS_PATH,
     CONFIG_PATH,
-    CONFIG_SCHEMA_VERSION,
     PLAN_PATH,
     PLAN_PHASES,
     PLAN_SCHEMA_VERSION,
@@ -43,7 +42,6 @@ from maa_common import (
     load_json,
     maa_subprocess_env,
     medicine_label,
-    merge_last_run,
     now_beijing,
     plan_sessions,
     plan_stage_label,
@@ -82,8 +80,6 @@ SUPPLY_STAGES: tuple[tuple[str, str, str, frozenset[int]], ...] = (
     ("LS-6 · 作战记录", "LS-6", "作战记录关卡", frozenset(range(7))),
     ("SK-5 · 基建材料", "SK-5", "碳素与家具零件关卡", frozenset({0, 2, 4, 5})),
 )
-DEFAULT_MAA_CLI_FORMULA = "MaaAssistantArknights/tap/maa-cli"
-_VERSION_RE = re.compile(r"(?im)^(maa-cli|MaaCore|maa)\s+(v?\d+\.\d+\.\d+\S*)")
 
 
 def select_phase(
@@ -355,250 +351,15 @@ def refresh_activity_stages(config: Config) -> tuple[bool, str]:
     return True, "、".join(stages) if stages else "当前无开放活动关"
 
 
-def parse_maa_versions(output: str) -> tuple[str, str]:
-    """Return ``(maa-cli version, MaaCore version)`` from ``maa version`` output."""
-    cli = ""
-    core = ""
-    for match in _VERSION_RE.finditer(output or ""):
-        version = match.group(2)
-        if not version.lower().startswith("v"):
-            version = f"v{version}"
-        if match.group(1).lower() == "maacore":
-            core = version
-        else:
-            cli = version
-    return cli, core
-
-
-def format_update_summary(result: dict[str, Any]) -> str:
-    """One Discord field for today's maa-cli / MaaCore check."""
-    if not result.get("ok"):
-        detail = str(result.get("detail") or "未知错误").strip()
-        first = detail.splitlines()[0] if detail else "未知错误"
-        return f"今天检查失败：{first[:300]}"
-
-    def _line(label: str, before: str, after: str) -> tuple[bool, str]:
-        before = before or "未知"
-        after = after or before
-        if before != after:
-            return True, f"{label} {before} → {after}"
-        return False, f"{label} {after}"
-
-    cli_changed, cli_text = _line(
-        "maa-cli",
-        str(result.get("cli_before") or ""),
-        str(result.get("cli_after") or ""),
-    )
-    core_changed, core_text = _line(
-        "MaaCore",
-        str(result.get("core_before") or ""),
-        str(result.get("core_after") or ""),
-    )
-    if result.get("changed") or cli_changed or core_changed:
-        return f"今天已更新：{cli_text}；{core_text}"
-    return f"今天已检查，无新版本（{cli_text} · {core_text}）"
-
-
-def _combined_output(stdout: str, stderr: str) -> str:
-    return "\n".join(part for part in (stdout, stderr) if part)
-
-
-def _run_captured(
-    argv: list[str],
-    *,
-    env: dict[str, str] | None,
-    timeout: int,
-) -> tuple[int, str, str]:
-    try:
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=timeout,
-            env=env,
-        )
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        return 1, "", f"{type(exc).__name__}: {exc}"
-    return (
-        result.returncode,
-        (result.stdout or "").strip(),
-        (result.stderr or "").strip(),
-    )
-
-
-def _brew_env(*, auto_update: bool = True) -> dict[str, str]:
-    env = os.environ.copy()
-    env["HOMEBREW_NO_ENV_HINTS"] = "1"
-    if not auto_update:
-        env["HOMEBREW_NO_AUTO_UPDATE"] = "1"
-    return env
-
-
-def read_maa_versions(config: Config) -> tuple[str, str]:
-    maa = str(config.get("maa_bin", "/opt/homebrew/bin/maa"))
-    code, stdout, stderr = _run_captured(
-        [maa, "version"],
-        env=maa_subprocess_env(config, keep_proxy=True),
-        timeout=30,
-    )
-    if code != 0:
-        return "", ""
-    return parse_maa_versions(_combined_output(stdout, stderr))
-
-
-def persist_installed_versions(
-    config: Config,
-    cli_version: str,
-    core_version: str,
-) -> None:
-    if not cli_version and not core_version:
-        return
-    current = check_schema("config.json", load_json(CONFIG_PATH, {}), CONFIG_SCHEMA_VERSION)
-    if not isinstance(current, dict):
-        current = {}
-    if cli_version:
-        current["maa_cli_version"] = cli_version
-        config["maa_cli_version"] = cli_version
-    if core_version:
-        current["maa_core_version"] = core_version
-        config["maa_core_version"] = core_version
-    atomic_write_json(CONFIG_PATH, current)
-
-
-def upgrade_maa_cli(config: Config) -> dict[str, Any]:
-    """Upgrade the Homebrew maa-cli formula when a newer bottle exists."""
-    formula = str(config.get("maa_cli_formula", DEFAULT_MAA_CLI_FORMULA)).strip()
-    timeout = max(30, int(config.get("maa_cli_update_timeout", 180)))
-    brew = shutil.which("brew")
-    if not brew:
-        return {"ok": True, "changed": False, "detail": "未找到 brew，跳过 maa-cli"}
-    code, stdout, stderr = _run_captured(
-        [brew, "outdated", "--quiet", "--formula", formula],
-        env=_brew_env(auto_update=True),
-        timeout=timeout,
-    )
-    if code != 0:
-        detail = _combined_output(stdout, stderr) or f"brew outdated 退出码 {code}"
-        return {"ok": False, "changed": False, "detail": detail}
-    if not stdout:
-        return {"ok": True, "changed": False, "detail": "maa-cli 已是最新"}
-    code, up_out, up_err = _run_captured(
-        [brew, "upgrade", "--formula", formula],
-        env=_brew_env(auto_update=False),
-        timeout=timeout,
-    )
-    detail = _combined_output(up_out, up_err) or stdout
-    if code != 0:
-        return {
-            "ok": False,
-            "changed": False,
-            "detail": detail or f"brew upgrade 退出码 {code}",
-        }
-    return {"ok": True, "changed": True, "detail": detail or f"已升级 {formula}"}
-
-
-def update_maa_core(config: Config) -> dict[str, Any]:
-    """Download a newer Beta MaaCore (and bundled resources) when one exists."""
-    maa = str(config.get("maa_bin", "/opt/homebrew/bin/maa"))
-    timeout = max(30, int(config.get("resource_update_timeout", 300)))
-    code, stdout, stderr = _run_captured(
-        [maa, "update", "--batch"],
-        env=maa_subprocess_env(config, keep_proxy=True),
-        timeout=timeout,
-    )
-    detail = _combined_output(stdout, stderr)
-    if code != 0:
-        return {
-            "ok": False,
-            "detail": detail or f"maa update 退出码 {code}",
-        }
-    return {"ok": True, "detail": detail}
-
-
-def update_hot_resources(config: Config) -> dict[str, Any]:
-    """Keep the MaaResource overlay compatible with the installed MaaCore."""
-    maa = str(config.get("maa_bin", "/opt/homebrew/bin/maa"))
-    timeout = max(30, int(config.get("resource_update_timeout", 300)))
-    code, stdout, stderr = _run_captured(
-        [maa, "hot-update", "--batch"],
-        env=maa_subprocess_env(config, keep_proxy=True),
-        timeout=timeout,
-    )
-    detail = _combined_output(stdout, stderr)
-    if code != 0:
-        return {
-            "ok": False,
-            "detail": detail or f"maa hot-update 退出码 {code}",
-        }
-    return {"ok": True, "detail": detail}
-
-
 def check_and_update_upstream(
     token: str,
     channel_id: str,
     config: Config,
 ) -> dict[str, Any]:
-    """Check maa-cli and MaaCore on every plan card; follow upstream if newer."""
-    at = now_beijing()
-    cli_before, core_before = read_maa_versions(config)
-    cli_step = upgrade_maa_cli(config)
-    core_step = update_maa_core(config)
-    # The hot-update directory overrides files bundled with MaaCore. Updating
-    # only MaaCore can therefore leave an older infrast.json pointing at
-    # templates that no longer exist in the new bundle. Do not advance the
-    # overlay when the core update itself failed, because the inverse mismatch
-    # (new resources on an old core) is unsafe too.
-    hot_step = (
-        update_hot_resources(config)
-        if core_step.get("ok")
-        else {"ok": False, "detail": "MaaCore 更新失败，未更新热更新资源"}
-    )
-    cli_after, core_after = read_maa_versions(config)
-    cli_after = cli_after or cli_before
-    core_after = core_after or core_before
-    persist_installed_versions(config, cli_after, core_after)
-    ok = (
-        bool(cli_step.get("ok"))
-        and bool(core_step.get("ok"))
-        and bool(hot_step.get("ok"))
-    )
-    changed = bool(cli_step.get("changed")) or (
-        bool(cli_before) and bool(cli_after) and cli_before != cli_after
-    ) or (bool(core_before) and bool(core_after) and core_before != core_after)
-    detail = "\n".join(
-        str(part)
-        for part in (
-            cli_step.get("detail"),
-            core_step.get("detail"),
-            hot_step.get("detail"),
-        )
-        if part
-    )
-    if not ok and not detail:
-        detail = "上游更新失败"
-    result = {
-        "ok": ok,
-        "changed": changed,
-        "cli_before": cli_before,
-        "cli_after": cli_after,
-        "core_before": core_before,
-        "core_after": core_after,
-        "detail": detail[-1000:],
-    }
-    result["summary"] = format_update_summary(result)
-    merge_last_run(
-        {
-            "resource_update_attempted_at": at.isoformat(),
-            "resource_update_status": "ok" if ok else "failed",
-            "resource_update_detail": result["detail"],
-            "resource_update_summary": result["summary"],
-            "resource_update_changed": changed,
-            "maa_cli_version": cli_after,
-            "maa_core_version": core_after,
-        }
-    )
-    if not ok:
+    """早场卡跟一次上游（#40）。更新本身在 `maa_upstream`（持 `run.lock`），这里只管发红卡。"""
+    result = maa_upstream.run_update(config, "plan_card")
+    if result.get("status") == "failed":
+        detail = str(result.get("detail") or "上游更新失败")
         discord_request(
             token,
             "POST",
@@ -609,7 +370,7 @@ def check_and_update_upstream(
                         "title": "❌ MAA 上游更新失败",
                         "description": f"```text\n{detail[-1500:]}\n```",
                         "color": 0xED4245,
-                        "timestamp": at.isoformat(),
+                        "timestamp": now_beijing().isoformat(),
                     }
                 ],
                 "allowed_mentions": {"parse": []},

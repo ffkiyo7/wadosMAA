@@ -101,6 +101,7 @@ DEFAULT_PLAN = {
     "stone": 0,
     "tasks": DEFAULT_TASKS,
 }
+EXTRA_PATH_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
 PROXY_ENV_KEYS = (
     "ALL_PROXY",
     "HTTPS_PROXY",
@@ -207,6 +208,7 @@ class Config(TypedDict, total=False):
     resource_update_timeout: int
     maa_cli_update_timeout: int
     maa_cli_formula: str
+    upstream_proxy: str
     activity_stages: list[Any]
     all_supply_stages_open: bool
     maa_cli_version: str
@@ -335,7 +337,7 @@ class LastRun(TypedDict, total=False):
     depot_item_count: int
     depot_operbox_note: str
     resource_update_attempted_at: str
-    resource_update_status: Literal["ok", "failed"]
+    resource_update_status: Literal["ok", "failed", "skipped"]
     resource_update_changed: bool
     resource_update_detail: str
     resource_update_summary: str
@@ -783,9 +785,22 @@ def maa_subprocess_env(
     if not config_dir:
         raise RuntimeError("maa_config_dir 不能为空")
     env["MAA_CONFIG_DIR"] = config_dir
+    # 从 Finder 起的 Wado's MAA、launchd 起的 cron 都可能没有 Homebrew 的 PATH（spike §6(d)5）。
+    path = [part for part in env.get("PATH", "").split(os.pathsep) if part]
+    for extra in EXTRA_PATH_DIRS:
+        if extra not in path:
+            path.append(extra)
+    env["PATH"] = os.pathsep.join(path)
     if bool(config.get("maa_disable_proxy", False)) and not keep_proxy:
         for key in PROXY_ENV_KEYS:
             env.pop(key, None)
+    elif keep_proxy and not any(env.get(key) for key in PROXY_ENV_KEYS):
+        # 联网更新要代理；环境里没有时用 config 里那一份（代理的唯一来源）。
+        proxy = str(config.get("upstream_proxy") or "").strip()
+        if proxy:
+            for key in PROXY_ENV_KEYS:
+                if not key.lower().startswith("all"):
+                    env[key] = proxy
     return env
 
 
