@@ -18,8 +18,14 @@ struct ContentView: View {
             Sidebar(selection: $selectedSidebar)
         } content: {
             MAAContent(sidebar: $selectedSidebar, selection: $selectedContent)
+                .glassColumn()
         } detail: {
             MAADetail(sidebar: $selectedSidebar, selection: $selectedContent)
+                .glassColumn()
+        }
+        // K9：整个窗口一张背景图，侧栏和工具栏是系统的 Liquid Glass。
+        .containerBackground(for: .window) {
+            WindowBackground()
         }
         .modifier(LegacyImportPrompt())
         .task {

@@ -55,9 +55,19 @@ struct MeoAsstMacApp: App {
                     .tabItem {
                         Label("系统设置", systemImage: "wrench.adjustable")
                     }
+
+                AppearanceSettingsView()
+                    .tabItem {
+                        Label("外观", systemImage: "paintbrush")
+                    }
+
+                RemoteSettingsView()
+                    .tabItem {
+                        Label("maa-remote", systemImage: "point.3.connected.trianglepath.dotted")
+                    }
             }
             .environmentObject(appViewModel)
-            .frame(maxWidth: 360, minHeight: 240)
+            .frame(minWidth: 360, maxWidth: 520, minHeight: 240)
         }
     }
 }
