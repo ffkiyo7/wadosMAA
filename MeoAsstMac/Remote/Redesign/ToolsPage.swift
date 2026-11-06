@@ -128,9 +128,12 @@ struct ToolsPage: View {
     private func runOnly(_ id: UUID) async {
         let saved = Dictionary(uniqueKeysWithValues: viewModel.tasks.map { ($0.id, $0.enabled) })
         var forced: [UUID: Bool] = [:]
+        // 开始唤醒一定要有：用户勾着的几项（多账号）照旧；一项都没勾就开第一项。
+        let startups = viewModel.tasks.filter { if case .startup = $0.task { true } else { false } }
+        let wake = startups.contains(where: \.enabled) ? Set(startups.filter(\.enabled).map(\.id)) : Set(startups.prefix(1).map(\.id))
         viewModel.tasks = viewModel.tasks.map { task in
             var copy = task
-            if case .startup = task.task { copy.enabled = task.enabled } else { copy.enabled = task.id == id }
+            if case .startup = task.task { copy.enabled = wake.contains(task.id) } else { copy.enabled = task.id == id }
             forced[task.id] = copy.enabled
             return copy
         }
