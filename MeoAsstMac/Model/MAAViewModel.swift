@@ -352,8 +352,6 @@ extension MAAViewModel {
                 内置资源版本：\(currentResourceVersion.title)
                 更新时间：\(currentResourceVersion.last_updated)
                 """)
-            let url = documentsDirectory.appendingPathComponent("resource", isDirectory: true)
-            try? FileManager.default.removeItem(at: url)
         }
 
         do {
@@ -408,7 +406,7 @@ extension MAAViewModel {
     }
 
     private static var userDirectory: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        AppPaths.coreUserDirectory
     }
 
     private var instanceOptions: MAAInstanceOptions {

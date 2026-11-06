@@ -197,17 +197,7 @@ struct InfrastSettingsView: View {
     }
 
     private var customInfrastDirectory: URL {
-        let directory = FileManager.default
-            .urls(for: .documentDirectory, in: .userDomainMask)
-            .first!
-            .appendingPathComponent("infrast")
-
-        if !FileManager.default.fileExists(atPath: directory.path) {
-            try? FileManager.default.createDirectory(
-                at: directory, withIntermediateDirectories: true)
-        }
-
-        return directory
+        AppPaths.infrastDirectory
     }
 }
 

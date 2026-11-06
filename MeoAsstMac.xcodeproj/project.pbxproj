@@ -3,7 +3,7 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 55;
+	objectVersion = 77;
 	objects = {
 
 /* Begin PBXBuildFile section */
@@ -263,6 +263,10 @@
 		AEA8E39F2E77003F00355D84 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		F0AD00000000000000000001 /* Remote */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Remote; sourceTree = "<group>"; };
+/* End PBXFileSystemSynchronizedRootGroup section */
+
 /* Begin PBXFrameworksBuildPhase section */
 		833786C828F188D800D39D6F /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
@@ -421,6 +425,7 @@
 		833786CD28F188D800D39D6F /* MeoAsstMac */ = {
 			isa = PBXGroup;
 			children = (
+				F0AD00000000000000000001 /* Remote */,
 				833786CE28F188D800D39D6F /* MeoAsstMacApp.swift */,
 				8329858F29EDAC91009F7ED5 /* Core */,
 				8341195129EC258D00044F45 /* Model */,
@@ -554,6 +559,9 @@
 			buildRules = (
 			);
 			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				F0AD00000000000000000001 /* Remote */,
 			);
 			name = MAA;
 			packageProductDependencies = (

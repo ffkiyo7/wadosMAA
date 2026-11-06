@@ -83,9 +83,7 @@ import Observation
         parent.logStore = self
 
         do {
-            let dir = FileManager.default
-                .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-                .first!.appending(path: "debug/")
+            let dir = AppPaths.debugDirectory
             try FileManager.default.createDirectory(
                 at: dir, withIntermediateDirectories: true)
             let fileLogger = try FileLogger(url: dir.appending(path: "gui.log"))

@@ -326,10 +326,7 @@ extension URL {
         .appending(path: "resource/")
         .appending(path: "copilot/")
 
-    static let externalCopilotDirectory = FileManager.default
-        .urls(for: .documentDirectory, in: .userDomainMask)
-        .first!
-        .appending(path: "copilot/")
+    static let externalCopilotDirectory = AppPaths.copilotDirectory
 }
 
 // MARK: - State Wrappers

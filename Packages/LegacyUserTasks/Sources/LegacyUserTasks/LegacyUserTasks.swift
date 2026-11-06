@@ -19,10 +19,11 @@ import Foundation
     case reclamation(LegacyReclamationConfiguration)
 }
 
-public func legacyTasks() throws -> [MAALegacyTask] {
-    let legacyTasksURL = FileManager.default
-        .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-        .first!
+/// - Parameter directory: 旧版 `UserTasks.plist` 所在目录。调用方必须传 App 专属目录：
+///   去沙盒后 `.applicationSupportDirectory` 是 `~/Library/Application Support` 根目录，
+///   这里读完会删文件，不能落在共享目录里。
+public func legacyTasks(in directory: URL) throws -> [MAALegacyTask] {
+    let legacyTasksURL = directory
         .appendingPathComponent("UserTasks")
         .appendingPathExtension("plist")
 

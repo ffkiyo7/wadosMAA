@@ -18,7 +18,7 @@ struct OpenLogFileView: View {
         }
 
         Button("打开根目录…") {
-            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: FileManager.default.currentDirectoryPath)
+            NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: AppPaths.support.path)
         }
 
         Button("PlayCover 链接…") {
@@ -50,17 +50,11 @@ struct OpenLogFileView: View {
     }
 
     private static var userDirectory: URL? {
-        FileManager
-            .default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
-            .first
+        AppPaths.coreUserDirectory
     }
 
     private static var documentsDirectory: URL? {
-        FileManager
-            .default
-            .urls(for: .documentDirectory, in: .userDomainMask)
-            .first
+        AppPaths.support
     }
 }
 

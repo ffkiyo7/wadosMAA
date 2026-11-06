@@ -9,7 +9,7 @@ import Foundation
 import LegacyUserTasks
 
 func migrateLegacyConfigurations() throws -> [DailyTask] {
-    try legacyTasks().map { task in
+    try legacyTasks(in: AppPaths.support).map { task in
         switch task {
         case .startup(let config):
             let task = MAATask.startup(.init(migrating: config))
