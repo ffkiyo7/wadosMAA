@@ -20,8 +20,10 @@ import maa_common
 import maa_copilot
 import maa_playcover
 import maa_schedule
+import maa_settings
 from maa_common import (
     BUTTONS_PATH,
+    DEFAULTS_PATH,
     DEFAULT_MANUAL_RUN_BLACKOUT_MINUTES,
     LAST_RUN_PATH,
     LAST_RUN_SCHEMA_VERSION,
@@ -53,6 +55,7 @@ from maa_common import (
     load_json,
     maa_subprocess_env,
     medicine_label,
+    normalize_plan,
     now_beijing,
     plan_stage_label,
     require_executable,
@@ -1343,6 +1346,101 @@ def schedule_sync() -> tuple[bool, str, dict[str, Any]]:
     return True, ("cron 已同步：" + "；".join(notes)) if notes else "cron 和配置一致。", report
 
 
+# ---------------------------------------------------------------------------
+# 配置与持久默认值（K3 / K5）—— 只给 Wado's MAA 用
+# ---------------------------------------------------------------------------
+
+
+def config_get() -> tuple[bool, str, dict[str, Any]]:
+    data = maa_settings.snapshot(load_config())
+    return True, f"可改的配置共 {len(data['fields'])} 项。", data
+
+
+def config_patch(raw: str) -> tuple[bool, str, dict[str, Any]]:
+    """`config patch <JSON 对象>`：一次改多项，全部合规才写。"""
+    try:
+        updates = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return False, f"不是合法的 JSON：{exc.msg}", {}
+    if not isinstance(updates, dict):
+        return False, "要传一个 JSON 对象：{键: 值}", {}
+    try:
+        clean = maa_settings.validate_many(updates)
+    except ValueError as exc:
+        return False, str(exc), {}
+    config = maa_common.update_config(clean, action_source())
+    labels = "、".join(maa_settings.BY_KEY[key].label for key in clean)
+    return True, f"已保存：{labels}。下一场日常生效，正在跑的不受影响。", maa_settings.snapshot(config)
+
+
+def config_set(key: str, raw: str) -> tuple[bool, str, dict[str, Any]]:
+    """`config set <键> <JSON 值>`。"""
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return False, f"值不是合法的 JSON：{exc.msg}", {}
+    return config_patch(json.dumps({key: value}, ensure_ascii=False))
+
+
+def _defaults_snapshot() -> dict[str, Any]:
+    raw = load_json(DEFAULTS_PATH, {})
+    plan = normalize_plan(raw if isinstance(raw, dict) else {})
+    meta = raw if isinstance(raw, dict) else {}
+    return {
+        "stage": plan.get("stage", ""),
+        "tasks": plan.get("tasks", {}),
+        "source": str(meta.get("source") or ""),
+        "updated_at": str(meta.get("updated_at") or ""),
+    }
+
+
+def defaults_show() -> tuple[bool, str, dict[str, Any]]:
+    data = _defaults_snapshot()
+    return True, f"持久默认：刷 {data['stage'] or '上次的本'}。", data
+
+
+def defaults_set(field: str, *values: str) -> tuple[bool, str, dict[str, Any]]:
+    """`defaults set stage <关卡>` / `defaults set task <fight|infrast|recruit|mall|award> <on|off>`。
+
+    `defaults.json` 是每天都生效的底子（今天的覆盖在 `plan.json`）。药和碎石不在这里：
+    `normalize_plan()` 每次都强制 expiring / 0（不变量 #1 / #2）。
+    """
+    config = load_config()
+    raw = load_json(DEFAULTS_PATH, {})
+    current: dict[str, Any] = dict(normalize_plan(raw if isinstance(raw, dict) else {}))
+    if field == "stage" and len(values) == 1:
+        stage = values[0]
+        if not valid_stage(stage, config):
+            return False, f"关卡格式不对：{stage[:20]!r}", {}
+        current["stage"] = stage
+        what = f"默认关改成 {stage or '上次的本'}"
+    elif (
+        field == "task"
+        and len(values) == 2
+        and values[0] in maa_common.DEFAULT_TASKS
+        and values[1] in ("on", "off")
+    ):
+        tasks: dict[str, bool] = dict(current.get("tasks") or {})
+        tasks[values[0]] = values[1] == "on"
+        current["tasks"] = tasks
+        what = f"默认{TASK_NAMES.get(values[0], values[0])}{'开' if values[1] == 'on' else '关'}"
+    else:
+        return False, (
+            "只支持 defaults set stage <关卡> 或 "
+            "defaults set task <fight|infrast|recruit|mall|award> <on|off>。"
+        ), {}
+    now = now_beijing()
+    with state_lock():
+        written = dict(normalize_plan(current))
+        written.pop("skip", None)
+        written.update({"source": action_source(), "updated_at": now.isoformat()})
+        atomic_write_json(DEFAULTS_PATH, written)
+    return True, f"{what}；今天没被覆盖的场次从下一场起生效。", _defaults_snapshot()
+
+
+TASK_NAMES = {"fight": "清理智", "infrast": "基建", "recruit": "公招", "mall": "信用商店", "award": "领奖"}
+
+
 def copilot_auto(value: str) -> tuple[bool, str]:
     """`copilot auto off|on|status`：暂停 / 恢复 watcher 的自动作业。
 
@@ -1449,6 +1547,16 @@ def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
 
     这些命令**不进 Discord 登记表**，也不在技能的命令清单里；不是这类命令返回 None。
     """
+    if argv == ["config", "get"]:
+        return config_get()
+    if argv[:2] == ["config", "set"] and len(argv) == 4:
+        return config_set(argv[2], argv[3])
+    if argv[:2] == ["config", "patch"] and len(argv) == 3:
+        return config_patch(argv[2])
+    if argv == ["defaults", "show"]:
+        return defaults_show()
+    if argv[:2] == ["defaults", "set"] and len(argv) in (4, 5):
+        return defaults_set(argv[2], *argv[3:])
     if argv == ["schedule", "show"]:
         return schedule_show()
     if argv[:2] == ["schedule", "set"] and len(argv) == 4:

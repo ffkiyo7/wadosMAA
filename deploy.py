@@ -235,6 +235,7 @@ SCRIPT_NAMES = (
     "maa_copilot_worker.py",
     "maa_skland.py",
     "maa_schedule.py",
+    "maa_settings.py",
 )
 # swiftc 编译产物：线上是二进制，`--check` 只查存在。
 COMPILED_HELPERS = ("ocrbox", "winmove")

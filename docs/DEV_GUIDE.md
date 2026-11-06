@@ -1098,6 +1098,7 @@ result = normalize_plan(result)             ← 再规范化一次
 |---|---|---|
 | `channel_id` | 占位符 | 部署时由 `MAA_CHANNEL_ID` 或本机已有配置解析，**不入库** |
 | `session_schedule` | `{am: {time: "08:00", enabled: true}, pm: {time: "22:00", enabled: true}}` | 早晚场开跑时间（北京时间）和开关（K6）。早场限 05:00–11:59，晚场限 12:00–23:59（`maa_common.SESSION_WINDOWS`）。计划卡固定提前 10 分钟。手动场 / 抄作业 blackout、`min_lead` 都按它算，**关掉的场次不算**。改它走 `maa_action schedule set/enable/disable`（Wado's MAA），会同步 `hermes cron`；读的时候一场写坏只退回那一场的默认值 |
+| （可改的键） | — | **只有 `scripts/maa_settings.FIELDS` 里的键能从外面改**（`maa_action config set/patch`，Wado's MAA 的配置页）：逐项校验、一次改多项全部合规才写。商店物品名 / 材料名和渲染器共用 `maa_common.SAFE_MALL_ITEM_RE`（不变量 #51），写入时整次拒绝。路径、可执行文件、MaaTools 地址、运行时缓存、突袭开关不在表里；降级开关（碎石 / 吃药 / 助战 / 忽略练度）永远不许进表（`test_no_downgrade_switch_is_ever_editable`）|
 | `config_meta` | 不在种子里 | `{键: {source: gui\|discord, updated_at}}`：`update_config()` 写，记「谁、几点改的」（K3）。**这里记过的键 `deploy.py` 保留线上值**，没记过的照旧由仓库种子拥有 |
 | `game_bundle_id` | `com.hypergryph.arknights` | PlayCover 设置文件 `App Settings/<bundle id>.plist` 的文件名 |
 | `playcover_app_path` | `~/Library/Containers/io.playcover.PlayCover/Applications/com.hypergryph.arknights.app` | `open -a` 拉起 / 激活游戏；`pgrep` / `pkill -f` 用它里面可执行文件的完整路径 |
@@ -1185,7 +1186,8 @@ task_names = ["RaidConfirm", "ChangeToRaidDifficulty"]
   一图流 / 企鹅物流（见下面的致谢），抓不到时才退回启发式排序
   （手工表钉的优先 → 理智低的优先 → 关卡名兜底）。
 
-`defaults.json` 是持久默认（关卡、任务开关），`plan.json` 是**带日期戳的今日覆盖**，
+`defaults.json` 是持久默认（关卡、任务开关），写入口是 `maa_action defaults set stage <关>` /
+`defaults set task <环节> <on|off>`（只给 Wado's MAA 用，写时带 `source` / `updated_at`）；`plan.json` 是**带日期戳的今日覆盖**，
 过期自动失效。`medicine` / `stone` 已从可变状态里移除，改由 runner 硬编码策略。
 
 ---

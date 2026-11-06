@@ -130,6 +130,9 @@ PLAN_SESSION_FIELDS = (
 # 上游 itemId 的字符集（`30013` / `mod_unlock_token`）。它会原样变成 `daily.toml`
 # 里 `drops` 表的键，所以在写进计划之前就校验，不留「渲染时再说」的口子。
 SAFE_ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# 信用商店物品名 / 材料名的白名单（不变量 #51）。渲染器（`maa_daily._mall_item_list()`）
+# 遇到不合规的项静默丢弃，`maa_settings` 写入时整次拒绝——两边必须是同一个正则。
+SAFE_MALL_ITEM_RE = re.compile(r"^[　-鿿·・A-Za-z0-9 \-_]{1,20}$")
 
 
 # ---------------------------------------------------------------------------

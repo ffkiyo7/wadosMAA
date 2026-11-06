@@ -25,6 +25,7 @@ from maa_common import (
     MANUAL_RUN_SCHEMA_VERSION,
     RUNS_DIR,
     SAFE_ITEM_ID_RE,
+    SAFE_MALL_ITEM_RE,
     SCRIPTS_DIR,
     Config,
     LastRun,
@@ -61,7 +62,6 @@ ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 # 只接受「中日文字 + 拉丁字母 + 数字 + 少数分隔符」，长度 ≤ 20。校验不过的项
 # **静默丢弃**：一个写歪的物品名不该让整场日常渲染不出来（D-2 的教训）。
 # 　-鿿 = CJK 标点 + 假名 + 汉字；· / ・ 是「技能概要·卷1」的中点。
-SAFE_MALL_ITEM_RE = re.compile(r"^[　-鿿·・A-Za-z0-9 \-_]{1,20}$")
 PHASE_LABELS = {"am": "早", "pm": "晚", "now": "手动"}
 # Only the cron-driven phases defer to a running game. `now` is the user
 # saying "run it right now" and must never be probe-skipped (PLAN_NAV_GATE B-1).
