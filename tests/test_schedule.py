@@ -343,3 +343,74 @@ class DeployKeepsUserEditsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlanCardRefreshTests(unittest.TestCase):
+    """K3：GUI 改了某一场的计划，Discord 上最新那张计划卡跟着 PATCH。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        self.card = root / "plan_card.json"
+        self.buttons = root / "buttons.json"
+        maa_common.atomic_write_json(self.buttons, {
+            "hermes:btn:maa:am:skip": {"args": ["old"]},
+            "hermes:btn:maa:pm:skip": {"args": ["keep"]},
+            "hermes:btn:agent-book:x": {},
+        })
+        self.requests: list[tuple] = []
+        self.now = datetime(2026, 11, 6, 9, 0, tzinfo=BEIJING)
+        for item in (
+            patch.object(maa_plan_card, "CARD_STATE_PATH", self.card),
+            patch.object(maa_plan_card, "BUTTONS_PATH", self.buttons),
+            patch.object(maa_plan_card, "state_lock", return_value=contextlib.nullcontext()),
+            patch.object(maa_plan_card, "load_config", return_value={"channel_id": "42"}),
+            patch.object(maa_plan_card, "discord_token", return_value="t"),
+            patch.object(maa_plan_card, "discord_request",
+                         side_effect=lambda *a, **k: self.requests.append(a) or {}),
+            patch.object(maa_plan_card, "now_beijing", lambda: self.now),
+            patch.object(maa_plan_card, "effective_plan",
+                         lambda phase="am": maa_common.normalize_plan({"stage": "CE-6", "skip": True})),
+            patch.object(maa_plan_card, "current_farming_result", side_effect=RuntimeError("offline")),
+            patch.object(maa_plan_card, "today_stage_source", return_value="discord"),
+            patch.object(maa_plan_card, "_stage_choices", return_value=[("1-7", "1-7", "x")]),
+        ):
+            item.start()
+            self.addCleanup(item.stop)
+
+    def test_posting_a_card_records_it_and_a_refresh_patches_only_that_message(self) -> None:
+        maa_plan_card.record_card("am", {"id": "777"}, None)
+        message = maa_plan_card.refresh_card("am", self.now)
+        self.assertIn("已刷新", message)
+        method, path, body = self.requests[-1][1:4]
+        self.assertEqual((method, path), ("PATCH", "/channels/42/messages/777"))
+        self.assertIn("已按 Wado's MAA 的修改刷新", body["embeds"][0]["footer"]["text"])
+        registry = json.loads(self.buttons.read_text(encoding="utf-8"))
+        # 跳过了 → 按钮换成「恢复本场」，旧的 skip 键删掉；另一场和别的功能的键不动。
+        self.assertIn("hermes:btn:maa:am:unskip", registry)
+        self.assertNotIn("hermes:btn:maa:am:skip", registry)
+        self.assertEqual(registry["hermes:btn:maa:pm:skip"], {"args": ["keep"]})
+        self.assertIn("hermes:btn:agent-book:x", registry)
+
+    def test_only_todays_latest_card_of_that_session_is_touched(self) -> None:
+        maa_plan_card.record_card("pm", {"id": "888"}, None)
+        self.assertIn("不是这一场", maa_plan_card.refresh_card("am", self.now))
+        later = datetime(2026, 11, 7, 9, 0, tzinfo=BEIJING)
+        self.assertIn("还没发", maa_plan_card.refresh_card("pm", later))
+        self.assertEqual(self.requests, [])
+
+    def test_gui_plan_edits_spawn_a_refresh_and_discord_edits_do_not(self) -> None:
+        spawned: list[list[str]] = []
+        plan = Path(self._tmp.name) / "plan.json"
+        with patch.object(maa_action, "PLAN_PATH", plan), \
+                patch.object(maa_action, "state_lock", return_value=contextlib.nullcontext()), \
+                patch.object(maa_action, "_spawn_action", side_effect=spawned.append):
+            with patch.dict("os.environ", {"MAA_ACTION_SOURCE": "gui"}):
+                maa_action._save_override("pm", "skip", True)
+            with patch.dict("os.environ", {"MAA_ACTION_SOURCE": ""}):
+                maa_action._save_override("am", "skip", True)
+        self.assertEqual(spawned, [["plan", "refresh-card", "pm"]])
+        saved = json.loads(plan.read_text(encoding="utf-8"))
+        self.assertEqual(saved["sessions"]["pm"]["source"], "gui")
+        self.assertEqual(saved["sessions"]["am"]["source"], "discord")

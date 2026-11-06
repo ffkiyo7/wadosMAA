@@ -1004,6 +1004,9 @@ Discord 肉鸽卡和 `hermes:btn:maa-roguelike:` 前缀、`roguelike.json`、原
   copilot/searches/<token>.json 一轮的执行清单 `entries: [{stage, stage_id, mode,
                       candidate, sanity_cost}]` + scheduled_at + 状态机（25h TTL）
   copilot/card.json 上一张抄作业卡的 message_id（0600）。**不能放进 copilot/searches/**
+  plan_card.json  最新一张计划卡：{phase, message_id, date, update_summary}。GUI 改了这一场的
+                  计划时 `maa_action plan refresh-card <场次>`（脱离会话）按它 PATCH 那张卡（K3）；
+                  只记最新一张——早场卡在晚场卡发出时已被收起，再 PATCH 会把控件放回去
   run.lock        flock 独占锁（执行）
   last_run.lock   flock 独占锁（保护 last_run.json 的跨进程 read-modify-write）
   am/ pm/         空目录，仅用于给 cron 传场次

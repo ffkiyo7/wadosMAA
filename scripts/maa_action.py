@@ -168,6 +168,10 @@ def _save_override(phase: PlanPhase, key: str, value: Any, **extra: Any) -> Plan
         plan["schema_version"] = PLAN_SCHEMA_VERSION
         # There is deliberately no stone field in this write path.
         atomic_write_json(PLAN_PATH, plan)
+    if action_source() == "gui":
+        # K3：GUI 改了这一场的计划，Discord 上那张计划卡也要跟着变。PATCH 要建卡、
+        # 可能算材料推荐，放进脱离会话的子进程，不占这条回执。
+        _spawn_action(["plan", "refresh-card", phase])
     return effective_plan(phase=phase)
 
 
@@ -1638,6 +1642,12 @@ def copilot_status(token: str) -> tuple[bool, str]:
     return True, "⏳ 等待匹配……"
 
 
+def plan_refresh_card(phase: PlanPhase) -> tuple[bool, str, dict[str, Any]]:
+    from maa_plan_card import refresh_card
+
+    return True, refresh_card(phase), {}
+
+
 def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
     """只给 Wado's MAA 用的命令：回执多带一个 `data`（结构化结果）。
 
@@ -1653,6 +1663,8 @@ def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
         return defaults_show()
     if argv[:2] == ["defaults", "set"] and len(argv) in (4, 5):
         return defaults_set(argv[2], *argv[3:])
+    if argv[:2] == ["plan", "refresh-card"] and len(argv) == 3 and valid_phase(argv[2]):
+        return plan_refresh_card(argv[2])
     if argv[:2] == ["run", "local"] and 4 <= len(argv) <= 5:
         return run_local(argv[2], argv[3], *argv[4:])
     if argv == ["schedule", "show"]:

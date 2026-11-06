@@ -23,6 +23,7 @@ from maa_common import (
     PLAN_PATH,
     PLAN_PHASES,
     PLAN_SCHEMA_VERSION,
+    STATE_DIR,
     WATCH_PATH,
     Config,
     Plan,
@@ -1349,7 +1350,7 @@ def main(argv: list[str] | None = None) -> int:
         embed["footer"]["text"] += f" · {cleanup_result['failed']} 个旧子区删除失败"
     if retired["failed"]:
         embed["footer"]["text"] += f" · {retired['failed']} 张旧卡片收起失败"
-    discord_request(
+    posted = discord_request(
         token,
         "POST",
         f"/channels/{channel_id}/messages",
@@ -1359,10 +1360,81 @@ def main(argv: list[str] | None = None) -> int:
             "allowed_mentions": {"parse": []},
         },
     )
+    record_card(phase, posted, update)
     _skland_health_notice(token, channel_id)
     if update is not None and not update.get("ok"):
         raise RuntimeError("maa 上游更新失败；已发送红色告警")
     return 0
+
+
+# 最新一张计划卡（K3：GUI 改了计划，Discord 上那张卡跟着 PATCH）。只记**最新**一张：
+# 21:50 的晚场卡发出时早场卡已被 `retire_old_plan_cards()` 收起，再 PATCH 它会把收起的
+# 控件放回去。
+CARD_STATE_PATH = STATE_DIR / "plan_card.json"
+
+
+def record_card(phase: PlanPhase, posted: Any, update: dict[str, Any] | None) -> None:
+    message_id = str(posted.get("id", "")) if isinstance(posted, dict) else ""
+    if not message_id.isdigit():
+        return
+    summary = ""
+    if update:
+        summary = str(update.get("summary") or format_update_summary(update))[:1024]
+    atomic_write_json(CARD_STATE_PATH, {
+        "phase": phase,
+        "message_id": message_id,
+        "date": now_beijing().date().isoformat(),
+        "update_summary": summary,
+    })
+
+
+def refresh_card(phase: PlanPhase, at: datetime | None = None) -> str:
+    """按现在的计划重画**今天最新那张**这一场的计划卡（embed + 控件），PATCH 回去。
+
+    不是这一场 / 不是今天 / 没记录 → 什么都不做，返回原因。只重画，不重新自动定关、
+    不跟上游、不发新卡。由 `maa_action plan refresh-card` 在脱离会话的子进程里调。
+    """
+    now = at or now_beijing()
+    state = load_json(CARD_STATE_PATH, {})
+    if not isinstance(state, dict) or state.get("phase") != phase:
+        return "Discord 上最新的计划卡不是这一场，不用刷新"
+    if state.get("date") != now.date().isoformat():
+        return "这一场今天的计划卡还没发，不用刷新"
+    message_id = str(state.get("message_id") or "")
+    if not message_id.isdigit():
+        return "没记下计划卡的消息 id"
+    config = load_config()
+    channel_id = str(config.get("channel_id", "")).strip()
+    if not channel_id.isdigit():
+        raise RuntimeError("config.json 中尚未配置 Discord channel_id")
+    token = discord_token()
+    plan = effective_plan(phase=phase)
+    components, entries = build_components(plan, config, phase)
+    with state_lock():
+        registry = load_json(BUTTONS_PATH, {})
+        if not isinstance(registry, dict):
+            raise RuntimeError("共享按钮登记表格式错误")
+        # 只换这一场的键：跳过 / 恢复按钮的 custom_id 不同，旧的那个要删掉。
+        for custom_id in list(registry):
+            if custom_id.startswith(f"{BUTTON_PREFIX}{phase}:"):
+                registry.pop(custom_id)
+        registry.update(entries)
+        atomic_write_json(BUTTONS_PATH, registry)
+    try:
+        farming: dict[str, Any] | None = current_farming_result(plan, config)
+    except Exception as exc:  # noqa: BLE001 — (c) 材料推荐只是卡上的一段说明，拿不到也要把计划刷新上去
+        print(f"刷新计划卡时材料推荐失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        farming = None
+    update = {"ok": True, "summary": state["update_summary"]} if state.get("update_summary") else None
+    embed = build_embed(plan, config, phase, update, farming, today_stage_source(phase), now)
+    embed["footer"]["text"] += f" · {now:%H:%M} 已按 Wado's MAA 的修改刷新"
+    discord_request(
+        token,
+        "PATCH",
+        f"/channels/{channel_id}/messages/{message_id}",
+        {"embeds": [embed], "components": components, "allowed_mentions": {"parse": []}},
+    )
+    return f"已刷新 Discord 上的{phase_title(phase)}计划卡"
 
 
 def _skland_health_notice(token: str, channel_id: str) -> None:
