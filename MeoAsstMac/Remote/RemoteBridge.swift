@@ -14,10 +14,12 @@ struct RemoteReceipt: Sendable {
     /// `data` 字段的原始 JSON；没有就是 nil。
     let data: Data?
 
-    func decode<T: Decodable>(_ type: T.Type) throws -> T {
+    /// `snakeCase` 会把**字典的键**也一起改写（`recruit_times` → `recruitTimes`），
+    /// 所以含「键是配置名 / 文件名」的字典的形状要传 false，自己写 CodingKeys。
+    func decode<T: Decodable>(_ type: T.Type, snakeCase: Bool = true) throws -> T {
         guard let data else { throw RemoteBridgeError.badReceipt("回执里没有 data") }
         let decoder = JSONDecoder()
-        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        if snakeCase { decoder.keyDecodingStrategy = .convertFromSnakeCase }
         return try decoder.decode(T.self, from: data)
     }
 

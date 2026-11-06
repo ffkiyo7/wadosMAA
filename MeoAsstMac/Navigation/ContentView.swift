@@ -23,6 +23,8 @@ struct ContentView: View {
         }
         .modifier(LegacyImportPrompt())
         .task {
+            // maa-remote 的状态文件一变就重读（K3）。
+            RemoteStore.shared.startWatching()
             do {
                 try await viewModel.initialize()
             } catch {

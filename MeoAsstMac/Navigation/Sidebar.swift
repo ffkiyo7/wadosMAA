@@ -54,6 +54,7 @@ enum SidebarEntry: Int, CaseIterable, Identifiable {
     var id: Self { self }
     case daily
     case copilot
+    case remote
     case utility
 }
 
@@ -64,6 +65,8 @@ extension SidebarEntry: CustomStringConvertible {
             return String(localized: "一键长草")
         case .copilot:
             return String(localized: "自动战斗")
+        case .remote:
+            return "日常配置"
         case .utility:
             return String(localized: "实用工具")
         }
@@ -75,6 +78,8 @@ extension SidebarEntry: CustomStringConvertible {
             return "cup.and.saucer"
         case .copilot:
             return "play.rectangle"
+        case .remote:
+            return "slider.horizontal.3"
         case .utility:
             return "wrench.and.screwdriver"
         }

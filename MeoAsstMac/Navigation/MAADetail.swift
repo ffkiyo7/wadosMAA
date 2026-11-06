@@ -18,6 +18,8 @@ struct MAADetail: View {
                 TaskDetail(id: selection.task)
             case .copilot:
                 CopilotDetail()
+            case .remote:
+                RemoteDetail(entry: selection.remote)
             case .utility:
                 UtilityDetail(entry: selection.utility)
             case .none:

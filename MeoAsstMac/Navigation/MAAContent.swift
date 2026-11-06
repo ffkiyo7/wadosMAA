@@ -18,6 +18,8 @@ struct MAAContent: View {
                 TasksContent(selection: $selection.task)
             case .copilot:
                 CopilotContent()
+            case .remote:
+                RemoteContent(selection: $selection.remote)
             case .utility:
                 UtilityContent(selection: $selection.utility)
             case .none:
@@ -41,4 +43,5 @@ struct MAAContent_Previews: PreviewProvider {
 struct ContentEntry: Codable {
     var task: UUID?
     var utility: UtilityEntry?
+    var remote: RemoteEntry? = .status
 }
