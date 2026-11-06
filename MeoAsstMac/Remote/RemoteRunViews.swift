@@ -240,8 +240,9 @@ struct AutoCopilotView: View {
                     Button("刷新进度") { Task { await run(["copilot", "status", token]) } }
                     Button("取消本轮", role: .destructive) { Task { await run(["copilot", "cancel", token]) } }
                 }
+                // 不绑回车：自动选中后按一下回车就会派发，等于跳过了「确认开打」这一步（K13）。
                 Button("确认开打") { Task { await go() } }
-                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
                     .disabled(working || chosen == nil || preview == nil || dispatchedToken != nil)
             }
         }
