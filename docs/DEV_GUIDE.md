@@ -183,6 +183,9 @@ stdout 不投递到 Discord（消息由脚本自己用 Discord REST API 发）�
 | `scripts/maa_farming.py` | **素材权重领域层**：一图流 / 企鹅物流抓取层（缓存在 `state/maa/farming/`）+ 三项加权分纯函数（稀缺 / 缺口 / 效率）+ 候选关集合（D5）+ `stage_ap_cost()` 兜底 | 被 plan_card / activity_watch import | 有缓存 <0.5s；冷缓存 3~10s（下 1.4 MB matrix） |
 | `scripts/maa_clearing.py` | 作业链领域层（近纯函数）：条目形态（`#raid` 后缀）、上游导航键闸门、理智预算与排轮、搜索失败退避记账、通关判据 | 被 action/watch/worker/plan_card import | — |
 | `scripts/maa_skland.py` | 森空岛协议：stdlib HMAC 签名、grant→cred 链、练度与理智拉取、`link`（stdin 收 token） | 本机终端；手动搜索强制刷新（失败即失败）；watcher 在「有未执行的关」的 tick 刷新；每关开打前再刷一次 | 秒级 |
+| `scripts/maa_upstream.py` | **上游更新的唯一实现**（#60）：持 `run.lock` 跑 maa-cli / MaaCore / MaaResource 三步，分步记进 `upstream.json`；离线状态判定和开跑前硬拒 | 早场计划卡；`maa_action upstream update` 派的 worker | 更新几分钟；`status` < 2s |
+| `scripts/maa_schedule.py` | 早晚场时间 ↔ Hermes cron：只读认出四个场次任务，用 `hermes cron edit/pause/resume` 对齐（K6） | `maa_action schedule *` | < 20s |
+| `scripts/maa_settings.py` | 可从外面改的配置项白名单和校验（`FIELDS`，K3 / K5） | `maa_action config *` | < 1s |
 | `scripts/ocrbox.swift` | macOS Vision OCR 小工具（编译为 `~/.hermes/scripts/ocrbox`），watchdog 识别接管弹窗 | 被 worker 调用 | <1s/次 |
 | `deploy.py` | 幂等部署 + 给 Hermes 打本地补丁 + 备份 + 编译 ocrbox | 人工 | 秒级 |
 | `skills/games/maa-operator/SKILL.md` | 约束 LLM 只能走 `maa_action.py` 的护栏 | gateway 按频道绑定加载 | — |
@@ -200,14 +203,21 @@ stdout 不投递到 Discord（消息由脚本自己用 Discord REST API 发）�
 
 `main(argv)`（`scripts/maa_plan_card.py`）严格按这个顺序：
 
-1. **`check_and_update_upstream()` — 只有早场卡跑**：`brew outdated/upgrade` 跟随
-   maa-cli，再依次用 `maa update --batch` 和 `maa hot-update --batch` 更新 Beta
-   MaaCore 与 MaaResource 热更新层（超时分别 180s / 300s）。
-   **这条必须保留本机代理**（`maa_subprocess_env(..., keep_proxy=True)`），否则直连
-   GitHub 会超时。有新版本就装上，把版本写回 `config.json`，摘要进早场卡「上游更新」
-   字段。失败发红色 Embed 告警，并在 `main()` 末尾 `raise` 让 cron 记为失败。
-   **晚场卡整步跳过**（`update is None`）：早上刚跟过，21:50 再花几分钟等网络只会
-   让晚场卡迟到；`main()` 末尾那个 `raise` 也因此要判 `update is not None`。
+1. **`check_and_update_upstream()` — 只有早场卡跑**：调 `maa_upstream.run_update(config, "plan_card")`，
+   计划卡自己只管失败时发红卡。更新逻辑**只有一份，在 `maa_upstream.py`**（不变量 #60），
+   Wado's MAA 的「更新」按钮走的是同一个函数：
+   - **持 `run.lock`（持有者 `update`）**。抢不到就记「跳过：<谁>正在用 maa-cli」，不发红卡；
+     更新拖过 08:00 时，日常会等它跑完（K17，上限 `update_wait_minutes`，默认 15 分钟）。
+   - 三步依次是：`brew outdated --json=v2` / `brew upgrade` 跟随 maa-cli；`maa update --batch`；
+     `maa hot-update --batch`（超时分别 180s / 300s / 300s）。
+     **brew 只看 JSON，不看退出码**：点名查一个 formula 时有新版退出码就是 1，
+     老代码把它当成失败，maa-cli 因此停在了 0.7.5（K19）。
+   - **必须保留本机代理**（`maa_subprocess_env(..., keep_proxy=True)`），否则直连 GitHub 会超时。
+     环境里没有代理时，用 `config.upstream_proxy` 补上；PATH 补上 `/opt/homebrew/bin`。
+   - 分步结果写 `state/maa/upstream.json`（见 §12），版本写回 `config.json`，
+     摘要进早场卡「上游更新」字段。失败时发红色 Embed，并在 `main()` 末尾 `raise`，让 cron 记为失败。
+   - **晚场卡整步跳过**（`update is None`）：早上刚跟过，21:50 再花几分钟等网络只会让晚场卡迟到；
+     `main()` 末尾那个 `raise` 也因此要判 `update is not None`。
 2. **`refresh_activity_stages()`** — 两张卡都跑 `maa activity Official`，解析出形如 `TO-9`
    的活动关列表写回 `config.json`；同时检测公告里的「资源收集」字样，命中则置
    `all_supply_stages_open=true`（全部资源本开放）。
@@ -1414,6 +1424,7 @@ cron 表达式是 **UTC**（`config.yaml: timezone: Etc/UTC`），所以 Depot �
 | 57 | **当期活动关的导航只有三小步自写，都只写进 `_isolated_config()` 的临时目录**：① 借锚点的上游链进活动、点进普通区域，把点关那一步换成只识别（方案 B，停在地图上）；② 剧情关挡路时在地图上点开它、跳过剧情；③ EX / S 区域按游戏数据里的区域名（`zone_table.zoneNameSecond`）在屏幕上找入口，相似度必须严格高于同活动其它区域名才点。**每一步之后都要在屏幕上认出目标区域的关卡代号**（`CopilotZoneReady`）才算到位，认不出就停下、按第一关失败记账。找关、编队、打仗全交给 MaaCore 的 `copilot_list`。教学关、没作业也没通关的关挡在前面时整轮从那里截断（`plan_segments()`），watcher 排轮前就截掉（`trim_unreachable()`），不为够不着的关开模拟器 | `maa_copilot_worker.ActivityNavigator` / `_run_activity_round()` / `maa_clearing.plan_segments()` / `zone_button()` + `CopilotListPlanTests` / `CopilotZoneEntryTests` / `CopilotListRoundTests` / `CopilotReachableTargetTests` |
 | 58 | **状态文件读时校验 `schema_version`、写时带上**（§6.1）：缺字段视作 1；会驱动动作的 `config` / `plan` / `manual_run` 读到未知更高版本**拒跑**，只用于汇报的 `last_run` 告警后宽读。读 `config` / `plan` / `manual_run` / `last_run` 的每个地方都过 `check_schema()`，不许直接拿 `load_json()` 的结果用。`config.json` 的版本号随种子走，迁移只在 `deploy_state()`，`schema_version` 不得进 `PRESERVED_RUNTIME_CACHE_KEYS` | `maa_common.check_schema()` / `*_SCHEMA_VERSION` + `deploy.migrate_live_config()` / `CONFIG_MIGRATIONS` + `tests/test_state_schema.py` |
 | 59 | **主页入口永不切界面主题，纯源石兑换弹窗只点 ✗**：用户资源层 9 个 `<入口>-Entry` 的 `onErrorNext` 不得含 `SwitchTheme`；`OriginiteExchangeCancel` 的 `specificRect` 必须整个落在弹窗左半边（x ≤ 940，✓ 从 958 起）；`<入口>Sanrio` 必须带 `rectMove` 把点击收进模板中间、离边至少 1/5（终端离上沿 ≥ 25px） | `config/maa-cli/resource/tasks/tasks.json` + `test_sanrio_theme_entries_never_switch_theme_and_ship_their_templates` / `test_originite_exchange_popup_is_only_ever_cancelled` |
+| 60 | **上游更新只有一份，在 `maa_upstream.py`**：07:50 早场卡和 Wado's MAA 共用 `run_update()`；全库只有这个文件会调 `maa update` / `maa hot-update` / `brew upgrade`。**更新期间持有 `run.lock`**（持有者 `update`）。开跑前（自动场和手动场都算）离线调 `hard_block()`，只在两种情况下拒跑：`cli.toml` 的钉住项被改；上次更新换了 Core 却没让 MaaResource 跟上，或者半路断了。不新鲜、检查失败、maa-cli 那步失败**都不挡跑**（spike §6(c) 方案 B）。开发副本（`HERMES_HOME` ≠ `~/.hermes`）只检查、不更新 | `maa_upstream.run_update()` / `hard_block()` / `update_gate()` + `maa_daily.execute()` + `tests/test_upstream.py`（`SingleImplementationTests` 用 grep 守「只有一份」） |
 
 ---
 
@@ -1880,3 +1891,92 @@ python3 -c "import json;print(json.load(open('$HOME/.hermes/state/agent-book/but
     （字符串 `Failed to execute git, falling back to libgit2 backend`），不会更糟。
     **改完必须 `python3 deploy.py`**：`cli.toml` 是 `--check` 逐字节守住的文件之一，
     不部署就一直 `mismatched`，而且线上跑的仍是旧的 libgit2。
+
+---
+
+## 12. 外部消费者契约（Wado's MAA）
+
+Wado's MAA（`~/Developer/forks/MaaMacGui` 的 fork）**只通过下面这些东西**和 maa-remote 打交道。
+这里列出的字段、路径、命令和格式改了，GUI 就会坏：要改，就同一天在 fork 里改，并在两边的提交说明里写明。
+
+### 12.1 怎么调
+
+- **入口**：`python3 $HERMES_HOME/scripts/maa_action.py <命令…>`。
+  stdout 是一行回执 JSON：`{"ok": bool, "message": str}`，GUI 专用命令再多一个 `data`（对象）。
+  `message` 不超过 7900 字节，写给人看，GUI 原样显示。
+- **环境变量**：
+  - `HERMES_HOME`：开发期指向副本；
+  - `MAA_ACTION_SOURCE=gui`：改动会被记成「由 Wado's MAA 改的」，不传就记成 `discord`；
+  - PATH 至少要有 `/opt/homebrew/bin`（脚本也会自己补）。
+- **GUI 专用命令**（`maa_action.dispatch_gui()`）**不进 Discord 的登记表，也不写进技能**。
+  从 Discord 那条路（`dispatch()`）调它们一律返回失败。
+
+| 命令 | 作用 | `data` |
+|---|---|---|
+| `config get` | 可改的配置项和当前值 | `fields`（`key` / `group` / `label` / `kind` / `default` / 范围）、`groups`、`values`、`meta` |
+| `config set <键> <JSON>` / `config patch <JSON 对象>` | 改配置。按 `maa_settings.FIELDS` 白名单校验；`patch` 要么全改、要么全不改 | 同 `config get` |
+| `defaults show` / `defaults set stage <关>` / `defaults set task <名> on\|off` | 持久默认值 | `defaults.json` 的内容 |
+| `schedule show` / `set <am\|pm> <HH:MM>` / `enable <场>` / `disable <场>` / `sync` | 早晚场时间和 cron（§3、K6）。只有拨开关才会 pause / resume | `maa_schedule.schedule_report()` |
+| `run local <关> <开关 JSON> [--force]` | 本机手动场：`--force` 只解除「定时场优先」，不解锁 | `token` 等 |
+| `plan refresh-card <场>` | 让 Discord 上的计划卡跟着刷新 | — |
+| `copilot preview <关>` / `copilot go <token> [作业 id]` | 抄作业：先预览、再确认（K13）。`go` 只接受完全满足的候选，并且要过 `dispatch_blocker()` | 候选列表（带 `perfect`）、`best_id`、`token` |
+| `upstream status [--online]` | 上游状态，默认离线、< 2 秒 | 见 12.3 |
+| `upstream update` | 过闸门后派一个 worker，立即返回；GUI 每 2 秒轮询 `upstream status`，直到 `running` 变成 false | `started`，或 `blocked` |
+
+### 12.2 锁
+
+- **路径**：`$HERMES_HOME/state/maa/run.lock`，用 `flock(LOCK_EX | LOCK_NB)`。
+  GUI 在动游戏、动 maa-cli 之前也要抢它，空闲时放掉。
+- **持有者标记**（K15）：拿到锁后，把锁文件内容整个换成一行 JSON：
+  `{"holder": 种类, "detail": 补充, "pid": 进程号, "since": ISO 时间}`。放锁前清空。
+  - 种类：`daily` / `copilot` / `depot` / `update` / `gui`；GUI 写 `gui`。
+  - 标记只在锁**确实被占着**时可信。
+- 日常发现持有者是 `update` 时会等它跑完（K17）。是别的持有者就按锁冲突上报（#23），消息里写明是谁。
+
+### 12.3 状态文件（GUI 只读）
+
+所有文件都带 `schema_version`。GUI 读到比自己认识的更高的版本，就只读不写，并给出提示。
+
+| 文件 | GUI 用到的字段 |
+|---|---|
+| `config.json` | `session_schedule`、`config_meta`、`maa_core_version` / `maa_cli_version`，以及 `config get` 列出的键 |
+| `last_run.json` | `status`、`phase`、`started_at` / `finished_at`、`summary`、`resource_update_*` |
+| `plan.json` / `defaults.json` | 本场关卡、跳过；默认关和默认任务 |
+| `upstream.json` | 见下表 |
+
+`upstream.json` 的字段：
+
+| 字段 | 含义 |
+|---|---|
+| `state` | `running` / `done`。被跳过的那次不改它，只写 `last_skip` |
+| `source` | `plan_card` / `gui` / `manual` |
+| `ok` | 本次是否成功 |
+| `started_at` / `finished_at` | 起止时间 |
+| `last_success_at` | 最近一次成功的时间 |
+| `steps.{cli,core,hot}.{ok,changed,detail}` | 每一步的结果 |
+| `core_changed` / `hot_ok` | Core 有没有换、MaaResource 有没有跟上 |
+| `cli_*` / `core_*` / `resource_head_*` | 前后版本 |
+| `summary` / `detail` | 给人看的摘要和细节 |
+
+`upstream status` 的 `data` 字段：
+
+| 字段 | 含义 |
+|---|---|
+| `verdict` | `ok` / `stale` / `blocked` / `running` |
+| `block_reason` | 被挡的原因 |
+| `pinned.{ok,problems}` | `cli.toml` 的钉住项是否完好 |
+| `consistent.{ok,reason}` | 上次更新是否自洽 |
+| `fresh` | 本游戏日（北京时间 04:00 之后）是否成功更新过（K18） |
+| `game_day_start` / `last_success_at` | 本游戏日的起点，最近一次成功的时间 |
+| `lock.{held,holder,text}` | 锁有没有被占、被谁占 |
+| `versions` | `maa_cli`、`maa_core`、`maa_core_recorded`、`resource_last_updated`、`maa_resource_head`、`beta_core_latest`、`beta_core_checked_at` |
+| `update_blocked` | 现在为什么不能点「更新」 |
+| `last` | `upstream.json` 原文 |
+| `online` | 带 `--online` 时才有：`maa_cli_latest`、`maa_resource_remote_head`、`*_outdated`、`errors` |
+
+### 12.4 GUI 自己要守的
+
+- **不碎石、不吃药、不借助战**。`config get` 里本来就没有这几项（`SettingsTableTests` 守着）。
+- **日常和抄作业只走 maa-remote 子进程**，GUI 不自己拼 maa-cli 的任务。
+- **更新只调 `upstream update`**。GUI 自己不跑 brew / git / 下载。
+
