@@ -129,6 +129,11 @@ extension NewViewModel {
         copilotStartToken = UUID()
 
         var config = copilot.config
+        // K11：不吃药、不忽略练度、不借助战。界面上没有这几项，旧配置里存着的也在这里压掉。
+        config.use_sanity_potion = false
+        config.ignore_requirements = false
+        config.support_unit_usage = .none
+        config.support_unit_name = ""
         let type: MAATaskType
 
         if copilot.category == .list {

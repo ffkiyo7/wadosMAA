@@ -42,14 +42,7 @@ struct FightSettingsView: View {
             Divider()
 
             Section {
-                TextField(value: $config.medicine, format: .number) {
-                    Toggle("吃理智药", isOn: useMedicine)
-                }
-
-                TextField(value: $config.stone, format: .number) {
-                    Toggle("吃源石", isOn: useStone)
-                }
-
+                // 不碎石、只吃临期药（K11 / maa-remote 不变量 #1 #2）：「吃理智药」「吃源石」不提供。
                 TextField(value: $config.times, format: .number) {
                     Toggle("指定次数", isOn: limitBattles)
                 }
@@ -101,7 +94,6 @@ struct FightSettingsView: View {
                 } label: {
                     Stepper("吃临期理智药", value: $config.medicine_expire_days, in: 0...7, step: 1)
                 }
-                Toggle("博朗台碎石模式", isOn: $config.DrGrandet)
             }
 
             Divider()
@@ -116,22 +108,6 @@ struct FightSettingsView: View {
         }
         .padding()
         .animation(.default, value: useCustomStage)
-    }
-
-    private var useMedicine: Binding<Bool> {
-        Binding {
-            config.medicine != nil
-        } set: {
-            config.medicine = $0 ? 999 : nil
-        }
-    }
-
-    private var useStone: Binding<Bool> {
-        Binding {
-            config.stone != nil
-        } set: {
-            config.stone = $0 ? 0 : nil
-        }
     }
 
     private var limitBattles: Binding<Bool> {

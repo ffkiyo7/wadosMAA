@@ -437,8 +437,9 @@ extension RoguelikeConfiguration.Params {
         self.squad = config.squad
         self.roles = config.roles
         self.core_char = config.core_char
-        self.use_support = config.use_support
-        self.use_nonfriend_support = config.use_support ? config.use_nonfriend_support : nil
+        // K11：不借助战。
+        self.use_support = false
+        self.use_nonfriend_support = nil
         self.starts_count = config.starts_count
         self.difficulty = config.difficulty.id
         self.stop_at_final_boss = config.mode == .exp && config.theme != .Phantom ? config.stop_at_final_boss : nil

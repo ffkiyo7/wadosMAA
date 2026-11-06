@@ -126,7 +126,8 @@ extension FightConfiguration {
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.stage = try container.decodeIfPresent(String.self, forKey: .stage) ?? ""
-        self.medicine = try container.decodeIfPresent(Int.self, forKey: .medicine)
+        // K11：不吃非临期的药、不碎石，旧配置里存着的也一律丢掉。
+        self.medicine = nil
         if let days = try container.decodeIfPresent(Int.self, forKey: .medicine_expire_days) {
             medicine_expire_days = days
         } else {
@@ -134,7 +135,7 @@ extension FightConfiguration {
             let medicine = try legacyContainer.decodeIfPresent(Int.self, forKey: .expiring_medicine)
             medicine_expire_days = (medicine ?? 0) > 0 ? 2 : 0
         }
-        self.stone = try container.decodeIfPresent(Int.self, forKey: .stone)
+        self.stone = nil
         self.times = try container.decodeIfPresent(Int.self, forKey: .times)
         self.series = try container.decodeIfPresent(Int.self, forKey: .series)
         self.drops = try container.decodeIfPresent([String: Int].self, forKey: .drops)
@@ -142,7 +143,7 @@ extension FightConfiguration {
         self.penguin_id = try container.decodeIfPresent(String.self, forKey: .penguin_id) ?? ""
         self.server = try container.decodeIfPresent(String.self, forKey: .server) ?? "CN"
         self.client_type = try container.decodeIfPresent(String.self, forKey: .client_type) ?? ""
-        self.DrGrandet = try container.decodeIfPresent(Bool.self, forKey: .DrGrandet) ?? false
+        self.DrGrandet = false
     }
 }
 

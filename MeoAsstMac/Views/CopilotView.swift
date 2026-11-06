@@ -102,7 +102,6 @@ private struct RegularCopilotConfigView: View {
     var body: some View {
         HStack {
             Toggle("自动编队", isOn: $config.formation)
-            Toggle("吃理智药", isOn: $config.use_sanity_potion)
         }
         if config.formation {
             HStack {
@@ -113,21 +112,9 @@ private struct RegularCopilotConfigView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                Toggle("忽视干员属性要求", isOn: $config.ignore_requirements)
                 Toggle("补充低信赖干员", isOn: $config.add_trust)
             }
-            HStack {
-                Picker("助战模式", selection: $config.support_unit_usage) {
-                    ForEach(CopilotConfiguration.SupportUnitUsage.allCases, id: \.self) {
-                        Text($0.description).tag($0)
-                    }
-                }
-                if config.support_unit_usage == .specific {
-                    TextField("干员名称", text: $config.support_unit_name)
-                        .frame(maxWidth: 150)
-                }
-            }
-            .animation(.default, value: config.support_unit_usage)
+            // 吃药、忽视练度、助战都不提供（K11）。
         }
         SSSCopilotConfigView(config: $config)
     }

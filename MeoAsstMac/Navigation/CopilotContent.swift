@@ -31,6 +31,7 @@ struct CopilotContent: View {
     @State private var externalRoot = Item(url: .externalCopilotDirectory)
 
     @State private var tracker = FileTreeTracker()
+    @State private var showAutoCopilot = false
 
     var body: some View {
         @Bindable var context = newModel.copilot
@@ -81,6 +82,18 @@ struct CopilotContent: View {
         }
         .toolbar {
             CopilotListToolbar(externalRoot: $externalRoot)
+            // K13：maa-remote 的自动抄作业（选关 → 预览 → 确认开打）。
+            ToolbarItem {
+                Button {
+                    showAutoCopilot = true
+                } label: {
+                    Label("自动抄作业", systemImage: "wand.and.stars")
+                }
+                .help("按练度自动挑作业，确认后交给 maa-remote 派发")
+            }
+        }
+        .sheet(isPresented: $showAutoCopilot) {
+            AutoCopilotView()
         }
         .task(id: context.category) {
             switch context.category {

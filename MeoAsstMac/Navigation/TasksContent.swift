@@ -11,8 +11,30 @@ struct TasksContent: View {
     @EnvironmentObject private var viewModel: MAAViewModel
     @Binding var selection: UUID?
 
+    /// 上游的任务列表默认收起（K4）：日常走 maa-remote，上游列表只在需要时展开用。
+    @AppStorage("ShowUpstreamTaskList") private var showUpstream = false
+
     var body: some View {
         List(selection: $selection) {
+            LocalRunSection()
+
+            Section {
+                DisclosureGroup("上游任务列表（直接用本 App 里的 MaaCore）", isExpanded: $showUpstream) {
+                    upstreamTasks
+                }
+            } footer: {
+                if showUpstream {
+                    Text("这条路不走 maa-remote：不发 Discord 战报，开跑前先抢锁、查上游和定时场。")
+                }
+            }
+        }
+        .onChange(of: selection, updateViewMode)
+        .toolbar(content: listToolbar)
+        .animation(.default, value: viewModel.tasks)
+        .onReceive(viewModel.$newTaskAdded, perform: selectLastTask)
+    }
+
+    @ViewBuilder private var upstreamTasks: some View {
             ForEach($viewModel.tasks, id: \.id) { $task in
                 switch task.task {
                 case .startup(let config):
@@ -38,16 +60,17 @@ struct TasksContent: View {
                 }
             }
             .onMove(perform: moveTask)
-        }
-        .onChange(of: selection, updateViewMode)
-        .toolbar(content: listToolbar)
-        .animation(.default, value: viewModel.tasks)
-        .onReceive(viewModel.$newTaskAdded, perform: selectLastTask)
     }
 
     // MARK: - Toolbar
 
     @ToolbarContentBuilder private func listToolbar() -> some ToolbarContent {
+        if showUpstream || viewModel.status != .idle {
+            upstreamToolbar()
+        }
+    }
+
+    @ToolbarContentBuilder private func upstreamToolbar() -> some ToolbarContent {
         ToolbarItemGroup {
             Button(action: deleteSelectedTask) {
                 Label("删除", systemImage: "trash")
@@ -70,9 +93,9 @@ struct TasksContent: View {
                 .help("停止")
             case .idle:
                 Button(action: start) {
-                    Label("开始", systemImage: "play.fill")
+                    Label("按上游列表开始", systemImage: "play.fill")
                 }
-                .help("开始")
+                .help("按上游任务列表开始（不走 maa-remote）")
             }
         }
     }

@@ -72,13 +72,7 @@ struct RoguelikeSettingsView: View {
 
         TextField("开局干员（单个）", text: $config.core_char)
 
-        HStack {
-            Toggle("“开局干员”使用助战", isOn: $config.use_support)
-                .disabled(config.start_with_elite_two)
-            if config.use_support {
-                Toggle("可以使用非好友助战", isOn: $config.use_nonfriend_support)
-            }
-        }
+        // 开局干员不借助战（K11）。
 
     }
 
