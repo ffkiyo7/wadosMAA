@@ -156,6 +156,14 @@ import SwiftUI
         initScheduledDailyTaskTimer()
     }
 
+    /// 任务列表文件被外部替换（导入旧配置）后重读。
+    func reloadTasksFromDisk() {
+        guard let data = try? Data(contentsOf: tasksURL),
+            let decoded = try? PropertyListDecoder().decode([DailyTask].self, from: data)
+        else { return }
+        tasks = decoded
+    }
+
     deinit {
         messageTask?.cancel()
         Self.releaseAssertion(awakeAssertionID)

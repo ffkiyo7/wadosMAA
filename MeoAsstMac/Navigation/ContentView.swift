@@ -21,6 +21,7 @@ struct ContentView: View {
         } detail: {
             MAADetail(sidebar: $selectedSidebar, selection: $selectedContent)
         }
+        .modifier(LegacyImportPrompt())
         .task {
             do {
                 try await viewModel.initialize()
