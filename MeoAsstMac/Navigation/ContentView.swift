@@ -10,23 +10,13 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var viewModel: MAAViewModel
 
-    @State private var selectedSidebar: SidebarEntry? = .daily
-    @State private var selectedContent = ContentEntry()
-
     var body: some View {
-        NavigationSplitView {
-            Sidebar(selection: $selectedSidebar)
-        } content: {
-            MAAContent(sidebar: $selectedSidebar, selection: $selectedContent)
-                .glassColumn()
-        } detail: {
-            MAADetail(sidebar: $selectedSidebar, selection: $selectedContent)
-                .glassColumn()
-        }
-        // K9：整个窗口一张背景图，侧栏和工具栏是系统的 Liquid Glass。
-        .containerBackground(for: .window) {
-            WindowBackground()
-        }
+        // 重设计（定稿原型）：自绘边栏六页 + 状态条 + 日志检查器。原来的三栏页面嵌在「工具与更多」里。
+        RedesignRoot()
+            // K9：整个窗口一张背景图，侧栏和工具栏是系统的 Liquid Glass。
+            .containerBackground(for: .window) {
+                WindowBackground()
+            }
         .modifier(LegacyImportPrompt())
         .task {
             // maa-remote 的状态文件一变就重读（K3）。
