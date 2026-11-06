@@ -101,16 +101,17 @@ struct RedesignRoot: View {
                         .inspectorColumnWidth(min: 240, ideal: 300, max: 480)
                 }
         }
-        .environment(\.wmAccent, accent)
-        .environment(\.askGame) { confirm = $0 }
-        .environment(data)
-        .tint(accent.color)
-        .preferredColorScheme(.dark)
+        // 确认框要在 wmAccent 之内，不然「开始」按钮拿到的是默认的金色。
         .overlay {
             if let confirm {
                 GameConfirmSheet(confirm: confirm) { self.confirm = nil }
             }
         }
+        .environment(\.wmAccent, accent)
+        .environment(\.askGame) { confirm = $0 }
+        .environment(data)
+        .tint(accent.color)
+        .preferredColorScheme(.dark)
         .task {
             await data.loadChoices()
             await data.loadCopilot()
