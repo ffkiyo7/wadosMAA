@@ -233,6 +233,7 @@ class Config(TypedDict, total=False):
     farming_stage_table: dict[str, Any]
     farming_manual_weights: dict[str, Any]
     session_schedule: dict[str, Any]
+    update_wait_minutes: int
     config_meta: dict[str, Any]
 
 
@@ -463,9 +464,28 @@ def state_lock() -> Iterator[None]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+# 锁持有者标记（K15）：拿到 `run.lock` 的一方往锁文件里写**一行 JSON**
+# `{"holder": 种类, "detail": 补充, "pid": 进程号, "since": ISO 时间}`，放锁前清空。
+# 定时场被挡住时据此说「Wado's MAA 正在用」而不是只报锁冲突；日常发现持有者是
+# `update` 时等它跑完（K17）。Wado's MAA（Swift）写同样格式，种类是 `gui`。
+# 标记只在锁**确实被占**时可信：进程被杀时内核会放锁，但文件里的字还在。
+LOCK_HOLDER_LABELS = {
+    "daily": "日常",
+    "copilot": "抄作业",
+    "depot": "仓库对表",
+    "update": "上游更新",
+    "gui": "Wado's MAA",
+}
+
+
 @contextmanager
-def run_lock(*, blocking: bool = False) -> Iterator[bool]:
-    """Yield whether this process owns the single MAA execution lock."""
+def run_lock(
+    *, blocking: bool = False, holder: str = "", detail: str = ""
+) -> Iterator[bool]:
+    """Yield whether this process owns the single MAA execution lock.
+
+    `holder` 非空时，拿到锁就写持有者标记（只探测不写，见 `is_run_locked()`）。
+    """
     ensure_private_dir(STATE_DIR)
     with RUN_LOCK_PATH.open("a+", encoding="utf-8") as lock_file:
         os.chmod(RUN_LOCK_PATH, 0o600)
@@ -476,11 +496,56 @@ def run_lock(*, blocking: bool = False) -> Iterator[bool]:
             acquired = True
         except BlockingIOError:
             pass
+        if acquired and holder:
+            marker = {
+                "holder": holder,
+                "detail": detail,
+                "pid": os.getpid(),
+                "since": now_beijing().isoformat(),
+            }
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(json.dumps(marker, ensure_ascii=False) + "\n")
+            lock_file.flush()
         try:
             yield acquired
         finally:
             if acquired:
+                if holder:
+                    lock_file.seek(0)
+                    lock_file.truncate()
+                    lock_file.flush()
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def run_lock_holder() -> dict[str, Any] | None:
+    """现在占着 `run.lock` 的是谁；锁空着、或标记读不懂（旧脚本 / 别的程序）返回 None。"""
+    if not is_run_locked():
+        return None
+    try:
+        first = RUN_LOCK_PATH.read_text(encoding="utf-8").splitlines()[0]
+        marker = json.loads(first)
+    except (OSError, IndexError, ValueError):
+        return None
+    if not isinstance(marker, dict) or not isinstance(marker.get("holder"), str):
+        return None
+    return marker
+
+
+def lock_holder_text(marker: Mapping[str, Any] | None) -> str:
+    """「Wado's MAA（自 14:03）」；没有标记返回空串。"""
+    if not marker:
+        return ""
+    holder = str(marker.get("holder") or "")
+    label = LOCK_HOLDER_LABELS.get(holder, holder[:20] or "另一个任务")
+    detail = str(marker.get("detail") or "")[:30]
+    if detail:
+        label = f"{label}·{detail}"
+    try:
+        since = datetime.fromisoformat(str(marker.get("since"))).astimezone(BEIJING)
+        return f"{label}（自 {since:%H:%M}）"
+    except (TypeError, ValueError):
+        return label
 
 
 def is_run_locked() -> bool:

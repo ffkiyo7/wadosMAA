@@ -113,6 +113,8 @@ FIELDS: tuple[Field, ...] = (
     _f("game_probe_timeout", "运行环境", "开跑前探测游戏是否在玩（秒）", "int", 5, 0, 30, "0 = 不探测"),
     _f("maa_run_timeout", "运行环境", "一场日常的上限（秒）", "int", 3000, 600, 3300,
        "Hermes 外层上限 1 小时，要留出清理时间"),
+    _f("update_wait_minutes", "运行环境", "日常等上游更新跑完的上限（分钟）", "int", 15, 0, 30,
+       "从一场日常的上限里扣"),
     _f("connect_retry_limit", "运行环境", "连接阶段崩溃重开次数", "int", 2, 0, 5),
     _f("retention_days", "运行环境", "本地日志 / 截图保留天数", "int", 14, 1, 90),
     _f("resource_update_timeout", "运行环境", "资源更新超时（秒）", "int", 300, 60, 1800),

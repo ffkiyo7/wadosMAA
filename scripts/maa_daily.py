@@ -52,7 +52,9 @@ from maa_common import (
     plan_stage_label,
     report_game_busy as common_report_game_busy,
     require_executable,
+    lock_holder_text,
     run_lock,
+    run_lock_holder,
     state_lock,
 )
 
@@ -1587,6 +1589,36 @@ def should_skip(plan: Plan, phase: Phase) -> bool:
     return bool(plan.get("skip")) and phase != "now"
 
 
+# K17：日常等更新的上限（分钟），要从 `maa_run_timeout` 里扣，Hermes 外层只有 1 小时。
+DEFAULT_UPDATE_WAIT_MINUTES = 15
+MIN_RUN_TIMEOUT = 600
+UPDATE_WAIT_POLL_SECONDS = 5.0
+
+
+def wait_for_update_holder(
+    config: Config,
+    *,
+    sleep: Any = time.sleep,
+    clock: Any = time.monotonic,
+) -> float:
+    """锁的持有者是「上游更新」就阻塞等它放锁，返回等了多少秒（不是更新 / 没被占返回 0）。
+
+    上限 `update_wait_minutes`（默认 15）。到了上限还没放就不等了，交给后面的锁冲突处理
+    （不变量 #23 照旧：写 `last_lock_conflict_*`、发 Discord、返回失败）。
+    """
+    marker = run_lock_holder()
+    if not marker or marker.get("holder") != "update":
+        return 0.0
+    limit = max(0, int(config.get("update_wait_minutes", DEFAULT_UPDATE_WAIT_MINUTES))) * 60
+    start = clock()
+    while clock() - start < limit:
+        sleep(UPDATE_WAIT_POLL_SECONDS)
+        current = run_lock_holder()
+        if not current or current.get("holder") != "update":
+            break
+    return clock() - start
+
+
 def report_lock_conflict(
     config: Config,
     token: str,
@@ -1595,7 +1627,12 @@ def report_lock_conflict(
     attempted_at: datetime,
 ) -> None:
     """Make a rejected daily run visible without clobbering the active run."""
-    reason = "run.lock 被另一场 MAA 占用，本场没有启动游戏或执行任何任务"
+    busy = lock_holder_text(run_lock_holder())
+    reason = (
+        f"{busy}正在用游戏，本场没有启动游戏或执行任何任务"
+        if busy
+        else "run.lock 被另一场 MAA 占用，本场没有启动游戏或执行任何任务"
+    )
     # Another runner may currently own last_run.status=running. Keep its state
     # intact and append conflict-specific observation fields instead.
     errors: list[str] = []
@@ -1740,7 +1777,16 @@ def execute(phase: Phase, manual_token: str = "") -> int:
     log_path = RUNS_DIR / f"{run_stem}.log"
     screenshot_path = RUNS_DIR / f"{run_stem}.png"
 
-    with run_lock(blocking=False) as acquired:
+    # K17：07:50 的上游更新拖过了开跑时间 → 等它跑完（有上限），等掉的时间从本场预算里扣。
+    waited = wait_for_update_holder(config)
+    if waited:
+        config = cast(Config, {
+            **config,
+            "maa_run_timeout": max(
+                MIN_RUN_TIMEOUT, int(config.get("maa_run_timeout", 3000)) - int(waited)
+            ),
+        })
+    with run_lock(blocking=False, holder="daily", detail=PHASE_LABELS[phase]) as acquired:
         if not acquired:
             report_lock_conflict(config, token, channel_id, phase, started)
             return 1

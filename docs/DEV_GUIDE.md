@@ -1009,7 +1009,9 @@ Discord 肉鸽卡和 `hermes:btn:maa-roguelike:` 前缀、`roguelike.json`、原
   plan_card.json  最新一张计划卡：{phase, message_id, date, update_summary}。GUI 改了这一场的
                   计划时 `maa_action plan refresh-card <场次>`（脱离会话）按它 PATCH 那张卡（K3）；
                   只记最新一张——早场卡在晚场卡发出时已被收起，再 PATCH 会把控件放回去
-  run.lock        flock 独占锁（执行）
+  run.lock        flock 独占锁（执行）。拿到锁的一方往里写一行持有者标记（K15）：
+                  {holder: daily|copilot|depot|update|gui, detail, pid, since}，放锁前清空；
+                  只在锁确实被占时可信（`maa_common.run_lock_holder()`）
   last_run.lock   flock 独占锁（保护 last_run.json 的跨进程 read-modify-write）
   am/ pm/         空目录，仅用于给 cron 传场次
   runs/<date>-<phase>.{json,log,png}   本场快照 / 完整日志 / 截图（保留 14 天）
@@ -1046,7 +1048,7 @@ result = normalize_plan(result)             ← 再规范化一次
 
 | 锁 | 作用域 | 用法 |
 |---|---|---|
-| `run.lock` | 「同一时刻只有一场 MAA」 | runner 用非阻塞抢并显式处理冲突；`maa_action` 只用它做只读探测 |
+| `run.lock` | 「同一时刻只有一场 MAA」 | runner 用非阻塞抢并显式处理冲突，抢到写持有者标记；`maa_action` 只用它做只读探测。日常抢不到且持有者是 `update` 时先等（上限 `update_wait_minutes`，默认 15，等掉的时间从 `maa_run_timeout` 里扣，K17），持有者是别的照旧走锁冲突（#23），Discord 上说出是谁占着 |
 | `last_run.lock` | `last_run.json` 跨进程合并不丢字段 | `merge_last_run()` 内部阻塞持有，调用方不用手动加锁 |
 | `agent-book/state.lock` | 按钮登记表 + `plan.json` 写入 | 阻塞式，跨功能共享 |
 

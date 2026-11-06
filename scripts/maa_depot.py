@@ -26,7 +26,9 @@ from maa_common import (
     merge_last_run,
     now_beijing,
     report_game_busy,
+    lock_holder_text,
     run_lock,
+    run_lock_holder,
 )
 
 
@@ -526,9 +528,10 @@ def run_depot(config: Config, *, at: datetime | None = None) -> dict[str, Any]:
     import maa_daily
 
     observed_at = at or now_beijing()
-    with run_lock(blocking=False) as acquired:
+    with run_lock(blocking=False, holder="depot") as acquired:
         if not acquired:
-            raise RuntimeError("另一个 MAA 任务正在运行，Depot 对表未执行")
+            busy = lock_holder_text(run_lock_holder()) or "另一个 MAA 任务"
+            raise RuntimeError(f"{busy}正在运行，Depot 对表未执行")
         online, probe_detail = maa_playcover.game_is_online(config)
         if online:
             reason = (

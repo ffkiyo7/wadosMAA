@@ -414,3 +414,85 @@ class PlanCardRefreshTests(unittest.TestCase):
         saved = json.loads(plan.read_text(encoding="utf-8"))
         self.assertEqual(saved["sessions"]["pm"]["source"], "gui")
         self.assertEqual(saved["sessions"]["am"]["source"], "discord")
+
+
+class LockHolderTests(unittest.TestCase):
+    """K15 / K17：`run.lock` 里写持有者；日常遇到「上游更新」就等。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        root = Path(self._tmp.name)
+        for item in (
+            patch.object(maa_common, "STATE_DIR", root),
+            patch.object(maa_common, "RUN_LOCK_PATH", root / "run.lock"),
+        ):
+            item.start()
+            self.addCleanup(item.stop)
+
+    def test_the_holder_is_written_while_held_and_cleared_on_release(self) -> None:
+        self.assertIsNone(maa_common.run_lock_holder())
+        with maa_common.run_lock(holder="gui", detail="肉鸽") as acquired:
+            self.assertTrue(acquired)
+            marker = maa_common.run_lock_holder()
+            assert marker is not None
+            self.assertEqual(marker["holder"], "gui")
+            self.assertIn("Wado's MAA·肉鸽（自 ", maa_common.lock_holder_text(marker))
+            # 只探测的一方拿不到锁，也不会改标记。
+            self.assertTrue(maa_common.is_run_locked())
+            self.assertEqual(maa_common.run_lock_holder(), marker)
+        self.assertEqual((Path(self._tmp.name) / "run.lock").read_text(encoding="utf-8"), "")
+        self.assertIsNone(maa_common.run_lock_holder())
+
+    def test_a_stale_marker_on_a_free_lock_is_ignored(self) -> None:
+        (Path(self._tmp.name) / "run.lock").write_text('{"holder": "update"}\n', encoding="utf-8")
+        self.assertIsNone(maa_common.run_lock_holder())
+
+    def test_holder_text(self) -> None:
+        self.assertEqual(maa_common.lock_holder_text(None), "")
+        self.assertEqual(
+            maa_common.lock_holder_text({"holder": "update", "since": "2026-11-06T07:50:00+08:00"}),
+            "上游更新（自 07:50）",
+        )
+
+
+class UpdateWaitTests(unittest.TestCase):
+    def run_wait(self, holders: list, minutes: int = 15) -> tuple[float, int]:
+        import maa_daily
+
+        now = [0.0]
+        sleeps: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            now[0] += seconds
+
+        sequence = iter(holders)
+        last = holders[-1]
+        with patch.object(maa_daily, "run_lock_holder", lambda: next(sequence, last)):
+            waited = maa_daily.wait_for_update_holder(
+                {"update_wait_minutes": minutes}, sleep=sleep, clock=lambda: now[0]
+            )
+        return waited, len(sleeps)
+
+    def test_the_daily_waits_only_for_the_update(self) -> None:
+        update = {"holder": "update"}
+        self.assertEqual(self.run_wait([None]), (0.0, 0))
+        self.assertEqual(self.run_wait([{"holder": "gui"}]), (0.0, 0))
+        waited, polls = self.run_wait([update, update, update, None])
+        self.assertEqual((waited, polls), (15.0, 3))
+
+    def test_the_wait_has_a_ceiling(self) -> None:
+        waited, _ = self.run_wait([{"holder": "update"}], minutes=1)
+        self.assertEqual(waited, 60.0)
+        self.assertEqual(self.run_wait([{"holder": "update"}], minutes=0), (0.0, 0))
+
+    def test_a_blocked_daily_names_the_holder_in_discord(self) -> None:
+        import maa_daily
+
+        posted: list = []
+        with patch.object(maa_daily, "run_lock_holder", return_value={"holder": "gui", "since": "2026-11-06T07:58:00+08:00"}), \
+                patch.object(maa_daily, "merge_last_run", lambda update: None), \
+                patch.object(maa_daily, "discord_request", side_effect=lambda *a, **k: posted.append(a)):
+            maa_daily.report_lock_conflict({}, "t", "1", "am", datetime(2026, 11, 6, 8, 0, tzinfo=BEIJING))
+        self.assertIn("Wado's MAA（自 07:58）正在用游戏", posted[0][3]["embeds"][0]["description"])

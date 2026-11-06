@@ -688,6 +688,9 @@ def run_local(stage: str, raw_switches: str, *flags: str) -> tuple[bool, str, di
     except ValueError as exc:
         return False, str(exc), {}
     if is_run_locked():
+        busy = maa_common.lock_holder_text(maa_common.run_lock_holder())
+        if busy:
+            return False, f"{busy}正在用游戏，等它结束后再开。", {"blocked": "locked", "holder": busy}
         phase, running = _running_context()
         return False, f"{phase}已经在跑 {running}，等它结束后再开。", {"blocked": "locked"}
     now = now_beijing()

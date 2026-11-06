@@ -50,7 +50,9 @@ from maa_common import (
     now_beijing,
     require_executable,
     retire_discord_components,
+    lock_holder_text,
     run_lock,
+    run_lock_holder,
     state_lock,
 )
 
@@ -820,9 +822,10 @@ def cmd_run_batch(token: str) -> int:
     if not isinstance(entries, list) or not entries:
         return 2
 
-    with run_lock(blocking=False) as acquired:
+    with run_lock(blocking=False, holder="copilot", detail=str(state.get("stage") or "")) as acquired:
         if not acquired:
-            message = "另一场 MAA 正在运行，本轮未启动；到点会自动重试。"
+            busy = lock_holder_text(run_lock_holder()) or "另一场 MAA"
+            message = f"{busy}正在运行，本轮未启动；到点会自动重试。"
             print("copilot run-batch SKIPPED: run.lock 被占用")
             _set_status(token, {"queued"}, "scheduled", last_prepare_error=message)
             _notice(load_config(), "⏸️ 自动作业本轮未启动", message, 0x99AAB5)
