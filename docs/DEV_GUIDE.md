@@ -1917,6 +1917,8 @@ Wado's MAA（`~/Developer/forks/MaaMacGui` 的 fork）**只通过下面这些东
 | `config set <键> <JSON>` / `config patch <JSON 对象>` | 改配置。按 `maa_settings.FIELDS` 白名单校验；`patch` 要么全改、要么全不改 | 同 `config get` |
 | `defaults show` / `defaults set stage <关>` / `defaults set task <名> on\|off` | 持久默认值 | `defaults.json` 的内容 |
 | `schedule show` / `set <am\|pm> <HH:MM>` / `enable <场>` / `disable <场>` / `sync` | 早晚场时间和 cron（§3、K6）。只有拨开关才会 pause / resume | `maa_schedule.schedule_report()` |
+| `run choices` | 一键长草页的选项：关卡（和选关卡同源 `_stage_choices()`）、环节开关、锁 / 定时场优先的现状 | `choices`、`switches`、`task_names`、`busy`、`blackout` |
+| `copilot stages` | 自动抄作业的关卡列表（和抄作业卡同源 `copilot_card_stages()`），只读本地 | `stages`、`in_activity` |
 | `run local <关> <开关 JSON> [--force]` | 本机手动场：`--force` 只解除「定时场优先」，不解锁 | `token` 等 |
 | `plan refresh-card <场>` | 让 Discord 上的计划卡跟着刷新 | — |
 | `copilot preview <关>` / `copilot go <token> [作业 id]` | 抄作业：先预览、再确认（K13）。`go` 只接受完全满足的候选，并且要过 `dispatch_blocker()` | 候选列表（带 `perfect`）、`best_id`、`token` |

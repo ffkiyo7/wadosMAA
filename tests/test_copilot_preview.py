@@ -163,6 +163,33 @@ class CopilotPreviewTests(unittest.TestCase):
         self.assertIsNotNone(maa_action.dispatch_gui(["copilot", "go", "zz"]))
 
 
+class GuiListTests(unittest.TestCase):
+    def test_run_choices_share_the_plan_card_source(self) -> None:
+        choices = [("上次作战关卡", "", "x"), ("1-7 · 固源岩", "1-7", "y")]
+        with patch.object(maa_action, "load_config", return_value={}), patch(
+            "maa_plan_card._stage_choices", return_value=choices
+        ), patch.object(maa_action, "is_run_locked", return_value=False), patch.object(
+            maa_action, "manual_run_blackout_reason", return_value="距早场 08:00 不足 30 分钟"
+        ):
+            ok, _, data = maa_action.run_choices()
+        self.assertTrue(ok)
+        self.assertEqual([c["stage"] for c in data["choices"]], ["", "1-7"])
+        self.assertIn("annihilation", data["switches"])
+        self.assertIn("不足", data["blackout"])
+
+    def test_copilot_stages_share_the_card_source(self) -> None:
+        rows = [{"stage": "SR-5", "status": "todo"}]
+        with patch.object(maa_action, "load_config", return_value={}), patch(
+            "maa_plan_card.copilot_card_stages", return_value=(rows, True)
+        ):
+            ok, _, data = maa_action.copilot_stages()
+        self.assertTrue(ok)
+        self.assertEqual(data["stages"], rows)
+        self.assertTrue(data["in_activity"])
+        for argv in (["run", "choices"], ["copilot", "stages"]):
+            self.assertFalse(maa_action.dispatch(argv)[0])
+
+
 class SharedPerfectRuleTests(unittest.TestCase):
     def test_pick_and_preview_share_one_rule(self) -> None:
         source = (ROOT / "scripts" / "maa_copilot.py").read_text(encoding="utf-8")

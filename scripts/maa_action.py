@@ -672,6 +672,26 @@ def _local_run_switches(raw: str) -> dict[str, bool]:
     return switches
 
 
+def run_choices() -> tuple[bool, str, dict[str, Any]]:
+    """GUI「一键长草」页的选项：关卡和选关卡同源（`_stage_choices()`，K12），外加当前能不能开。"""
+    from maa_plan_card import _stage_choices
+
+    config = load_config()
+    choices = [
+        {"label": label, "stage": stage, "description": description}
+        for label, stage, description in _stage_choices(effective_plan(phase="now"), config)
+    ]
+    busy = maa_common.lock_holder_text(maa_common.run_lock_holder()) if is_run_locked() else ""
+    blackout = manual_run_blackout_reason(config) or ""
+    return True, f"可选 {len(choices)} 关。", {
+        "choices": choices,
+        "switches": list(LOCAL_RUN_SWITCHES),
+        "task_names": {**TASK_NAMES, "annihilation": "剿灭"},
+        "busy": busy,
+        "blackout": blackout,
+    }
+
+
 def run_local(stage: str, raw_switches: str, *flags: str) -> tuple[bool, str, dict[str, Any]]:
     """Wado's MAA 的「开始」（K4 / K12）：不发选关卡，直接按 GUI 给的关和环节派发。
 
@@ -1805,6 +1825,17 @@ def copilot_auto(value: str) -> tuple[bool, str]:
     )
 
 
+def copilot_stages() -> tuple[bool, str, dict[str, Any]]:
+    """GUI「自动抄作业」的关卡列表：和 Discord 抄作业卡同源（`copilot_card_stages()`，K13）。只读本地。"""
+    from maa_plan_card import copilot_card_stages
+
+    stages, in_activity = copilot_card_stages(load_config())
+    return True, f"可选 {len(stages)} 关。", {
+        "stages": json.loads(json.dumps(stages, ensure_ascii=False, default=str)),
+        "in_activity": in_activity,
+    }
+
+
 def copilot_cancel(token: str) -> tuple[bool, str]:
     config = load_config()
     message_id: Any = None
@@ -1883,6 +1914,10 @@ def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
         return defaults_set(argv[2], *argv[3:])
     if argv[:2] == ["plan", "refresh-card"] and len(argv) == 3 and valid_phase(argv[2]):
         return plan_refresh_card(argv[2])
+    if argv == ["run", "choices"]:
+        return run_choices()
+    if argv == ["copilot", "stages"]:
+        return copilot_stages()
     if argv[:2] == ["copilot", "preview"] and len(argv) == 3:
         return copilot_preview(argv[2])
     if argv[:2] == ["copilot", "go"] and len(argv) in (3, 4):
