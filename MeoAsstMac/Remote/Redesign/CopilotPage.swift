@@ -56,6 +56,12 @@ struct CopilotPage: View {
         }
     }
 
+    /// 没通的排前面，已通的沉到后面。
+    private var sortedStages: [CopilotStageRow] {
+        let all = data.copilot?.stages ?? []
+        return all.filter { $0.status != "cleared" } + all.filter { $0.status == "cleared" }
+    }
+
     private var caption: String? {
         guard let stages = data.copilot else { return nil }
         let todo = data.copilotTodo.count
@@ -69,7 +75,7 @@ struct CopilotPage: View {
             if let error = data.copilotError {
                 NoticeLine(ok: false, text: error)
             }
-            ForEach(data.copilot?.stages ?? []) { row in
+            ForEach(sortedStages) { row in
                 Button {
                     Task { await select(row.stage) }
                 } label: {
