@@ -1,0 +1,232 @@
+diff --git a/MeoAsstMac.xcodeproj/project.pbxproj b/MeoAsstMac.xcodeproj/project.pbxproj
+index e56e356..d98cbd4 100644
+--- a/MeoAsstMac.xcodeproj/project.pbxproj
++++ b/MeoAsstMac.xcodeproj/project.pbxproj
+@@ -128,11 +128,6 @@
+ 			dstPath = "";
+ 			dstSubfolderSpec = 10;
+ 			files = (
+-				833F7B2B29A34C440001DB2D /* fastdeploy_ppocr.xcframework in Embed Frameworks */,
+-				831D248A293C9CE3005AC1CE /* MaaCore.xcframework in Embed Frameworks */,
+-				83E9D13A294B74460091D1FF /* ONNXRuntime.xcframework in Embed Frameworks */,
+-				83E9D138294B74440091D1FF /* OpenCV.xcframework in Embed Frameworks */,
+-				834374AD2EB61C3E002CC2D3 /* MaaUtils.xcframework in Embed Frameworks */,
+ 			);
+ 			name = "Embed Frameworks";
+ 			runOnlyForDeploymentPostprocessing = 0;
+@@ -271,12 +266,7 @@
+ 				832D14973042F6C40000C09B /* JBird in Frameworks */,
+ 				830565483042DD6C0077CD3D /* JBird in Frameworks */,
+ 				83782A2D2CFFB00000A32BDD /* LegacyUserTasks in Frameworks */,
+-				834374AC2EB61ACA002CC2D3 /* MaaUtils.xcframework in Frameworks */,
+ 				830C3D1C29BC7D8600B13A9F /* Sparkle in Frameworks */,
+-				833F7B2A29A34C440001DB2D /* fastdeploy_ppocr.xcframework in Frameworks */,
+-				831D2489293C9CE3005AC1CE /* MaaCore.xcframework in Frameworks */,
+-				83E9D139294B74460091D1FF /* ONNXRuntime.xcframework in Frameworks */,
+-				83E9D137294B74440091D1FF /* OpenCV.xcframework in Frameworks */,
+ 				8347B5AB2CDF89CC00AEB627 /* ZIPFoundation in Frameworks */,
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+@@ -612,7 +602,6 @@
+ 			buildActionMask = 2147483647;
+ 			files = (
+ 				8320E6642CFE004D00F4BC95 /* Localizable.xcstrings in Resources */,
+-				83FF5A9C2978FE27000AE831 /* resource in Resources */,
+ 				833786D628F188D900D39D6F /* Preview Assets.xcassets in Resources */,
+ 				833786D328F188D900D39D6F /* Assets.xcassets in Resources */,
+ 				AEA8E3A02E77003F00355D84 /* AppIcon.icon in Resources */,
+@@ -778,7 +767,7 @@
+ 				GCC_WARN_UNUSED_FUNCTION = YES;
+ 				GCC_WARN_UNUSED_VARIABLE = YES;
+ 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+-				MACOSX_DEPLOYMENT_TARGET = 14.0;
++				MACOSX_DEPLOYMENT_TARGET = 26.0;
+ 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+ 				MTL_FAST_MATH = YES;
+ 				ONLY_ACTIVE_ARCH = YES;
+@@ -797,7 +786,7 @@
+ 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+ 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+ 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+-				CODE_SIGN_ENTITLEMENTS = MeoAsstMac/MAADev.entitlements;
++				CODE_SIGN_ENTITLEMENTS = MeoAsstMac/Spike.entitlements;
+ 				CODE_SIGN_STYLE = Automatic;
+ 				COMBINE_HIDPI_IMAGES = YES;
+ 				DEAD_CODE_STRIPPING = YES;
+@@ -810,13 +799,17 @@
+ 				LD_RUNPATH_SEARCH_PATHS = (
+ 					"$(inherited)",
+ 					"@executable_path/../Frameworks",
++					"\"$(HOME)/Library/Application Support/com.loong.maa/lib\"",
+ 				);
+-				PRODUCT_BUNDLE_IDENTIFIER = com.hguandl.MeoAsstMac;
++				PRODUCT_BUNDLE_IDENTIFIER = com.hguandl.MeoAsstMac.spikecore;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+ 				PROVISIONING_PROFILE_SPECIFIER = "";
+ 				SWIFT_EMIT_LOC_STRINGS = YES;
+ 				SWIFT_STRICT_CONCURRENCY = complete;
+ 				SWIFT_VERSION = 5.0;
++				SWIFT_INCLUDE_PATHS = "/private/tmp/claude-501/-Users-wadorudi-Developer-personal-maa-remote/bd415c7a-9441-40b0-8724-226c389bc077/scratchpad/linkA-weak/include";
++				LIBRARY_SEARCH_PATHS = "/private/tmp/claude-501/-Users-wadorudi-Developer-personal-maa-remote/bd415c7a-9441-40b0-8724-226c389bc077/scratchpad/linkA/lib";
++				OTHER_LDFLAGS = "-weak-lMaaCore";
+ 			};
+ 			name = Debug;
+ 		};
+@@ -869,7 +862,7 @@
+ 				GCC_WARN_UNUSED_FUNCTION = YES;
+ 				GCC_WARN_UNUSED_VARIABLE = YES;
+ 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+-				MACOSX_DEPLOYMENT_TARGET = 14.0;
++				MACOSX_DEPLOYMENT_TARGET = 26.0;
+ 				MTL_ENABLE_DEBUG_INFO = NO;
+ 				MTL_FAST_MATH = YES;
+ 				SDKROOT = macosx;
+@@ -887,13 +880,13 @@
+ 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+ 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+ 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = YES;
+-				CODE_SIGN_ENTITLEMENTS = MeoAsstMac/MeoAsstMac.entitlements;
+-				CODE_SIGN_IDENTITY = "Developer ID Application";
++				CODE_SIGN_ENTITLEMENTS = MeoAsstMac/Spike.entitlements;
++				CODE_SIGN_IDENTITY = "-";
+ 				CODE_SIGN_STYLE = Manual;
+ 				COMBINE_HIDPI_IMAGES = YES;
+ 				DEAD_CODE_STRIPPING = YES;
+ 				DEVELOPMENT_ASSET_PATHS = "\"MeoAsstMac/Preview Content\"";
+-				DEVELOPMENT_TEAM = 29V29Y67P2;
++				DEVELOPMENT_TEAM = "";
+ 				ENABLE_HARDENED_RUNTIME = YES;
+ 				ENABLE_PREVIEWS = YES;
+ 				GENERATE_INFOPLIST_FILE = YES;
+@@ -902,13 +895,17 @@
+ 				LD_RUNPATH_SEARCH_PATHS = (
+ 					"$(inherited)",
+ 					"@executable_path/../Frameworks",
++					"\"$(HOME)/Library/Application Support/com.loong.maa/lib\"",
+ 				);
+-				PRODUCT_BUNDLE_IDENTIFIER = com.hguandl.MeoAsstMac;
++				PRODUCT_BUNDLE_IDENTIFIER = com.hguandl.MeoAsstMac.spikecore;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+-				PROVISIONING_PROFILE_SPECIFIER = "MAA CI Workflow";
++				PROVISIONING_PROFILE_SPECIFIER = "";
+ 				SWIFT_EMIT_LOC_STRINGS = YES;
+ 				SWIFT_STRICT_CONCURRENCY = complete;
+ 				SWIFT_VERSION = 5.0;
++				SWIFT_INCLUDE_PATHS = "/private/tmp/claude-501/-Users-wadorudi-Developer-personal-maa-remote/bd415c7a-9441-40b0-8724-226c389bc077/scratchpad/linkA-weak/include";
++				LIBRARY_SEARCH_PATHS = "/private/tmp/claude-501/-Users-wadorudi-Developer-personal-maa-remote/bd415c7a-9441-40b0-8724-226c389bc077/scratchpad/linkA/lib";
++				OTHER_LDFLAGS = "-weak-lMaaCore";
+ 			};
+ 			name = Release;
+ 		};
+diff --git a/MeoAsstMac/Core/Maa.swift b/MeoAsstMac/Core/Maa.swift
+index 74d5852..2991c40 100644
+--- a/MeoAsstMac/Core/Maa.swift
++++ b/MeoAsstMac/Core/Maa.swift
+@@ -48,6 +48,81 @@ actor MAAProvider {
+     }
+ }
+ 
++// MARK: - SPIKE: Core-from-maa-cli runtime check (scratch only, not product code)
++
++enum SpikeCoreCheck {
++    /// Runs only when MAA_SPIKE_USER_DIR is set; prints results and exits the process.
++    static func runIfRequested() {
++        let env = ProcessInfo.processInfo.environment
++        guard let userDir = env["MAA_SPIKE_USER_DIR"] else { return }
++        let home = String(cString: getpwuid(getuid())!.pointee.pw_dir)
++        let base = env["MAA_SPIKE_BASE"] ?? home + "/Library/Application Support/com.loong.maa"
++        let hotUpdate = home + "/Library/Caches/com.loong.maa"
++        let userRes = home + "/.config/maa-cli"
++        var allOK = true
++
++        func log(_ s: String) {
++            print("[spike] " + s)
++            fflush(stdout)
++        }
++
++        // Weak-link preflight: if libMaaCore was not found at launch, all Asst* symbols are NULL.
++        if dlsym(UnsafeMutableRawPointer(bitPattern: -2), "AsstGetVersion") == nil {  // RTLD_DEFAULT
++            log("PREFLIGHT: libMaaCore not loaded (weak-linked, app still launched)")
++            exit(3)
++        }
++
++        // Which dylibs did dyld actually map?
++        for i in 0..<_dyld_image_count() {
++            let name = String(cString: _dyld_get_image_name(i))
++            if name.range(of: "MaaCore|MaaUtils|opencv|onnxruntime|fastdeploy|AdbControl", options: .regularExpression) != nil {
++                log("dyld image: \(name)")
++            }
++        }
++        let sandboxed = env["APP_SANDBOX_CONTAINER_ID"] != nil
++        log("sandboxed(APP_SANDBOX_CONTAINER_ID set): \(sandboxed)")
++
++        func step(_ name: String, _ body: () -> Bool) {
++            let t0 = Date()
++            let ok = body()
++            allOK = allOK && ok
++            log(String(format: "%@ -> %@ (%.2fs)", name, ok ? "OK" : "FAIL", Date().timeIntervalSince(t0)))
++        }
++
++        step("AsstSetUserDir(\(userDir))") { AsstSetUserDir(userDir) != 0 }
++        step("AsstLoadResource(\(base))  [base resource]") { AsstLoadResource(base) != 0 }
++        step("AsstLoadResource(\(base)/MaaResource)  [git overlay]") { AsstLoadResource(base + "/MaaResource") != 0 }
++        if FileManager.default.fileExists(atPath: hotUpdate + "/resource") {
++            step("AsstLoadResource(\(hotUpdate))  [hot-update cache, extra]") { AsstLoadResource(hotUpdate) != 0 }
++        }
++        step("AsstLoadResource(\(userRes))  [user resource]") { AsstLoadResource(userRes) != 0 }
++        for b in [base + "/resource", hotUpdate + "/resource"] {
++            let p = b + "/platform_diff/iOS"
++            if FileManager.default.fileExists(atPath: p + "/resource") {
++                step("AsstLoadResource(\(p))  [platform_diff iOS, extra]") { AsstLoadResource(p) != 0 }
++            }
++        }
++
++        let version = AsstGetVersion().map { String(cString: $0) } ?? "<nil>"
++        log("AsstGetVersion() = \(version)")
++
++        let item = "30012".withCString { AsstGetItemName($0) }.map { String(cString: $0) } ?? "<nil>"
++        log("AsstGetItemName(30012) = \(item)")
++        let key = "1-7".withCString { AsstGetMapLevelKey($0) }
++        func s(_ p: UnsafePointer<CChar>?) -> String { p.map { String(cString: $0) } ?? "<nil>" }
++        log("AsstGetMapLevelKey(1-7) = code=\(s(key.code)) stage_id=\(s(key.stage_id)) level_id=\(s(key.level_id)) name=\(s(key.name))")
++        log("AsstGetNullSize() = \(AsstGetNullSize())")
++
++        let h = AsstCreateEx(nil, nil)
++        log("AsstCreateEx(nil,nil) = \(h == nil ? "nil" : "non-nil"); connected=\(h.map { AsstConnected($0) } ?? 255) running=\(h.map { AsstRunning($0) } ?? 255)")
++        if let h { AsstDestroy(h) }
++        log("AsstDestroy done")
++
++        log("RESULT: \(allOK ? "ALL OK" : "SOME FAILED")")
++        exit(allOK ? 0 : 1)
++    }
++}
++
+ extension MAAProvider {
+     func itemNames<S: Sequence<String>>(for ids: S) -> [String: String] {
+         ids.reduce(into: [:]) { partialResult, id in
+diff --git a/MeoAsstMac/MeoAsstMacApp.swift b/MeoAsstMac/MeoAsstMacApp.swift
+index dd45416..4fa9e03 100644
+--- a/MeoAsstMac/MeoAsstMacApp.swift
++++ b/MeoAsstMac/MeoAsstMacApp.swift
+@@ -18,6 +18,7 @@ struct MeoAsstMacApp: App {
+     private let updaterDelegate = MaaUpdaterDelegate()
+ 
+     init() {
++        SpikeCoreCheck.runIfRequested()  // SPIKE: exits early when MAA_SPIKE_USER_DIR is set
+         let viewModel = MAAViewModel()
+         let newModel = NewViewModel(parent: viewModel)
+         _appViewModel = StateObject(wrappedValue: viewModel)
+diff --git a/MeoAsstMac/Spike.entitlements b/MeoAsstMac/Spike.entitlements
+new file mode 100644
+index 0000000..8cc185a
+--- /dev/null
++++ b/MeoAsstMac/Spike.entitlements
+@@ -0,0 +1,8 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
++<plist version="1.0">
++<dict>
++	<key>com.apple.security.cs.disable-library-validation</key>
++	<true/>
++</dict>
++</plist>
