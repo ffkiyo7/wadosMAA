@@ -28,9 +28,7 @@ struct MeoAsstMacApp: App {
             ContentView()
                 .environmentObject(appViewModel)
                 .environment(newViewModel)
-                .onAppear {
-                    TaskTimerManager.shared.connectToModel(viewModel: appViewModel)
-                }
+                // 上游的「定时一键长草」（TaskTimerManager）不启动：调度只认 maa-remote 的 cron（K6 / K8）。
         }
         .commands {
             CommandGroup(replacing: .newItem) {

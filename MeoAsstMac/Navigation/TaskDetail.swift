@@ -81,7 +81,6 @@ struct TaskDetail: View {
             Picker("内容", selection: $newModel.dailyTasksDetailMode) {
                 Label("选项", systemImage: "gearshape").tag(MAAViewModel.DailyTasksDetailMode.taskConfig)
                 Label("日志", systemImage: "note.text").tag(MAAViewModel.DailyTasksDetailMode.log)
-                Label("定时", systemImage: "clock.arrow.2.circlepath").tag(MAAViewModel.DailyTasksDetailMode.timerConfig)
             }
             .pickerStyle(.segmented)
         }
