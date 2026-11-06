@@ -152,6 +152,7 @@ import SwiftUI
 
         $tasks.sink(receiveValue: writeBack).store(in: &cancellables)
         $status.sink(receiveValue: switchAwakeGuard).store(in: &cancellables)
+        $status.sink(receiveValue: releaseRunLockWhenIdle).store(in: &cancellables)
 
         initScheduledDailyTaskTimer()
     }
@@ -191,11 +192,34 @@ extension MAAViewModel {
             logWarn("MaaCore 缺少实验接口（AsstGetMapLevelKey / AsstGetItemName），关卡名和物品名显示会退化")
         }
         try await MAAProvider.shared.setUserDirectory(path: Self.userDirectory.path)
+        // 先查上游（S3）：不新鲜、闸门也放行时先更新，更新完再加载资源。
+        await RemoteGate.startupCheck { [weak self] message, isWarning in
+            if isWarning { self?.logWarn(verbatim: message) } else { self?.logTrace(verbatim: message) }
+        }
         try await loadResource(channel: clientChannel)
         status = .idle
     }
 
+    /// 回到空闲就放 `run.lock`（S3）。
+    func releaseRunLockWhenIdle(_ newValue: Status) {
+        if newValue == .idle {
+            RemoteGate.finishUpstreamRun()
+        }
+    }
+
     func ensureHandle(requireConnect: Bool = true) async throws {
+        // 要动游戏的上游功能：先过闸门、抢 maa-remote 的 run.lock（S3）。只解析视频的不用。
+        if requireConnect && !RunLock.shared.isHeld {
+            do {
+                for warning in try await RemoteGate.prepareUpstreamRun(detail: "上游手动功能") {
+                    logWarn(verbatim: warning)
+                }
+            } catch {
+                logError(verbatim: error.localizedDescription)
+                throw error
+            }
+        }
+
         if handle == nil {
             let handle = try await MAAHandle(options: instanceOptions)
             self.handle = handle
