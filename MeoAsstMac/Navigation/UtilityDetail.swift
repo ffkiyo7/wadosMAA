@@ -37,12 +37,14 @@ struct UtilityDetail: View {
     }
 
     var body: some View {
+        // 内容不够高时（分辨率指南、寻访提示）靠上排，不要被居中到窗口中下部。
+        // 标题由外层的 navigationTitle 给，这里不再在工具栏里放第二份。
         VStack {
             content
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .toolbar {
-            UtilityTitle(description: entry?.description)
             ToolbarItem {
                 Picker("工具介绍", selection: $showInfo) {
                     Label("info", systemImage: "info")
@@ -62,22 +64,5 @@ struct UtilityDetail_Previews: PreviewProvider {
     static var previews: some View {
         UtilityDetail(entry: .recruit)
             .environmentObject(MAAViewModel())
-    }
-}
-
-private struct UtilityTitle: ToolbarContent {
-    let description: String?
-
-    var body: some ToolbarContent {
-        let item = ToolbarItem {
-            Text(description ?? String(localized: "实用工具"))
-                .padding(.leading, 5)
-                .font(.headline)
-        }
-        if #available(macOS 26.0, *) {
-            item.sharedBackgroundVisibility(.hidden)
-        } else {
-            item
-        }
     }
 }
