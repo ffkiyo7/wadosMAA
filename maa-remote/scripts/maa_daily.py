@@ -1,0 +1,2154 @@
+#!/usr/bin/env python3
+"""Run one complete MAA daily session and stream its progress to Discord."""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+import threading
+import time
+from collections import deque
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, TextIO, cast
+
+import maa_depot
+import maa_playcover
+from maa_upstream import hard_block as upstream_hard_block
+from maa_common import (
+    BEIJING,
+    DEFAULT_TASKS,
+    LAST_RUN_PATH,
+    LAST_RUN_SCHEMA_VERSION,
+    MAA_CONFIG_DIR,
+    MANUAL_RUN_PATH,
+    MANUAL_RUN_SCHEMA_VERSION,
+    RUNS_DIR,
+    SAFE_ITEM_ID_RE,
+    SAFE_MALL_ITEM_RE,
+    SCRIPTS_DIR,
+    Config,
+    LastRun,
+    Phase,
+    Plan,
+    atomic_write_json,
+    atomic_write_text,
+    check_schema,
+    cleanup_run_files,
+    create_thread,
+    discord_request,
+    discord_token,
+    discord_upload,
+    effective_plan,
+    is_phase,
+    is_plan_phase,
+    load_config,
+    load_json,
+    maa_subprocess_env,
+    medicine_label,
+    merge_last_run,
+    now_beijing,
+    plan_stage_label,
+    report_game_busy as common_report_game_busy,
+    require_executable,
+    lock_holder_text,
+    run_lock,
+    run_lock_holder,
+    state_lock,
+)
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# 信用商店 `buy_first` / `blacklist` 的物品名白名单（四期步骤 5）。这两个列表来自
+# `config.json`，会**原样变成 TOML 字符串**交给 MaaCore 去 OCR 比对，所以渲染器
+# 只接受「中日文字 + 拉丁字母 + 数字 + 少数分隔符」，长度 ≤ 20。校验不过的项
+# **静默丢弃**：一个写歪的物品名不该让整场日常渲染不出来（D-2 的教训）。
+# 　-鿿 = CJK 标点 + 假名 + 汉字；· / ・ 是「技能概要·卷1」的中点。
+PHASE_LABELS = {"am": "早", "pm": "晚", "now": "手动"}
+# Only the cron-driven phases defer to a running game. `now` is the user
+# saying "run it right now" and must never be probe-skipped (PLAN_NAV_GATE B-1).
+AUTO_PHASES = frozenset({"am", "pm"})
+TASK_STEPS = (
+    ("StartUp", "🚀", "登录与首登领取", "正在登录并处理首登弹窗"),
+    ("Annihilation", "☄️", "每日剿灭", "正在用代理卡全权委托清剿灭"),
+    ("Fight", "⚔️", "刷理智", "正在刷理智"),
+    # 第二个刷理智块（四期步骤 3b）：第一个块刷够 `drops` 上限就停，剩下的理智
+    # 交给它。**key 故意不叫 `Fight`**——`_task_state()` 认不出命名段时会退回
+    # `"<key> Completed"` 这条通配，两个块共用 `Fight` 会让没跑过的第二块被判成完成。
+    ("Fight2", "⚔️", "刷理智·续", "正在刷第二个关"),
+    ("Infrast", "🏭", "基建换班", "正在根据干员心情自动排班"),
+    ("Recruit", "🎫", "公开招募", "正在处理公开招募"),
+    ("Mall", "🛒", "信用商店", "正在领取信用并购买物资"),
+    ("Award", "🎁", "领取奖励", "正在领取日常、周常与全部邮件奖励"),
+    ("Custom", "🏠", "返回主界面", "正在返回游戏主界面，准备截图"),
+)
+
+# MAA 的 QuickSwitch 是子程序：点完小房子里的首页图标后，只能靠 next 里的 `#back`
+# 回到调用方来确认成功，而 `#back` 取的是任务名第一个 `@` 之前的前缀。裸写
+# "QuickSwitch@ToHome" 时前缀是并不存在的 "QuickSwitch"，`#back` 被静默丢弃
+# （日志里 to_be_recognized 只剩 4 项，json 里是 5 项），于是画面已经回到主页却没有
+# 任何任务能判定成功，空转到 20 次重试耗尽报 Custom Error——2026-08-02、08-03 两个
+# 早场都是这样红的。加上 "Home@" 前缀后 `#back` → "Home"（action = Stop），认出主页
+# 立即成功收尾。这里手工展开 MAA 自己用的
+# ["Home@QuickSwitch@ToHome#next", "Home@ReturnButtons#next"]，因为顶层 task_names 是
+# 原样交给 ProcessTask 的，不走 next 列表那套 `#` 展开。
+HOME_TASK_NAMES = [
+    "Home",
+    "Home@QuickSwitch@ToHome@Entry",
+    "Home@QuickSwitch@ToHome@Open",
+    "Home@ReturnButton",
+    "Home@FromStageSN",
+    "Home@FromAnnihilation",
+]
+# 主页面独有的入口，用本机 Vision OCR（ocrbox）核对截图确实停在主页。每个入口认中文或
+# 英文副标题之一（英文不分大小写），按**入口**计数：联动界面主题会把中文换成花字，
+# OCR 读成碎字（2026-11-04 三丽鸥主题下「终端」→「TERMiN」、「采购中心」→「…葉购中心」，
+# 旧的 8 个词只命中 3 个，好好的主页被判红），英文副标题却还在。
+# 「任务」「干员」不收：任务列表页满屏都是这两个词；那一页也有「好友」，所以要过半才算数。
+HOME_MARKERS = (
+    ("终端", "TERMIN"),
+    ("编队", "SQUADS", "SOUADS"),
+    ("采购中心", "STORE"),
+    ("公开招募", "RECRUIT"),
+    ("干员寻访", "HEADHUNT"),
+    ("基建", "BASE"),
+    ("好友", "FRIENDS"),
+    ("档案", "ARCHIVES"),
+    ("理智", "SANITY"),
+)
+HOME_MARKER_MIN = 5
+
+# 代理指挥失误时游戏结算页写「本场战斗已视为单次作战结算，未进行作战的理智已返还」，
+# 并把返还的理智画成一个道具图标。MaaCore 照单全收，于是日志里出现
+# `Drops: 理智 × 105`、汇总成 `total drops: 理智 × 315`。理智永远不可能是关卡掉落，
+# 所以掉落项里出现「理智」= 这一批代理失败、理智原路退回、一关没打成。
+# 2026-08-07 早场 TO-9 连着 4 批都栽在这里，MaaCore 仍判 Fight Completed，
+# 战报因此写成「✅ 完成（16 次；掉落 理智 ×315）」——见 DEV_GUIDE §11.13。
+SANITY_REFUND_ITEM = "理智"
+# maa run 被熔断中止时的返回码，跟超时的 124、人工中止的 130 区分开。
+PROXY_BREAK_CODE = 125
+# MaaCore 连接阶段就失败的标记。PlayCover 下 MaaCore 直连游戏进程里的 MaaTools
+# （127.0.0.1:1717）：游戏刚拉起时端口可能还没监听，或者游戏窗口被台前调度收进
+# 侧边栏、SCRN 回 0 字节 → 报 ConnectFailed / ScreencapFailed。maa-cli 不看 connect
+# 的返回值，照样 Assistant::start()，maa run 很快退出。此时一个键都没点过，先把窗口
+# 摆回台前再重开一趟是安全的。
+CONNECT_FAILURE_MARKERS = (
+    "TouchModeNotAvailable",
+    "ConnectFailed",
+    "Connect failed",
+    "ScreencapFailed",
+)
+# 这几个返回码是本脚本自己写上去的，不是「没连上」——重开一趟只会重复同一件事。
+SELF_ASSIGNED_CODES = (124, PROXY_BREAK_CODE, 130)
+# 进度消息的编辑节流，同时也是熔断的采样间隔——扫一遍全部日志行不便宜，
+# 不能放进 0.25 秒的主循环里跑。
+PROGRESS_INTERVAL_SECONDS = 5
+# 跑到一半截图失败时，两次「把游戏窗口摆回台前」之间至少隔这么久。
+SCREENCAP_SETTLE_INTERVAL = 30
+# maa run 的最短存活时间：配置写歪了也不能让整条链条秒退。
+MIN_RUN_TIMEOUT_SECONDS = 60
+# 国服日刷新 04:00。剿灭按游戏日只进一次，避免早晚场各刷一轮。
+CN_GAME_DAY_RESET = timedelta(hours=4)
+# 周合成玉上限。开跑前按森空岛 `campaign.reward` 判本周是否已满（`attach_annihilation()`），
+# 已满就不进剿灭；没读到时照常进，由 MaaCore 自己停。
+ANNIHILATION_WEEKLY_ORUNDUM = 1800
+# maa-cli 最终汇总用任务名；旧日志仍是「每周剿灭」。
+ANNIHILATION_TASK_NAMES = ("每日剿灭", "每周剿灭")
+# 两个刷理智块的任务名。渲染器、战报解析、掉落回写三处**共用这一份**，
+# 名字改了不会有哪一处偷偷对不上。
+FARMING_TASK_NAMES = ("刷理智", "刷理智·续")
+
+
+MANUAL_TOKEN_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+def manual_token_from_argv(argv: list[str]) -> str:
+    """`maa_daily.py now <token>` 的 token（`PLAN_MANUAL_RUN.md` M-e）；其余形式返回空串。"""
+    if len(argv) == 3 and argv[1] == "now" and MANUAL_TOKEN_RE.fullmatch(argv[2] or ""):
+        return argv[2]
+    return ""
+
+
+def select_phase(argv: list[str], at: datetime | None = None, cwd: Path | None = None) -> Phase:
+    # `is_phase()` 与 `PHASE_LABELS` 的键是同一组（am / pm / now）。
+    if len(argv) == 2 and is_phase(argv[1]):
+        return argv[1]
+    if manual_token_from_argv(argv):
+        return "now"
+    if len(argv) > 1:
+        raise ValueError("场次只接受 am、pm 或 now（now 后可跟一个选关请求 token）")
+    marker = (cwd or Path.cwd()).name.lower()
+    if is_plan_phase(marker):
+        return marker
+    hour = (at or now_beijing()).hour
+    if 7 <= hour < 14:
+        return "am"
+    if 20 <= hour or hour < 2:
+        return "pm"
+    return "now"
+
+
+def cn_game_day(at: datetime | None = None) -> str:
+    """Official-server calendar date: resets at 04:00 Beijing time."""
+    moment = at or now_beijing()
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=BEIJING)
+    return (moment.astimezone(BEIJING) - CN_GAME_DAY_RESET).date().isoformat()
+
+
+def should_run_annihilation(
+    plan: Plan,
+    at: datetime | None = None,
+    last_run: LastRun | dict[str, Any] | None = None,
+) -> bool:
+    """Include annihilation in this run: fight is on, and not yet done this game day."""
+    if not bool(plan.get("tasks", {}).get("fight", True)):
+        return False
+    state = last_run if isinstance(last_run, dict) else {}
+    return str(state.get("annihilation_game_day") or "") != cn_game_day(at)
+
+
+def cn_game_week(at: datetime | None = None) -> str:
+    """国服周刷新（周一 04:00）所在周的周一日期；剿灭合成玉上限按它记。"""
+    day = datetime.fromisoformat(cn_game_day(at)).date()
+    return (day - timedelta(days=day.weekday())).isoformat()
+
+
+def annihilation_weekly_full(
+    roster: dict[str, Any] | None, at: datetime | None = None
+) -> tuple[int, int] | None:
+    """森空岛快照显示**本周**剿灭合成玉已满时返回 `(current, total)`，否则 None。
+
+    快照是上一周的、字段缺失或坏掉一律 None（照常打）：同一周里 current 只增不减，
+    旧快照只会少判「已满」，不会把没打满的一周错判成跳过。
+    """
+    weekly = (roster or {}).get("annihilation_weekly")
+    if not isinstance(weekly, dict):
+        return None
+    try:
+        current = int(weekly["current"])
+        total = int(weekly["total"])
+        fetched = datetime.fromtimestamp(int(weekly["server_current_at"]), BEIJING)
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        return None
+    if total <= 0 or current < total:
+        return None
+    if cn_game_week(fetched) != cn_game_week(at):
+        return None
+    return current, total
+
+
+def attach_annihilation(
+    plan: Plan,
+    at: datetime | None = None,
+    last_run: LastRun | dict[str, Any] | None = None,
+    roster: dict[str, Any] | None = None,
+) -> Plan:
+    """Return a per-run plan copy with the once-per-game-day annihilation flag.
+
+    `roster` 不传时读森空岛快照（`roster.json`，不读 OperBox 后备——那份没有剿灭进度）。
+    本周已满就摘掉剿灭并带上 `annihilation_skip_reason`；读不到一律照常打。
+    """
+    if not should_run_annihilation(plan, at, last_run):
+        return {**plan, "annihilation": False}
+    if roster is None:
+        try:
+            import maa_copilot
+
+            loaded = load_json(maa_copilot.ROSTER_PATH, None)
+        except (ValueError, OSError):
+            loaded = None
+        roster = loaded if isinstance(loaded, dict) else {}
+    full = annihilation_weekly_full(roster, at)
+    if full is None:
+        return {**plan, "annihilation": True}
+    return {
+        **plan,
+        "annihilation": False,
+        "annihilation_skip_reason": f"本周剿灭合成玉已满（{full[0]}/{full[1]}），本场跳过",
+    }
+
+
+def attach_sanity_yield(
+    plan: Plan,
+    config: Config,
+    at: datetime | None = None,
+) -> Plan:
+    """理智不够刷默认关时把「刷理智」让出来，保留剿灭（四期 D11）。
+
+    自动抄作业跑完常常把理智打到个位数，这时候再开一个 Fight 只会空转一次
+    连战识别。判据只有一条：**估算理智 < 默认关的 `apCost`**。
+
+    **估不出来一律照常刷**（森空岛不可用、关卡不在 `stages.json`、状态文件坏掉）——
+    宁可多刷一场，也不能因为读不出数就一整天什么都不打（不变量 #26 的精神）。
+    """
+    try:
+        import maa_copilot
+
+        stage = str(plan.get("stage") or "")
+        index = maa_copilot.load_stage_index(config)
+        resolved = maa_copilot.resolve_copilot_stage(stage, index)
+        cost = (
+            maa_copilot.stage_sanity_cost(resolved[0], resolved[1], config)
+            if resolved
+            else None
+        )
+        roster = maa_copilot.load_roster()
+        snapshot = (roster or {}).get("sanity")
+        sanity = maa_copilot.estimated_sanity(
+            snapshot if isinstance(snapshot, dict) else {}, at
+        )
+        if cost is None or sanity is None or sanity >= cost:
+            return {**plan, "farming": True}
+        return {
+            **plan,
+            "farming": False,
+            "farming_skip_reason": (
+                f"理智 {sanity} 不足以刷 {stage}（需 {cost}），本场跳过刷理智；"
+                "剿灭 / 基建 / 公招 / 商店 / 领奖照常。"
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001 — (c) 估不出理智一律照常刷（不变量 #26）
+        print(
+            f"理智让路判定失败，本场照常刷理智：{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        return {**plan, "farming": True}
+
+
+def annihilation_consumed(lines: list[str]) -> bool:
+    """True when today's annihilation slot was used and must not run again today.
+
+    Named maa-cli summaries and Annihilation Start are the hard signals. If
+    StartUp already completed, the next task in the rendered chain is
+    annihilation, so later sessions in the same game day must not retry it.
+    """
+    if any(f"[{name}]" in line for line in lines for name in ANNIHILATION_TASK_NAMES):
+        return True
+    if any("Annihilation Start" in line or "Fight Annihilation" in line for line in lines):
+        return True
+    return _task_state(lines, "StartUp", "登录与首登领取") == "completed"
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _toml_bool(value: Any) -> str:
+    """配置里的布尔开关 → TOML 字面量。非布尔（写歪了）一律按 false。"""
+    return "true" if value is True else "false"
+
+
+def _drops_table(value: Any) -> str:
+    """`{itemId: 数量}` → MaaCore Fight 的 `drops` 内联表；没上限就返回空串。
+
+    `drops` 是上游参数「刷到这么多个就停」。数量来自材料缺口（四期步骤 3a），
+    冷启动或缺口 ≤ 0 时 `farming_drops` 本来就是空的，这里也就不写这一行。
+    itemId 在 `maa_common.normalize_plan()` 里已经过 `SAFE_ITEM_ID_RE`，
+    这里再挡一次——渲染器不接受没校验过的表键。
+    """
+    if not isinstance(value, dict) or not value:
+        return ""
+    pairs: list[str] = []
+    for item_id, quantity in sorted(value.items()):
+        try:
+            count = int(quantity)
+        except (TypeError, ValueError):
+            continue
+        if count <= 0 or not SAFE_ITEM_ID_RE.match(str(item_id)):
+            continue
+        pairs.append(f"{_toml_string(str(item_id))} = {count}")
+    return "{ " + ", ".join(pairs) + " }" if pairs else ""
+
+
+def _mall_item_list(value: Any) -> str:
+    """`config` 里的物品名列表 → TOML 数组；**过不了白名单的项直接丢掉**。
+
+    这两个列表（`mall_buy_first` / `mall_blacklist`）会原样进任务文件交给 MaaCore
+    去 OCR 比对，所以渲染器不接受没校验过的字符串（DEV_GUIDE §8 不变量 #51）。
+    """
+    if not isinstance(value, list):
+        return "[]"
+    names = [
+        str(item)
+        for item in value
+        if isinstance(item, str) and SAFE_MALL_ITEM_RE.match(item)
+    ]
+    return "[" + ", ".join(_toml_string(name) for name in names) + "]"
+
+
+def _report_lines(config: Config) -> str:
+    """掉落匿名上报（一图流 / 企鹅物流）。总开关 `report_drops`，默认开。
+
+    ID 一律留空 = 匿名上报，不带任何账号标识；数据回馈的正是本项目自己
+    在用的那两个掉落源（四期步骤 3）。
+    """
+    if not bool(config.get("report_drops", True)):
+        return ""
+    return (
+        "report_to_penguin = true\n"
+        # 两个 ID 的协议默认就是空串（上游 `integration.md`）。这里**显式写出来**：
+        # 匿名是这条功能的前提，不能让它取决于「默认值将来会不会变」。
+        'penguin_id = ""\n'
+        "report_to_yituliu = true\n"
+        'yituliu_id = ""\n'
+    )
+
+
+def _fight_block(
+    name: str,
+    stage: str,
+    config: Config,
+    medicine_days: int,
+    *,
+    drops: str,
+) -> str:
+    """一个 Fight 块。剿灭与两个刷理智块**共用这一份**，硬编码字面量只写一次。"""
+    return (
+        "[[tasks]]\n"
+        f"name = {_toml_string(name)}\n"
+        'type = "Fight"\n'
+        "[tasks.params]\n"
+        f"stage = {_toml_string(stage)}\n"
+        "medicine = 0\n"
+        f"medicine_expire_days = {max(0, medicine_days)}\n"
+        # This literal is not derived from any state or user input.
+        "stone = 0\n"
+        # Let MaaCore select the largest series currently affordable in
+        # the connected client instead of forcing a fixed multiplier.
+        "series = 0\n"
+        f"times = {int(config.get('fight_times', 2147483647))}\n"
+        + (f"drops = {drops}\n" if drops else "")
+        + 'server = "CN"\n'
+        'client_type = "Official"\n'
+        + _report_lines(config)
+    )
+
+
+def render_daily_toml(plan: Plan, config: Config) -> str:
+    """Render the exact immutable plan used for this run; no CloseDown task.
+
+    `tasks.fight` is the master switch for both Fight blocks. Below it the two
+    blocks have **independent** switches, because理智让路（四期 D11）要在
+    摘掉刷理智的同时保留剿灭：
+
+      plan["annihilation"] — 每日剿灭（游戏日一次，由 attach_annihilation 记帐）
+      plan["farming"]      — 刷理智（理智不够刷默认关时摘掉；周上限 1800 合成玉的
+                             剿灭是代理卡驱动的，摘掉纯亏，所以它不跟着走）
+    """
+    tasks = plan.get("tasks", {})
+    blocks = [
+        "[[tasks]]\n"
+        'name = "启动国服"\n'
+        'type = "StartUp"\n'
+        "[tasks.params]\n"
+        'client_type = "Official"\n'
+        "start_game_enabled = true\n"
+    ]
+    if tasks.get("fight", True):
+        # Fixed safety policy: never use ordinary medicine or Originite Prime;
+        # only consume medicine MaaCore identifies as expiring soon.
+        medicine_days = max(1, int(config.get("medicine_expire_days", 2)))
+        # Default True so the deploy seed and isolated renderer tests still
+        # include annihilation. execute() sets the flag from last_run.
+        if plan.get("annihilation", True):
+            # Fight(Annihilation) turns on 全权委托 and consumes a PRTS
+            # 代理指挥卡. MaaCore stops when the weekly 1800 orundum cap is
+            # reached (todo gone / cards refused).
+            blocks.append(
+                _fight_block(
+                    "每日剿灭", "Annihilation", config, medicine_days, drops=""
+                )
+            )
+        # Independent switch: 理智让路 removes ONLY this block.
+        # Default True so the deploy seed and isolated renderer tests keep it.
+        if plan.get("farming", True) and plan.get("fallback_run"):
+            # 后备补跑（`fallback_fight_plan()`）：主关的 Fight 一颗理智没花就 Error 了，
+            # 这一趟只打后备关。块名用第二块的名字，战报里自然落在「刷理智·续」那一行，
+            # 不带 drops——它本来就是拿来把剩余理智花完的。
+            blocks.append(
+                _fight_block(
+                    FARMING_TASK_NAMES[1], str(plan.get("stage", "")), config, medicine_days, drops=""
+                )
+            )
+        elif plan.get("farming", True):
+            drops = _drops_table(plan.get("farming_drops"))
+            blocks.append(
+                _fight_block(
+                    FARMING_TASK_NAMES[0],
+                    str(plan.get("stage", "")),
+                    config,
+                    medicine_days,
+                    drops=drops,
+                )
+            )
+            # 刷够 `drops` 上限之后 MaaCore 就停了，本场剩下的理智不能白扔：
+            # 再渲染一个 Fight 块打第二名的关，**不带 drops**，打到理智不足为止。
+            # 没有上限时第一个块本来就会打到理智不足，第二块也就没有意义。
+            spare = str(plan.get("farming_fallback_stage") or "")
+            if drops and spare:
+                blocks.append(
+                    _fight_block(
+                        FARMING_TASK_NAMES[1], spare, config, medicine_days, drops=""
+                    )
+                )
+    if tasks.get("infrast", True):
+        blocks.append(
+            "[[tasks]]\n"
+            'name = "基建换班"\n'
+            'type = "Infrast"\n'
+            "[tasks.params]\n"
+            # Let MaaCore calculate efficient assignments from the operators
+            # and morale currently visible in every shiftable base facility.
+            "mode = 0\n"
+            'facility = ["Mfg", "Trade", "Power", "Control", "Reception", "Office", "Dorm"]\n'
+            'drones = "_NotUse"\n'
+            "threshold = 0.3\n"
+            "replenish = false\n"
+            "dorm_trust_enabled = false\n"
+        )
+    if tasks.get("recruit", True):
+        blocks.append(
+            "[[tasks]]\n"
+            'name = "公开招募"\n'
+            'type = "Recruit"\n'
+            "[tasks.params]\n"
+            "refresh = true\n"
+            "select = [4, 5, 6]\n"
+            "confirm = [3, 4, 5, 6]\n"
+            f"times = {int(config.get('recruit_times', 4))}\n"
+            "set_time = true\n"
+            "expedite = false\n"
+            'server = "CN"\n'
+        )
+    if tasks.get("mall", True):
+        blocks.append(
+            "[[tasks]]\n"
+            'name = "信用商店"\n'
+            'type = "Mall"\n'
+            "[tasks.params]\n"
+            "visit_friends = true\n"
+            "shopping = true\n"
+            "force_shopping_if_credit_full = false\n"
+            "credit_fight = false\n"
+            # 四期步骤 5：优先买 / 黑名单 / 信用溢出与打折的开关都从配置读。
+            # 两个列表过 `SAFE_MALL_ITEM_RE` 白名单，默认空 = 完全沿用旧行为。
+            f"buy_first = {_mall_item_list(config.get('mall_buy_first'))}\n"
+            f"blacklist = {_mall_item_list(config.get('mall_blacklist'))}\n"
+            "reserve_max_credit = "
+            f"{_toml_bool(config.get('mall_reserve_max_credit', False))}\n"
+            "only_buy_discount = "
+            f"{_toml_bool(config.get('mall_only_buy_discount', False))}\n"
+        )
+    if tasks.get("award", True):
+        blocks.append(
+            "[[tasks]]\n"
+            'name = "领取奖励"\n'
+            'type = "Award"\n'
+            "[tasks.params]\n"
+            "award = true\n"
+            "mail = true\n"
+            "recruit = false\n"
+            # 四期步骤 5：三个「顺手领」开关从配置读，默认全 false（与改造前一致）。
+            f"orundum = {_toml_bool(config.get('award_orundum', False))}\n"
+            f"mining = {_toml_bool(config.get('award_mining', False))}\n"
+            "specialaccess = "
+            f"{_toml_bool(config.get('award_specialaccess', False))}\n"
+        )
+    blocks.append(
+        "[[tasks]]\n"
+        'name = "返回主界面"\n'
+        'type = "Custom"\n'
+        "[tasks.params]\n"
+        f"task_names = {json.dumps(HOME_TASK_NAMES, ensure_ascii=False)}\n"
+    )
+    return "\n".join(blocks)
+
+
+def _format_duration(seconds: float) -> str:
+    total = max(0, int(seconds))
+    minutes, secs = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _clean_line(line: str, limit: int = 150) -> str:
+    line = ANSI_RE.sub("", line).rstrip().replace("```", "``\u200b`")
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
+def _task_display_names(key: str, label: str) -> tuple[str, ...]:
+    if key == "Annihilation":
+        return ANNIHILATION_TASK_NAMES
+    return (label,)
+
+
+def farming_sections(lines: list[str]) -> list[str]:
+    """两个刷理智块的 maa-cli 汇总段拼在一起（掉落要合并统计，四期步骤 3b）。"""
+    section: list[str] = []
+    for name in FARMING_TASK_NAMES:
+        section += _named_task_section(lines, name)
+    return section
+
+
+def _task_state(lines: list[str], key: str, label: str) -> str:
+    # maa-cli uses the configured task name in its final ``[name]`` summary.
+    # Prefer that exact result when multiple tasks share one MaaCore type (the
+    # daily annihilation and ordinary farming are both Fight tasks).
+    names = _task_display_names(key, label)
+    named = [line for line in lines if any(f"[{name}]" in line for name in names)]
+    if named:
+        if any("Completed" in line for line in named):
+            return "completed"
+        if any("Stopped" in line or "Error" in line for line in named):
+            return "failed"
+        return "running"
+    if any(
+        f"{key} Completed" in line
+        or any(f"[{name}]" in line and "Completed" in line for name in names)
+        for line in lines
+    ):
+        return "completed"
+    if any(f"{key} Stopped" in line or f"{key} Error" in line for line in lines):
+        return "failed"
+    if any(f"{key} Start" in line or any(f"[{name}]" in line for name in names) for line in lines):
+        return "running"
+    return "pending"
+
+
+def _last_match(lines: list[str], pattern: str) -> re.Match[str] | None:
+    compiled = re.compile(pattern, re.IGNORECASE)
+    result = None
+    for line in lines:
+        match = compiled.search(line)
+        if match:
+            result = match
+    return result
+
+
+def _named_task_section(lines: list[str], label: str) -> list[str]:
+    """Return one maa-cli final-summary section, excluding later tasks."""
+    start = next((index for index, line in enumerate(lines) if f"[{label}]" in line), None)
+    if start is None:
+        return []
+    section: list[str] = []
+    for line in lines[start:]:
+        if section and re.match(r"^\[[^]]+\]", line):
+            break
+        section.append(line)
+    return section
+
+
+def _fight_times(lines: list[str]) -> int:
+    # Final summaries normally include a stage code (``Fight CE-6 6 times``);
+    # older fixture/log shapes omitted it.  Accept both before falling back to
+    # streaming Mission-started events.
+    summary = _last_match(lines, r"\bFight(?:\s+\S+)?\s+(\d+)\s+times\b")
+    if summary:
+        return int(summary.group(1))
+    return sum(
+        int(match.group(1))
+        for line in lines
+        if (match := re.search(r"Mission started\s*\((\d+)\s+times", line, re.I))
+    )
+
+
+def _expiring_medicine_used(lines: list[str]) -> int:
+    summary = _last_match(lines, r"used\s+\d+\s+medicine\s*\((\d+)\s+expiring\)")
+    if summary:
+        return int(summary.group(1))
+    return sum(
+        int(match.group(1))
+        for line in lines
+        if (match := re.search(r"Use\s+(\d+)\s+expiring medicine", line, re.I))
+    )
+
+
+def _parse_drop_items(raw: str) -> list[tuple[str, int]]:
+    """Parse one Drops payload into (item, quantity); JSON first, plain text as fallback."""
+    parsed: Any = None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    pairs: list[tuple[str, int]] = []
+    if isinstance(parsed, dict):
+        pairs = [
+            (str(name), int(quantity))
+            for name, quantity in parsed.items()
+            if isinstance(quantity, (int, float))
+        ]
+    elif isinstance(parsed, list):
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("itemName") or item.get("name")
+            quantity = item.get("quantity") or item.get("count")
+            if name and isinstance(quantity, (int, float)):
+                pairs.append((str(name), int(quantity)))
+    if not pairs:
+        pairs = [
+            (name.strip(" \"'{}[]"), int(quantity))
+            for name, quantity in re.findall(
+                r"([A-Za-z一-鿿][A-Za-z0-9一-鿿· _-]{0,30})\s*(?:[:x×])\s*(\d+)",
+                raw,
+            )
+        ]
+    return [(name, quantity) for name, quantity in pairs if name and quantity]
+
+
+def _drop_batches(
+    lines: list[str],
+) -> tuple[list[list[tuple[str, int]]], list[list[tuple[str, int]]]]:
+    """Split Drops events into per-batch results and maa-cli's final total lines."""
+    batches: list[list[tuple[str, int]]] = []
+    totals: list[list[tuple[str, int]]] = []
+    for line in lines:
+        marker = re.search(r"(?:total\s+)?Drops:\s*(.+)$", line, re.I)
+        if not marker:
+            continue
+        items = _parse_drop_items(marker.group(1).strip())
+        if not items:
+            continue
+        if re.search(r"total\s+Drops:", line, re.I):
+            totals.append(items)
+        else:
+            batches.append(items)
+    return batches, totals
+
+
+def _sanity_refund(items: list[tuple[str, int]]) -> int:
+    return sum(quantity for name, quantity in items if name == SANITY_REFUND_ITEM)
+
+
+def _drop_pairs(lines: list[str]) -> list[tuple[str, int]]:
+    batches, totals = _drop_batches(lines)
+    aggregate: dict[str, int] = {}
+    # maa-cli can emit per-batch Drops events and one final total. Prefer the
+    # latter when present so a result is never double-counted.
+    for items in totals or batches:
+        for name, quantity in items:
+            # 返还的理智不是掉落，见 SANITY_REFUND_ITEM。
+            if name == SANITY_REFUND_ITEM:
+                continue
+            aggregate[name] = aggregate.get(name, 0) + quantity
+    return list(aggregate.items())[:8]
+
+
+def proxy_failures(lines: list[str]) -> tuple[int, int, int]:
+    """代理指挥失误统计：(失误批次, 累计返还理智, 末尾连续失误批次)。
+
+    「末尾连续」供熔断使用——有真掉落的批次会把连续计数清零，只有一直失败才中止。
+    """
+    batches, totals = _drop_batches(lines)
+    if not batches:
+        # 没有逐批事件（只拿到 maa-cli 汇总行）时退回汇总；批次数不可知，按 1 计。
+        refunded = sum(_sanity_refund(items) for items in totals)
+        return (1, refunded, 1) if refunded else (0, 0, 0)
+    failed = 0
+    refunded = 0
+    streak = 0
+    for items in batches:
+        batch_refund = _sanity_refund(items)
+        if batch_refund:
+            failed += 1
+            refunded += batch_refund
+            streak += 1
+        else:
+            streak = 0
+    return failed, refunded, streak
+
+
+def fight_wiped_out(lines: list[str]) -> tuple[int, int]:
+    """全部批次都是代理失误（一关没打成）时返回 (批次, 返还理智)，否则 (0, 0)。"""
+    failed, refunded, _streak = proxy_failures(lines)
+    if failed and not _drop_pairs(lines):
+        return failed, refunded
+    return 0, 0
+
+
+def connect_failed(lines: list[str], return_code: int) -> str:
+    """连接阶段就死了（一个键都没点过）时返回命中的标记，否则空串。
+
+    三个条件缺一不可：非零且不是我们自己写的返回码、日志里有连接失败标记、没有
+    任何一条任务链跑到 Completed。第三条是安全闸门——只要有任务真跑过，就不能拿
+    「重开一趟」当补救，那会重复已经做完的事。
+    """
+    if return_code == 0 or return_code in SELF_ASSIGNED_CODES:
+        return ""
+    task_keys = tuple(key for key, *_ in TASK_STEPS)
+    for line in lines:
+        if "AllTasksCompleted" in line or any(f"{key} Completed" in line for key in task_keys):
+            return ""
+    for line in lines:
+        for marker in CONNECT_FAILURE_MARKERS:
+            if marker in line:
+                return marker
+    return ""
+
+
+def progress_content(
+    lines: list[str],
+    *,
+    plan: Plan | None = None,
+    final: str | None = None,
+) -> str:
+    clean = [_clean_line(line, 300) for line in lines if line.strip()]
+    heading = final or "🌱 MAA 正在执行"
+    status_lines: list[str] = []
+    for key, emoji, label, running_text in TASK_STEPS:
+        state = _task_state(clean, key, label)
+        if state == "completed":
+            status_lines.append(f"✅ {emoji} {label}：完成")
+        elif state == "failed":
+            status_lines.append(f"❌ {emoji} {label}：未完成")
+        elif state == "running":
+            detail = running_text
+            if key == "Fight" and plan is not None:
+                detail = f"正在刷 {plan_stage_label(plan)}，自动选择最大连战次数"
+            elif key == "Fight2" and plan is not None:
+                spare = str(plan.get("farming_fallback_stage") or "")
+                detail = f"正在刷 {spare or '第二个关'}，用掉刷够缺口后剩下的理智"
+            status_lines.append(f"⏳ {emoji} {detail}")
+
+    sanity = _last_match(clean, r"Current sanity:\s*(\d+)\s*/\s*(\d+)")
+    if sanity and _task_state(clean, "Fight", "刷理智") != "pending":
+        status_lines.append(f"🧠 当前理智：{sanity.group(1)}/{sanity.group(2)}")
+    proxy_batches, refunded, _streak = proxy_failures(clean)
+    fight_times = _fight_times(clean)
+    if fight_times and not fight_wiped_out(clean)[0]:
+        status_lines.append(f"🔁 已完成作战：{fight_times} 次")
+    if proxy_batches:
+        status_lines.append(f"⚠️ 代理指挥失误 {proxy_batches} 批，理智已返还 ×{refunded}")
+    refresh = _last_match(clean, r"RecruitTagsRefreshed:\s*(\d+)\s+times")
+    if refresh:
+        status_lines.append(f"🔄 公招已刷新：{refresh.group(1)} 次")
+    if not status_lines:
+        status_lines.append("⏳ 正在连接游戏并准备任务…")
+    return (heading + "\n" + "\n".join(status_lines))[:1990]
+
+
+def extract_summary(
+    stdout_lines: list[str],
+    stderr_lines: list[str],
+    *,
+    plan: Plan | None = None,
+    ok: bool | None = None,
+    home_verified: bool | None = None,
+    home_verify_detail: str = "",
+) -> str:
+    lines = [_clean_line(line, 500) for line in stdout_lines + stderr_lines if line.strip()]
+    tasks = (plan or {}).get("tasks", {})
+    annihilation_in_logs = any(
+        f"[{name}]" in line for line in lines for name in ANNIHILATION_TASK_NAMES
+    )
+    annihilation_planned = (plan or {}).get("annihilation")
+    # 第二个刷理智块只有「第一块设了 drops 上限 + 有后备关」时才渲染出来，
+    # 战报也只在那时列它——否则每天都多一行「⏸️ 未执行」的噪音。
+    second_fight_planned = bool(
+        (plan or {}).get("farming_drops") and (plan or {}).get("farming_fallback_stage")
+    )
+    enabled = {
+        "StartUp": True,
+        # Show the step when this run included it, or when older logs still
+        # have the named summary.  A False flag means "already done today".
+        "Annihilation": annihilation_in_logs or annihilation_planned is True,
+        "Fight": bool(tasks.get("fight", True)),
+        "Fight2": bool(tasks.get("fight", True))
+        and (
+            second_fight_planned
+            or any(f"[{FARMING_TASK_NAMES[1]}]" in line for line in lines)
+        ),
+        "Infrast": bool(tasks.get("infrast", True)),
+        "Recruit": bool(tasks.get("recruit", True)),
+        "Mall": bool(tasks.get("mall", True)),
+        "Award": bool(tasks.get("award", True)),
+        "Custom": True,
+    }
+    result = [f"🌟 总体：{'✅ 成功' if ok is not False else '❌ 未完成'}"]
+    for key, emoji, label, _running_text in TASK_STEPS:
+        if not enabled[key]:
+            if key == "Annihilation" and annihilation_planned is False:
+                reason = str((plan or {}).get("annihilation_skip_reason") or "今日已刷过，本场跳过")
+                result.append(f"{emoji} {label}：⏭️ {reason}")
+            continue
+        state = _task_state(lines, key, label)
+        status = {"completed": "✅ 完成", "failed": "❌ 未完成", "running": "❌ 中断", "pending": "⏸️ 未执行"}[state]
+        details: list[str] = []
+        if key == "StartUp" and state != "completed":
+            # 「启动游戏 ❌ 中断」看着像游戏那头的事，其实多半是 MaaTools 没连上或截图
+            # 拿不到（窗口被台前调度收走）。把 MaaCore 的原始标记摊开，省得去翻 asst.log。
+            marker = next(
+                (m for m in CONNECT_FAILURE_MARKERS if any(m in line for line in lines)), ""
+            )
+            if marker:
+                details.append(f"没连上游戏（{marker}），检查 MaaTools 与 MAA-Game 虚拟屏")
+        elif key == "Annihilation":
+            annihilation_lines = []
+            for name in ANNIHILATION_TASK_NAMES:
+                annihilation_lines = _named_task_section(lines, name)
+                if annihilation_lines:
+                    break
+            annihilation_lines = annihilation_lines or lines
+            count = _fight_times(annihilation_lines)
+            details.append(
+                f"当期剿灭 {count} 次；代理卡全权委托；满 {ANNIHILATION_WEEKLY_ORUNDUM} 合成玉/周后停止"
+                if count
+                else f"代理卡全权委托；满 {ANNIHILATION_WEEKLY_ORUNDUM} 合成玉/周后停止"
+            )
+        elif key in ("Fight", "Fight2"):
+            if key == "Fight":
+                fight_lines = _named_task_section(lines, FARMING_TASK_NAMES[0]) or lines
+                stage_label = plan_stage_label(plan or {})
+            else:
+                # 第二块**不退回整份日志**：那会把第一块的掉落和次数重复算一遍。
+                fight_lines = _named_task_section(lines, FARMING_TASK_NAMES[1])
+                stage_label = str((plan or {}).get("farming_fallback_stage") or "第二个关")
+            details.append(f"关卡 {stage_label}")
+            proxy_batches, refunded, _streak = proxy_failures(fight_lines)
+            wiped_batches, _wiped_refund = fight_wiped_out(fight_lines)
+            count = _fight_times(fight_lines)
+            if wiped_batches:
+                # MaaCore 会把「一批都没打成」也判成 Fight Completed，而 count 数的是
+                # 发起的连战批次，不是真打完的次数。这里直接翻红，别让战报骗人。
+                status = "❌ 未完成"
+                details.append("实际完成 0 次")
+            elif count:
+                details.append(f"{count} 次")
+            elif key == "Fight" and state == "failed" and _main_fight_was_dry(lines):
+                spare = str((plan or {}).get("farming_fallback_stage") or "")
+                second = _task_state(lines, "Fight2", FARMING_TASK_NAMES[1])
+                details.append(
+                    f"未消耗理智，已改刷后备关 {spare}"
+                    if spare and second != "pending"
+                    else "未消耗理智"
+                )
+            if proxy_batches:
+                details.append(f"代理指挥失误 {proxy_batches} 批，理智已返还 ×{refunded}")
+            medicine = _expiring_medicine_used(fight_lines)
+            if medicine:
+                details.append(f"临期理智药 ×{medicine}")
+            sanity = _last_match(lines, r"Current sanity:\s*(\d+)\s*/\s*(\d+)")
+            if sanity:
+                details.append(f"结束理智 {sanity.group(1)}/{sanity.group(2)}")
+            drops = _drop_pairs(fight_lines)
+            if drops:
+                details.append("掉落 " + "、".join(f"{name} ×{quantity}" for name, quantity in drops))
+        elif key == "Infrast":
+            facilities = []
+            for raw_name, display in (
+                ("Mfg", "制造站"),
+                ("Trade", "贸易站"),
+                ("Power", "发电站"),
+                ("Control", "控制中枢"),
+                ("Reception", "会客室"),
+                ("Office", "办公室"),
+                ("Dorm", "宿舍"),
+            ):
+                count = sum(1 for line in lines if f"EnterFacility {raw_name}" in line)
+                if count:
+                    facilities.append(f"{display} ×{count}")
+            if facilities:
+                details.append("、".join(facilities))
+        elif key == "Recruit":
+            recruited = _last_match(lines, r"Recruited\s+(\d+)\s+times")
+            refreshed = _last_match(lines, r"Refreshed\s+(\d+)\s+times")
+            if recruited:
+                details.append(f"招募 {recruited.group(1)} 次")
+            if refreshed:
+                details.append(f"刷新 {refreshed.group(1)} 次")
+        elif key == "Custom":
+            # 截图才是最终交付物，所以它说了算：MAA 报错但截图确实在主页时说清楚，
+            # 反之截图不在主页就把这一步判红，哪怕 MAA 自称完成。
+            if home_verified is True:
+                details.append("截图已确认在主页")
+            elif home_verified is False:
+                status = "❌ 未完成"
+                details.append(f"截图不在主页：{home_verify_detail}" if home_verify_detail else "截图不在主页")
+        suffix = f"（{'；'.join(details)}）" if details else ""
+        result.append(f"{emoji} {label}：{status}{suffix}")
+    return "\n".join(result)[:3900]
+
+
+def _reader(
+    stream: TextIO,
+    recent: deque[str],
+    all_lines: list[str],
+    log_handle: TextIO | None = None,
+    log_lock: threading.Lock | None = None,
+) -> None:
+    for line in iter(stream.readline, ""):
+        clean = line.rstrip("\n")
+        recent.append(clean)
+        if len(all_lines) < 10000:
+            all_lines.append(clean)
+        if log_handle is not None and log_lock is not None:
+            with log_lock:
+                log_handle.write(line)
+                log_handle.flush()
+    stream.close()
+
+
+def report_game_busy(
+    config: Config,
+    token: str,
+    channel_id: str,
+    phase: Phase,
+    detail: str,
+    attempted_at: datetime,
+) -> None:
+    """Announce a probe-skipped automatic run. Never a silent return (护栏 4)."""
+    reason = (
+        "检测到明日方舟（PlayCover）正在运行，判定你在玩，本场不抢游戏。需要照跑就说「现在跑」。"
+    )
+    common_report_game_busy(
+        config,
+        title=f"⏭️ MAA 日常·{PHASE_LABELS[phase]}场已跳过",
+        reason=reason,
+        detail=detail,
+        at=attempted_at,
+        state_update={
+            "status": "skipped",
+            "phase": phase,
+            "skip_reason": "game_busy",
+            "summary": reason,
+            "game_probe": detail,
+            "finished_at": attempted_at.isoformat(),
+        },
+        token=token,
+        channel_id=channel_id,
+    )
+
+
+def report_upstream_block(
+    token: str, channel_id: str, phase: Phase, reason: str, at: datetime
+) -> None:
+    """上游状态不对，本场不开游戏。失败要说出来（护栏 4）。"""
+    merge_last_run({
+        "status": "failed",
+        "phase": phase,
+        "startup_error": reason,
+        "summary": f"上游状态不对，本场没开跑：{reason}",
+        "finished_at": at.isoformat(),
+    })
+    discord_request(
+        token,
+        "POST",
+        f"/channels/{channel_id}/messages",
+        {
+            "embeds": [
+                {
+                    "title": f"⛔ MAA 日常·{PHASE_LABELS[phase]}没开跑：上游状态不对",
+                    "description": f"{reason[:1500]}\n\n未启动游戏。修好后可以「现在跑」补一场。",
+                    "color": 0xED4245,
+                    "timestamp": at.isoformat(),
+                }
+            ],
+            "allowed_mentions": {"parse": []},
+        },
+    )
+
+
+def verify_home_screenshot(path: Path) -> tuple[bool | None, str]:
+    """Check that a captured screenshot really shows the game home page.
+
+    Returns (True | False | None, detail).  ``None`` means "could not tell"
+    (ocrbox missing, OCR crashed) — that must never turn a good run red, so the
+    caller only treats an explicit ``False`` as a failure.  Daily runs only:
+    抄作业 keeps using capture_screenshot directly and is not gated by this.
+    """
+    ocrbox = SCRIPTS_DIR / "ocrbox"
+    if not path.is_file():
+        return None, "没有截图可校验"
+    if not ocrbox.is_file():
+        return None, "ocrbox 未部署，跳过主页校验"
+    try:
+        result = subprocess.run(
+            [str(ocrbox), str(path)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return None, f"OCR 失败：{type(exc).__name__}: {exc}"
+    if result.returncode != 0:
+        return None, f"OCR 失败：{result.stderr.strip()[:120]}"
+    # ocrbox prints "文本\t[x,y,w,h]" per line; only the text column matters.
+    text = "\n".join(line.split("\t", 1)[0] for line in result.stdout.splitlines())
+    upper = text.upper()
+    hits = [group[0] for group in HOME_MARKERS if any(m in text or m in upper for m in group)]
+    detail = (
+        f"识别到 {len(hits)}/{len(HOME_MARKERS)} 个主页标识"
+        + (f"（{'、'.join(hits)}）" if hits else "")
+    )
+    return len(hits) >= HOME_MARKER_MIN, detail
+
+
+def capture_home_screenshot(
+    config: Config, path: Path
+) -> tuple[bool, str, bool | None, str]:
+    """Capture the end-of-run screenshot and confirm it is the home page.
+
+    Retries a few times because the home page animates in; each attempt waits
+    the same settle delay the single-shot version used.
+    """
+    delay = max(0.0, float(config.get("home_screenshot_delay", 1)))
+    attempts = max(1, int(config.get("home_screenshot_attempts", 3)))
+    ok, error, verified, detail = False, "未执行", None, ""
+    for _ in range(attempts):
+        time.sleep(delay)
+        ok, error = maa_playcover.capture_screenshot(config, path)
+        if not ok:
+            return ok, error, None, "没有截图可校验"
+        verified, detail = verify_home_screenshot(path)
+        if verified is not False:
+            break
+    return ok, error, verified, detail
+
+
+def run_maa(
+    config: Config,
+    log_path: Path,
+    token: str,
+    thread_id: str,
+    progress_message_id: str,
+    plan: Plan | None = None,
+    *,
+    timeout: int | None = None,
+    carry_lines: list[str] | None = None,
+    append: bool = False,
+) -> tuple[int, list[str], list[str]]:
+    maa = str(config.get("maa_bin", "/opt/homebrew/bin/maa"))
+    # maa-cli 0.7.5's --log-file redirects logs away from stderr.  Capture the
+    # live streams ourselves and tee both to disk so Discord progress remains
+    # observable without sacrificing the full local log.
+    command = [maa, "run", "daily", "-v", "--batch"]
+    env = maa_subprocess_env(config)
+    env["MAA_LOG_PREFIX"] = "Never"
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+        env=env,
+    )
+    assert process.stdout is not None and process.stderr is not None
+    stderr_recent: deque[str] = deque(maxlen=12)
+    stderr_lines: list[str] = []
+    stdout_recent: deque[str] = deque(maxlen=12)
+    stdout_lines: list[str] = []
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_lock = threading.Lock()
+    with log_path.open("a" if append else "w", encoding="utf-8", buffering=1) as log_handle:
+        stderr_thread = threading.Thread(
+            target=_reader,
+            args=(process.stderr, stderr_recent, stderr_lines, log_handle, log_lock),
+            daemon=True,
+        )
+        stdout_thread = threading.Thread(
+            target=_reader,
+            args=(process.stdout, stdout_recent, stdout_lines, log_handle, log_lock),
+            daemon=True,
+        )
+        stderr_thread.start()
+        stdout_thread.start()
+        previous = ""
+        progress_error = ""
+        next_update = time.monotonic()
+        # Hermes' outer no-agent cron timeout is 3600s. Keep ten minutes of
+        # headroom for boot, screenshot, cleanup and the final report.
+        budget = int(config.get("maa_run_timeout", 3000) if timeout is None else timeout)
+        deadline = time.monotonic() + max(MIN_RUN_TIMEOUT_SECONDS, budget)
+        # 连着这么多批代理指挥失误就熔断：理智全额退回、一关没打成，再刷下去只会
+        # 空转到超时，还会把游戏钉在结算页拖垮后面的基建/公招/商店/奖励。0 = 关闭。
+        proxy_limit = max(0, int(config.get("proxy_failure_limit", 2)))
+        prefix = list(carry_lines or [])
+        timed_out = False
+        interrupted = False
+        proxy_tripped = 0
+        # 跑到一半 SCRN 回空（游戏窗口被台前调度收进侧边栏）时 MaaCore 会报
+        # ScreencapFailed 并自己重连；重连前把窗口摆回 MAA-Game 台前才救得回来。
+        # 节流 30 秒，免得 MaaCore 连着报错时一直 `open -a`。
+        screencap_failures = 0
+        last_settle = 0.0
+        try:
+            while process.poll() is None:
+                now = time.monotonic()
+                if now >= deadline:
+                    timed_out = True
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
+                    break
+                if now >= next_update:
+                    live = list(stdout_lines) + list(stderr_lines)
+                    if proxy_limit:
+                        streak = proxy_failures(live)[2]
+                        if streak >= proxy_limit:
+                            proxy_tripped = streak
+                            process.terminate()
+                            try:
+                                process.wait(timeout=10)
+                            except subprocess.TimeoutExpired:
+                                process.kill()
+                                process.wait(timeout=5)
+                            break
+                    failures = sum("ScreencapFailed" in line for line in live)
+                    if failures > screencap_failures and now - last_settle >= SCREENCAP_SETTLE_INTERVAL:
+                        last_settle = now
+                        try:
+                            warning = maa_playcover.settle_game_window(config)
+                        except Exception as exc:  # noqa: BLE001 — (c) 救场是尽力而为，不能拖垮主循环
+                            warning = f"摆回游戏窗口失败：{exc}"
+                        note = f"截图失败，已尝试把游戏窗口摆回台前。{warning}".strip()
+                        stderr_lines.append(note)
+                        with log_lock:
+                            log_handle.write(note + "\n")
+                    screencap_failures = failures
+                    content = progress_content(prefix + live, plan=plan)
+                    if content != previous:
+                        try:
+                            discord_request(
+                                token,
+                                "PATCH",
+                                f"/channels/{thread_id}/messages/{progress_message_id}",
+                                {"content": content, "allowed_mentions": {"parse": []}},
+                            )
+                            previous = content
+                        except Exception as exc:  # noqa: BLE001 — (c) 进度流是尽力而为，最终战报才是硬信号
+                            # Streaming is best-effort; final report is the hard signal.
+                            # 每 5 秒一次，同一个错误只打一次，免得刷屏。
+                            error_text = f"{type(exc).__name__}: {exc}"
+                            if error_text != progress_error:
+                                print(f"progress update failed: {error_text}", file=sys.stderr, flush=True)
+                                progress_error = error_text
+                    next_update = now + PROGRESS_INTERVAL_SECONDS
+                time.sleep(0.25)
+        except KeyboardInterrupt:
+            interrupted = True
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        return_code = process.wait()
+        stderr_thread.join(timeout=2)
+        stdout_thread.join(timeout=2)
+    if interrupted:
+        interrupt_message = "maa run 已按人工指令终止。"
+        stderr_lines.append(interrupt_message)
+        with log_path.open("a", encoding="utf-8") as log_handle:
+            log_handle.write(interrupt_message + "\n")
+        return_code = 130
+    elif timed_out:
+        timeout_message = "maa run 超时，已终止；可能是客户端更新、登录提示或识别流程卡住。"
+        stderr_lines.append(timeout_message)
+        with log_path.open("a", encoding="utf-8") as log_handle:
+            log_handle.write(timeout_message + "\n")
+        return_code = 124
+    elif proxy_tripped:
+        break_message = (
+            f"连续 {proxy_tripped} 批代理指挥失误，理智全额返还、一关没打成，"
+            "已中止 maa run，避免空转到超时。"
+        )
+        stderr_lines.append(break_message)
+        with log_path.open("a", encoding="utf-8") as log_handle:
+            log_handle.write(break_message + "\n")
+        return_code = PROXY_BREAK_CODE
+    return return_code, stdout_lines, stderr_lines
+
+
+def run_maa_resilient(
+    config: Config,
+    log_path: Path,
+    token: str,
+    thread_id: str,
+    progress_message_id: str,
+    plan: Plan | None = None,
+    *,
+    timeout: int | None = None,
+    carry_lines: list[str] | None = None,
+) -> tuple[int, list[str], list[str], int]:
+    """跑 maa run；在连接阶段就崩掉的那种失败上重开。末位返回重试次数。
+
+    只重试 `connect_failed()` 认定的那一类：MaaTools 没连上或截图拿不到，没有任何
+    任务跑到 Completed、一批理智都没花。每趟重开前先把游戏窗口摆回 MAA-Game 台前、
+    等 MaaTools 就绪。所有重试共用同一个超时预算，绝不额外撑长 Hermes 那一小时；
+    日志追加进同一个文件，不覆盖上一趟的现场。
+    """
+    budget = int(config.get("maa_run_timeout", 3000) if timeout is None else timeout)
+    limit = max(0, int(config.get("connect_retry_limit", 2)))
+    delay = max(0, int(config.get("connect_retry_delay", 8)))
+    started = time.monotonic()
+    stdout_all: list[str] = []
+    stderr_all: list[str] = []
+    retries = 0
+    while True:
+        remaining = budget - int(time.monotonic() - started)
+        code, out, err = run_maa(
+            config,
+            log_path,
+            token,
+            thread_id,
+            progress_message_id,
+            plan,
+            timeout=remaining,
+            carry_lines=list(carry_lines or []) + stdout_all + stderr_all,
+            append=retries > 0,
+        )
+        stdout_all += out
+        stderr_all += err
+        marker = connect_failed(out + err, code)
+        if not marker:
+            return code, stdout_all, stderr_all, retries
+        spent = int(time.monotonic() - started)
+        if retries >= limit or budget - spent - delay < MIN_RUN_TIMEOUT_SECONDS:
+            note = f"游戏连接失败（{marker}），重试 {retries} 次仍未连上。"
+            stderr_all.append(note)
+            _append_log(log_path, note)
+            return code, stdout_all, stderr_all, retries
+        retries += 1
+        note = (
+            f"游戏连接失败（{marker}）：MaaTools 没连上或截图为空，没有任务跑完。"
+            f"等 {delay}s、把游戏窗口摆回台前后重开第 {retries} 趟。"
+        )
+        stderr_all.append(note)
+        _append_log(log_path, note)
+        time.sleep(delay)
+        try:
+            warning = maa_playcover.settle_game_window(config)
+            maa_playcover.wait_for_game(config)
+        except Exception as exc:  # noqa: BLE001 — (c) 重开前准备尽力而为，下一趟 maa run 自己会再报连接失败
+            warning = f"重开前准备游戏失败：{exc}"
+        if warning:
+            stderr_all.append(warning)
+            _append_log(log_path, warning)
+
+
+def _append_log(log_path: Path, message: str) -> None:
+    try:
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(message + "\n")
+    except OSError:
+        pass
+
+
+def salvage_plan(plan: Plan) -> Plan | None:
+    """去掉 Fight 的补跑计划；除 Fight 外无事可做时返回 None。"""
+    tasks = dict(plan.get("tasks", {}))
+    if not any(bool(tasks.get(key, True)) for key in ("infrast", "recruit", "mall", "award")):
+        return None
+    tasks["fight"] = False
+    return {**plan, "tasks": tasks}
+
+
+def fallback_fight_plan(plan: Plan) -> Plan | None:
+    """主关 Fight 空跑失败后，只刷后备关的补跑计划；没有可用后备关时返回 None。
+
+    2026-09-09 早场：SR-8 的代理指挥没解锁，`Fight Error` 一颗理智没花，MaaCore 接着把
+    基建 / 公招 / 商店 / 奖励都跑完了，唯独 `farming_fallback_stage = SR-7` 躺在计划里
+    没人用——那一场 94 理智白挂到晚上。补跑只带 Fight：其余链条已经跑过，重跑是重复劳动；
+    剿灭按游戏日记账，也不重进。
+    """
+    if not bool((plan.get("tasks") or {}).get("fight", True)) or not plan.get("farming", True):
+        return None
+    spare = str(plan.get("farming_fallback_stage") or "").strip()
+    if not spare or spare == str(plan.get("stage") or ""):
+        return None
+    tasks = {key: False for key in ("infrast", "recruit", "mall", "award")}
+    tasks["fight"] = True
+    return {
+        **plan,
+        "stage": spare,
+        "tasks": tasks,
+        "annihilation": False,
+        "farming": True,
+        "fallback_run": True,
+    }
+
+
+def fight_failed_dry(lines: list[str]) -> bool:
+    """主关的 Fight 段以 Error 收尾、且一次作战都没发起（一颗理智没花）。
+
+    只认 maa-cli 汇总里 `[刷理智]` 那一段：段里没有 `Fight <关> n times`、没有掉落，
+    才算「空跑」。打了几批之后才报错的不算——那是别的问题，补跑后备关只会把
+    理智花在没人核对过的地方。第二块已经跑过（drops 上限那条路）也不补。
+    """
+    return _main_fight_was_dry(lines) and not _named_task_section(lines, FARMING_TASK_NAMES[1])
+
+
+def _main_fight_was_dry(lines: list[str]) -> bool:
+    """`[刷理智]` 段以 Error 收尾且没打过一批（战报文案与补跑判定共用）。"""
+    section = _named_task_section(lines, FARMING_TASK_NAMES[0])
+    if not section or _task_state(section, "Fight", FARMING_TASK_NAMES[0]) != "failed":
+        return False
+    return not (_fight_times(section) or _drop_pairs(section))
+
+
+def _fallback_fight_run(
+    *,
+    config: Config,
+    plan: Plan,
+    task_path: Path,
+    log_path: Path,
+    token: str,
+    thread_id: str,
+    progress_message_id: str,
+    carry_lines: list[str],
+    elapsed: float,
+) -> tuple[int | None, list[str], list[str]]:
+    """主关空跑失败后改刷后备关。返回码为 None 表示没跑（无后备关 / 关闭 / 时间不够）。"""
+    if not bool(config.get("fight_fallback_on_error", True)):
+        return None, [], []
+    retry_plan = fallback_fight_plan(plan)
+    if retry_plan is None:
+        return None, [], []
+    remaining = int(config.get("maa_run_timeout", 3000)) - int(elapsed)
+    floor = max(60, int(config.get("fight_fallback_min_seconds", 300)))
+    if remaining < floor:
+        return None, [], [f"剩余预算 {max(0, remaining)}s 不足 {floor}s，跳过后备关补跑。"]
+    atomic_write_text(task_path, render_daily_toml(retry_plan, config))
+    code, out, err = run_maa(
+        config,
+        log_path,
+        token,
+        thread_id,
+        progress_message_id,
+        retry_plan,
+        timeout=remaining,
+        carry_lines=carry_lines,
+    )
+    note = (
+        f"刷理智 {plan_stage_label(plan)} 失败且未消耗理智，"
+        f"已改刷后备关 {retry_plan.get('stage')}（其余任务链不重跑）。"
+    )
+    return code, out, [note, *err]
+
+
+def _salvage_run(
+    *,
+    config: Config,
+    plan: Plan,
+    task_path: Path,
+    log_path: Path,
+    token: str,
+    thread_id: str,
+    progress_message_id: str,
+    carry_lines: list[str],
+    elapsed: float,
+) -> tuple[int | None, list[str], list[str]]:
+    """熔断后补跑剩余任务链。返回码为 None 表示没跑（无事可做或时间不够）。"""
+    if not bool(config.get("proxy_failure_salvage", True)):
+        return None, [], []
+    retry_plan = salvage_plan(plan)
+    if retry_plan is None:
+        return None, [], []
+    # 两趟 maa run 共用同一个 maa_run_timeout 预算，别把 Hermes 的一小时撑爆。
+    remaining = int(config.get("maa_run_timeout", 3000)) - int(elapsed)
+    floor = max(60, int(config.get("proxy_failure_salvage_min_seconds", 300)))
+    if remaining < floor:
+        return None, [], [f"剩余预算 {max(0, remaining)}s 不足 {floor}s，跳过补跑。"]
+    atomic_write_text(task_path, render_daily_toml(retry_plan, config))
+    code, out, err = run_maa(
+        config,
+        log_path,
+        token,
+        thread_id,
+        progress_message_id,
+        retry_plan,
+        timeout=remaining,
+        carry_lines=carry_lines,
+    )
+    return code, out, ["代理指挥失误熔断，已补跑剩余任务（不含刷理智）。", *err]
+
+
+def report_payload(
+    *,
+    ok: bool,
+    phase: Phase,
+    plan: Plan,
+    duration: float,
+    summary: str,
+    screenshot_ok: bool,
+    screenshot_error: str,
+    cleanup_errors: list[str],
+    home_verified: bool | None = None,
+    home_verify_detail: str = "",
+    proxy_batches: int = 0,
+    proxy_refunded: int = 0,
+    connect_retries: int = 0,
+    inventory_error: str = "",
+) -> dict[str, Any]:
+    label = PHASE_LABELS[phase]
+    notes: list[str] = []
+    if connect_retries:
+        notes.append(
+            f"游戏连接失败（MaaTools 没连上或截图为空），已重开 {connect_retries} 趟 maa run。"
+            "偶发可以不管；每天都撞上就检查游戏窗口是否独占 MAA-Game 虚拟屏。"
+        )
+    if proxy_batches:
+        notes.append(
+            f"代理指挥失误 {proxy_batches} 批，理智已返还 ×{proxy_refunded}，实际一关没打成。"
+            f"多半是 {plan_stage_label(plan)} 的作战录像跟不上随机性——"
+            "手动重打一次三星刷新录像，或换个关卡。"
+        )
+    if not screenshot_ok:
+        notes.append(f"截图失败：{screenshot_error}")
+    if home_verified is False:
+        notes.append(f"截图不是游戏主页：{home_verify_detail}")
+    if cleanup_errors:
+        notes.append("清理异常：" + "；".join(cleanup_errors))
+    if inventory_error:
+        notes.append(f"库存增量记录失败：{inventory_error}")
+    embed: dict[str, Any] = {
+        "title": f"{'✅' if ok else '❌'} MAA 日常·{label}{'完成' if ok else '失败'}",
+        "color": 0x57F287 if ok else 0xED4245,
+        "fields": [
+            {"name": "关卡", "value": plan_stage_label(plan), "inline": True},
+            {
+                "name": "理智药",
+                "value": medicine_label(str(plan.get("medicine", "none"))),
+                "inline": True,
+            },
+            {"name": "碎石", "value": "0", "inline": True},
+            {"name": "总耗时", "value": _format_duration(duration), "inline": True},
+            {"name": "📋 执行结果", "value": summary[:1024], "inline": False},
+        ],
+        "footer": {"text": "游戏进程已执行清理"},
+        "timestamp": now_beijing().isoformat(),
+    }
+    if notes:
+        embed["fields"].append({"name": "备注", "value": "\n".join(notes)[:1024]})
+    if screenshot_ok:
+        embed["image"] = {"url": "attachment://shot.png"}
+    payload: dict[str, Any] = {
+        "embeds": [embed],
+        "allowed_mentions": {"parse": []},
+    }
+    if screenshot_ok:
+        payload["attachments"] = [{"id": 0, "filename": "shot.png"}]
+    return payload
+
+
+def send_report(
+    token: str,
+    channel_id: str,
+    payload: dict[str, Any],
+    screenshot: Path,
+    config: Config,
+) -> None:
+    if "attachments" in payload:
+        try:
+            discord_upload(token, channel_id, payload, screenshot)
+            return
+        except Exception as exc:  # noqa: BLE001 — (c) 内嵌截图上传失败退回纯 embed
+            embed = dict(payload["embeds"][0])
+            embed.pop("image", None)
+            fields = list(embed.get("fields", []))
+            fields.append({"name": "图片上传", "value": f"内嵌上传失败：{type(exc).__name__}"})
+            embed["fields"] = fields
+            discord_request(
+                token,
+                "POST",
+                f"/channels/{channel_id}/messages",
+                {"embeds": [embed], "allowed_mentions": {"parse": []}},
+            )
+            hermes = str(config.get("hermes_bin", Path.home() / ".local" / "bin" / "hermes"))
+            subprocess.run(
+                [hermes, "send", "--to", f"discord:{channel_id}", f"MEDIA:{screenshot}"],
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+            return
+    discord_request(token, "POST", f"/channels/{channel_id}/messages", payload)
+
+
+def send_direct_failure(
+    token: str,
+    channel_id: str,
+    phase: Phase,
+    plan: Plan,
+    message: str,
+) -> None:
+    discord_request(
+        token,
+        "POST",
+        f"/channels/{channel_id}/messages",
+        {
+            "embeds": [
+                {
+                    "title": f"❌ MAA 日常·{PHASE_LABELS[phase]}启动失败",
+                    "description": message[:3500],
+                    "color": 0xED4245,
+                    "fields": [
+                        {"name": "计划关卡", "value": plan_stage_label(plan), "inline": True},
+                        {"name": "碎石", "value": "0", "inline": True},
+                    ],
+                    "timestamp": now_beijing().isoformat(),
+                }
+            ],
+            "allowed_mentions": {"parse": []},
+        },
+    )
+
+
+def should_skip(plan: Plan, phase: Phase) -> bool:
+    """Whether this run bails out before touching the game.
+
+    `skip` is now **per session** (四期 D2): it comes from `sessions.<phase>`,
+    so silencing 08:00 leaves 22:00 alone.  A manual run is the user asking for
+    it right now, which overrides today's plan by definition — otherwise
+    "跳过本场" would leave no way to run at all short of un-skipping.
+    """
+    return bool(plan.get("skip")) and phase != "now"
+
+
+# K17：日常等更新的上限（分钟），要从 `maa_run_timeout` 里扣，Hermes 外层只有 1 小时。
+DEFAULT_UPDATE_WAIT_MINUTES = 15
+MIN_RUN_TIMEOUT = 600
+UPDATE_WAIT_POLL_SECONDS = 5.0
+
+
+def wait_for_update_holder(
+    config: Config,
+    *,
+    sleep: Any = time.sleep,
+    clock: Any = time.monotonic,
+) -> float:
+    """锁的持有者是「上游更新」就阻塞等它放锁，返回等了多少秒（不是更新 / 没被占返回 0）。
+
+    上限 `update_wait_minutes`（默认 15）。到了上限还没放就不等了，交给后面的锁冲突处理
+    （不变量 #23 照旧：写 `last_lock_conflict_*`、发 Discord、返回失败）。
+    """
+    marker = run_lock_holder()
+    if not marker or marker.get("holder") != "update":
+        return 0.0
+    limit = max(0, int(config.get("update_wait_minutes", DEFAULT_UPDATE_WAIT_MINUTES))) * 60
+    start = clock()
+    while clock() - start < limit:
+        sleep(UPDATE_WAIT_POLL_SECONDS)
+        current = run_lock_holder()
+        if not current or current.get("holder") != "update":
+            break
+    return clock() - start
+
+
+def report_lock_conflict(
+    config: Config,
+    token: str,
+    channel_id: str,
+    phase: Phase,
+    attempted_at: datetime,
+) -> None:
+    """Make a rejected daily run visible without clobbering the active run."""
+    busy = lock_holder_text(run_lock_holder())
+    reason = (
+        f"{busy}正在用游戏，本场没有启动游戏或执行任何任务"
+        if busy
+        else "run.lock 被另一场 MAA 占用，本场没有启动游戏或执行任何任务"
+    )
+    # Another runner may currently own last_run.status=running. Keep its state
+    # intact and append conflict-specific observation fields instead.
+    errors: list[str] = []
+    try:
+        merge_last_run(
+            {
+                "last_lock_conflict_at": attempted_at.isoformat(),
+                "last_lock_conflict_phase": phase,
+                "last_lock_conflict_reason": reason,
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 — (a) 汇报路径：两步各自兜住，错误汇总后抛给调用方
+        errors.append(f"冲突状态写入失败：{type(exc).__name__}: {exc}")
+    try:
+        discord_request(
+            token,
+            "POST",
+            f"/channels/{channel_id}/messages",
+            {
+                "embeds": [
+                    {
+                        "title": f"❌ MAA 日常·{PHASE_LABELS[phase]}未启动",
+                        "description": reason,
+                        "color": 0xED4245,
+                        "timestamp": attempted_at.isoformat(),
+                    }
+                ],
+                "allowed_mentions": {"parse": []},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — (a) 汇报路径：两步各自兜住，错误汇总后抛给调用方
+        errors.append(f"冲突告警发送失败：{type(exc).__name__}: {exc}")
+    if errors:
+        raise RuntimeError("；".join(errors))
+
+
+def manual_run_stage(manual_token: str) -> str | None:
+    """`maa_daily.py now <token>` 要刷的关（`PLAN_MANUAL_RUN.md` M-e）。
+
+    请求必须是 `manual_run.json` 里**这个 token** 且已 `dispatched`；对不上返回 None，
+    调用方不跑。token 为空（终端直接 `maa_daily.py now`）不走这里（M6）。
+    """
+    request = manual_run_request(manual_token)
+    return None if request is None else str(request.get("stage") or "")
+
+
+def manual_run_request(manual_token: str) -> dict[str, Any] | None:
+    """整份手动场请求（关 + Wado's MAA「这一次」的环节开关）；对不上返回 None。"""
+    with state_lock():
+        state = check_schema(
+            "manual_run.json", load_json(MANUAL_RUN_PATH, {}), MANUAL_RUN_SCHEMA_VERSION
+        )
+    if (
+        not isinstance(state, dict)
+        or state.get("token") != manual_token
+        or state.get("status") != "dispatched"
+        or "stage" not in state
+    ):
+        return None
+    return state
+
+
+def apply_local_switches(plan: Plan, request: dict[str, Any]) -> Plan:
+    """把 `run local` 的「这一次」开关叠到本场计划上（K12）。
+
+    `tasks` 只认五个已知环节、只认真布尔，缺的照默认；剿灭关掉时带上原因进战报。
+    选关卡（Discord）派发的请求没有这两个字段，原样返回。
+    """
+    result: dict[str, Any] = dict(plan)
+    tasks = request.get("tasks")
+    if isinstance(tasks, dict):
+        merged = dict(result.get("tasks") or DEFAULT_TASKS)
+        for key in DEFAULT_TASKS:
+            if isinstance(tasks.get(key), bool):
+                merged[key] = tasks[key]
+        result["tasks"] = merged
+    if request.get("annihilation") is False and result.get("annihilation") is not False:
+        result["annihilation"] = False
+        result["annihilation_skip_reason"] = "这一次手动场关掉了剿灭"
+    return cast(Plan, result)
+
+
+def report_manual_run_mismatch(
+    config: Config, token: str, channel_id: str, manual_token: str
+) -> None:
+    discord_request(
+        token,
+        "POST",
+        f"/channels/{channel_id}/messages",
+        {
+            "embeds": [
+                {
+                    "title": "❌ MAA 日常·手动未启动",
+                    "description": (
+                        f"选关请求 `{manual_token}` 与 manual_run.json 对不上"
+                        "（已过期、已作废或已被另一次派发消费），本场没有启动游戏或执行任何任务。"
+                        "重新说「现在跑」再选一次。"
+                    ),
+                    "color": 0xED4245,
+                    "timestamp": now_beijing().isoformat(),
+                }
+            ],
+            "allowed_mentions": {"parse": []},
+        },
+    )
+
+
+def execute(phase: Phase, manual_token: str = "") -> int:
+    started = now_beijing()
+    config = load_config()
+    channel_id = str(config.get("channel_id", "")).strip()
+    if not channel_id.isdigit():
+        raise RuntimeError("config.json 中尚未配置 Discord channel_id")
+    token = discord_token()
+    last_run_state = check_schema(
+        "last_run.json", load_json(LAST_RUN_PATH, {}), LAST_RUN_SCHEMA_VERSION, strict=False
+    )
+    if not isinstance(last_run_state, dict):
+        last_run_state = {}
+    # 计划按场次求值（四期 D1~D3）：早场改的关不会带到晚场。
+    # 手动场 `now` 没有场次覆盖：带 token 时刷选关卡上选的关（PLAN_MANUAL_RUN M4，
+    # 不带 drops 上限和后备关）；不带 token 是终端排障入口，刷 defaults.json（M6）。
+    base_plan = effective_plan(started, phase)
+    request: dict[str, Any] = {}
+    if phase == "now" and manual_token:
+        found = manual_run_request(manual_token)
+        if found is None:
+            report_manual_run_mismatch(config, token, channel_id, manual_token)
+            return 1
+        request = found
+        base_plan["stage"] = str(found.get("stage") or "")
+        base_plan["stage_source"] = "discord"
+        base_plan["farming_drops"] = {}
+        base_plan["farming_fallback_stage"] = ""
+    plan = attach_sanity_yield(
+        apply_local_switches(attach_annihilation(base_plan, started, last_run_state), request),
+        config,
+        started,
+    )
+    run_stem = f"{started.date().isoformat()}-{phase}"
+    snapshot_path = RUNS_DIR / f"{run_stem}.json"
+    log_path = RUNS_DIR / f"{run_stem}.log"
+    screenshot_path = RUNS_DIR / f"{run_stem}.png"
+
+    # K17：07:50 的上游更新拖过了开跑时间 → 等它跑完（有上限），等掉的时间从本场预算里扣。
+    waited = wait_for_update_holder(config)
+    if waited:
+        config = cast(Config, {
+            **config,
+            "maa_run_timeout": max(
+                MIN_RUN_TIMEOUT, int(config.get("maa_run_timeout", 3000)) - int(waited)
+            ),
+        })
+    with run_lock(blocking=False, holder="daily", detail=PHASE_LABELS[phase]) as acquired:
+        if not acquired:
+            report_lock_conflict(config, token, channel_id, phase, started)
+            return 1
+        cleanup_run_files(int(config.get("retention_days", 14)), started)
+        snapshot = {
+            "date": started.date().isoformat(),
+            "phase": phase,
+            "started_at": started.isoformat(),
+            "plan": plan,
+        }
+        # This is the immutable per-run plan snapshot. Later plan.json writes
+        # cannot change this Python object or this file.
+        atomic_write_json(snapshot_path, snapshot)
+        merge_last_run(
+            {
+                "status": "running",
+                "phase": phase,
+                "started_at": started.isoformat(),
+                "plan": plan,
+                "snapshot": str(snapshot_path),
+                # Do not expose terminal fields from the previous run while
+                # this run is still booting and has not created its thread.
+                "thread_id": None,
+                "finished_at": None,
+                "duration_seconds": None,
+                "return_code": None,
+                "log": None,
+                "screenshot": None,
+                "screenshot_error": None,
+                "startup_error": None,
+                "cleanup_errors": [],
+                "summary": "",
+            }
+        )
+
+        if should_skip(plan, phase):
+            discord_request(
+                token,
+                "POST",
+                f"/channels/{channel_id}/messages",
+                {
+                    "embeds": [
+                        {
+                            "title": f"⏭️ MAA 日常·{PHASE_LABELS[phase]}已跳过",
+                            "description": "计划卡上把**本场**设成了跳过；未启动游戏。"
+                            "今天的另一场和手动开跑（「现在跑」）都不受影响。",
+                            "color": 0x99AAB5,
+                            "timestamp": started.isoformat(),
+                        }
+                    ],
+                    "allowed_mentions": {"parse": []},
+                },
+            )
+            merge_last_run({"status": "skipped", "finished_at": now_beijing().isoformat()})
+            return 0
+
+        # spike §6(c) 方案 B：开跑前离线查一次上游，只认「源被改了」和「不自洽」两种硬拒。
+        # 自动场和手动场都查；其余（不新鲜、上游有新版）只显示，不挡跑。
+        blocked = upstream_hard_block(config)
+        if blocked:
+            report_upstream_block(token, channel_id, phase, blocked, now_beijing())
+            return 1
+
+        # PLAN_NAV_GATE B: the automatic phases must not take the device away
+        # from a user who is playing — every failure path here would quit their
+        # game (结论 3). `now` is an explicit "run it anyway" and skips this.
+        if phase in AUTO_PHASES:
+            online, probe_detail = maa_playcover.game_is_online(config)
+            if online:
+                report_game_busy(
+                    config, token, channel_id, phase, probe_detail, now_beijing()
+                )
+                return 0
+
+        game_opened = False
+        thread_id = ""
+        progress_message_id = ""
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        return_code = 1
+        screenshot_ok = False
+        screenshot_error = "未执行"
+        home_verified: bool | None = None
+        home_verify_detail = ""
+        cleanup_errors: list[str] = []
+        inventory_error = ""
+        salvage_log_path: Path | None = None
+        connect_retries = 0
+        startup_error = ""
+        try:
+            require_executable(config, "maa_bin", "/opt/homebrew/bin/maa", "maa-cli")
+            maa_playcover.verify_game_installed(config)
+            maa_playcover.launch_game(config)
+            game_opened = True
+            maa_playcover.wait_for_game(config)
+            opening = discord_request(
+                token,
+                "POST",
+                f"/channels/{channel_id}/messages",
+                {
+                    "content": (
+                        f"🌱 MAA 日常·{PHASE_LABELS[phase]}场开始\n"
+                        f"🎯 {plan_stage_label(plan)}"
+                        + (
+                            ""
+                            if plan.get("farming", True)
+                            else "\n⏭️ " + str(
+                                plan.get("farming_skip_reason")
+                                or "理智不足以刷默认关，本场跳过刷理智。"
+                            )
+                        )
+                        + (
+                            " · ☄️ 今日剿灭"
+                            if plan.get("annihilation")
+                            else " · ☄️ 本周剿灭已满"
+                            if plan.get("annihilation_skip_reason")
+                            else " · ☄️ 剿灭今日已刷"
+                        )
+                        + f" · 🧪 {medicine_label(str(plan.get('medicine', '')))}"
+                    ),
+                    "allowed_mentions": {"parse": []},
+                },
+            )
+            thread_name = f"MAA日常·{PHASE_LABELS[phase]} · {started:%m-%d %H:%M}"
+            thread = create_thread(token, channel_id, str(opening["id"]), thread_name)
+            thread_id = str(thread["id"])
+            placeholder = discord_request(
+                token,
+                "POST",
+                f"/channels/{thread_id}/messages",
+                {
+                    "content": progress_content([], plan=plan),
+                    "allowed_mentions": {"parse": []},
+                },
+            )
+            progress_message_id = str(placeholder["id"])
+            merge_last_run(
+                {
+                    "thread_id": thread_id,
+                    "threads": [{"thread_id": thread_id, "created_at": started.isoformat()}],
+                }
+            )
+            task_path = Path(str(config.get("maa_config_dir", MAA_CONFIG_DIR))) / "tasks" / "daily.toml"
+            atomic_write_text(task_path, render_daily_toml(plan, config))
+            # 最后一道门：游戏窗口必须在 MAA-Game 虚拟屏的台前，否则 MaaTools 截图为空、
+            # 整场空跑。摆不回来只记一条警告，不阻断（maa run 自己会报连接失败并重开）。
+            settle_warning = maa_playcover.settle_game_window(config)
+            if settle_warning:
+                stderr_lines.append(settle_warning)
+            prior_errors = list(stderr_lines)
+            return_code, stdout_lines, run_errors, connect_retries = run_maa_resilient(
+                config,
+                log_path,
+                token,
+                thread_id,
+                progress_message_id,
+                plan,
+                carry_lines=prior_errors,
+            )
+            stderr_lines = prior_errors + run_errors
+            # 125 也可能是 maa 自己的退出码，所以还要确认日志里真有代理失误，
+            # 免得凭一个数字就多跑一趟。
+            if return_code == PROXY_BREAK_CODE and fight_wiped_out(stdout_lines + stderr_lines)[0]:
+                # 熔断掐掉的是整条 maa run，基建/公招/商店/奖励也一起没了。补跑一趟
+                # 去掉 Fight 的链条把它们捞回来——StartUp 会顺手把卡在结算页的游戏
+                # 带回主界面。预算从总超时里扣，绝不额外撑长 Hermes 那一小时。
+                salvage_log = RUNS_DIR / f"{run_stem}-salvage.log"
+                salvage_code, salvage_out, salvage_err = _salvage_run(
+                    config=config,
+                    plan=plan,
+                    task_path=task_path,
+                    log_path=salvage_log,
+                    token=token,
+                    thread_id=thread_id,
+                    progress_message_id=progress_message_id,
+                    carry_lines=stdout_lines + stderr_lines,
+                    elapsed=(now_beijing() - started).total_seconds(),
+                )
+                if salvage_code is not None:
+                    return_code = salvage_code
+                    salvage_log_path = salvage_log
+                stdout_lines += salvage_out
+                stderr_lines += salvage_err
+            elif return_code != 0 and fight_failed_dry(stdout_lines + stderr_lines):
+                # 主关一颗理智没花就 Error（2026-09-09 早场 SR-8 代理指挥未解锁），其余
+                # 链条 MaaCore 已经跑完。只补一趟 Fight 打后备关，预算同样从总超时里扣。
+                fallback_log = RUNS_DIR / f"{run_stem}-fallback.log"
+                fallback_code, fallback_out, fallback_err = _fallback_fight_run(
+                    config=config,
+                    plan=plan,
+                    task_path=task_path,
+                    log_path=fallback_log,
+                    token=token,
+                    thread_id=thread_id,
+                    progress_message_id=progress_message_id,
+                    carry_lines=stdout_lines + stderr_lines,
+                    elapsed=(now_beijing() - started).total_seconds(),
+                )
+                if fallback_code is not None:
+                    return_code = fallback_code
+                    salvage_log_path = fallback_log
+                stdout_lines += fallback_out
+                stderr_lines += fallback_err
+            # The final Custom task has returned to Home. Let the last UI
+            # animation settle, then capture before the separate CloseDown and
+            # confirm by OCR that the frame we ship really is the home page.
+            (
+                screenshot_ok,
+                screenshot_error,
+                home_verified,
+                home_verify_detail,
+            ) = capture_home_screenshot(config, screenshot_path)
+        except Exception as exc:  # noqa: BLE001 — (a) 整场兜底：异常进战报 / 直报，finally 照常关游戏
+            exception_detail = f"{type(exc).__name__}: {exc}"
+            stderr_lines.append(exception_detail)
+            return_code = 1
+            if not thread_id:
+                startup_error = exception_detail
+                try:
+                    send_direct_failure(token, channel_id, phase, plan, exception_detail)
+                except Exception as report_exc:  # noqa: BLE001 — (b) 直报失败不能盖住主错误（主错误已在 stderr_lines）
+                    print(
+                        f"direct failure report failed: {type(report_exc).__name__}: {report_exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+        finally:
+            if game_opened:
+                try:
+                    cleanup_errors = maa_playcover.close_game(config)
+                except Exception as exc:  # noqa: BLE001 — (b) 收尾清理不能盖住主错误，异常并入 cleanup_errors
+                    cleanup_errors = [f"清理异常：{type(exc).__name__}: {exc}"]
+
+        # 两个刷理智块的掉落一起回写库存估算（四期步骤 3b）。
+        fight_lines = farming_sections(stdout_lines + stderr_lines)
+        drops = _drop_pairs(fight_lines) if fight_lines else []
+        if drops:
+            try:
+                maa_depot.record_drops(drops, config, at=now_beijing())
+            except Exception as exc:  # noqa: BLE001 — (c) 掉落记账失败只进战报 inventory_error
+                inventory_error = f"{type(exc).__name__}: {exc}"
+
+        duration = (now_beijing() - started).total_seconds()
+        # 代理指挥失误到一关没打成，就算后面的链条都补回来了也不算成功——得让人
+        # 看见红色去修作战录像，否则理智白挂在那儿谁也不知道。
+        proxy_batches, proxy_refunded = fight_wiped_out(stdout_lines + stderr_lines)
+        ok = (
+            return_code == 0
+            and not cleanup_errors
+            and home_verified is not False
+            and not proxy_batches
+            and not inventory_error
+        )
+        summary = extract_summary(
+            stdout_lines,
+            stderr_lines,
+            plan=plan,
+            ok=ok,
+            home_verified=home_verified,
+            home_verify_detail=home_verify_detail,
+        )
+        if thread_id and progress_message_id:
+            final_heading = f"{'✅' if ok else '❌'} 结束 · 总耗时 {_format_duration(duration)}"
+            try:
+                discord_request(
+                    token,
+                    "PATCH",
+                    f"/channels/{thread_id}/messages/{progress_message_id}",
+                    {
+                        "content": progress_content(
+                            stdout_lines + stderr_lines,
+                            plan=plan,
+                            final=final_heading,
+                        ),
+                        "allowed_mentions": {"parse": []},
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 — (c) 进度消息收尾是尽力而为，最终战报才是硬信号
+                print(f"final progress update failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        # Startup failures were already reported directly. All runs that made
+        # a thread get a deterministic battle report, with screenshot if valid.
+        if thread_id:
+            payload = report_payload(
+                ok=ok,
+                phase=phase,
+                plan=plan,
+                duration=duration,
+                summary=summary,
+                screenshot_ok=screenshot_ok,
+                screenshot_error=screenshot_error,
+                cleanup_errors=cleanup_errors,
+                home_verified=home_verified,
+                home_verify_detail=home_verify_detail,
+                proxy_batches=proxy_batches,
+                proxy_refunded=proxy_refunded,
+                connect_retries=connect_retries,
+                inventory_error=inventory_error,
+            )
+            send_report(token, channel_id, payload, screenshot_path, config)
+        finished: LastRun = {
+            "status": "success" if ok else "failed",
+            "finished_at": now_beijing().isoformat(),
+            "duration_seconds": int(duration),
+            "return_code": return_code,
+            "log": str(log_path),
+            "salvage_log": str(salvage_log_path) if salvage_log_path else None,
+            "screenshot": str(screenshot_path) if screenshot_ok else None,
+            "screenshot_error": screenshot_error if not screenshot_ok else None,
+            "startup_error": startup_error or None,
+            "home_verified": home_verified,
+            "home_verify_detail": home_verify_detail,
+            "cleanup_errors": cleanup_errors,
+            "summary": summary,
+            "proxy_failure_batches": proxy_batches,
+            "proxy_failure_sanity_refunded": proxy_refunded,
+            "connect_retries": connect_retries,
+            "inventory_error": inventory_error or None,
+        }
+        if plan.get("annihilation") and annihilation_consumed(stdout_lines + stderr_lines):
+            finished["annihilation_game_day"] = cn_game_day(started)
+            finished["annihilation_finished_at"] = now_beijing().isoformat()
+        merge_last_run(finished)
+        return 0 if ok else 1
+
+
+def main(argv: list[str]) -> int:
+    return execute(select_phase(argv), manual_token_from_argv(argv))
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main(sys.argv))
+    except Exception as exc:  # noqa: BLE001 — (a) 进程顶层：打一行再以 1 退出
+        print(f"MAA 日常失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+        raise SystemExit(1)

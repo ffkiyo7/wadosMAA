@@ -1,0 +1,1219 @@
+#!/usr/bin/env python3
+"""Dependency-free shared helpers for the Hermes MAA workflow."""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import re
+import secrets
+import shlex
+import shutil
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from contextlib import contextmanager
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Literal, Mapping, TypedDict, cast
+from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    # 3.10+ 才有；只在注解里用（本文件 `from __future__ import annotations`），
+    # 运行时不 import，`/usr/bin/env python3` 落到系统 3.9 时也能加载。
+    from typing import TypeGuard
+
+
+BEIJING = ZoneInfo("Asia/Shanghai")
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+MAA_CONFIG_DIR = Path(
+    os.environ.get("MAA_CONFIG_DIR", Path.home() / ".config" / "maa-cli")
+)
+SCRIPTS_DIR = HERMES_HOME / "scripts"
+STATE_DIR = HERMES_HOME / "state" / "maa"
+RUNS_DIR = STATE_DIR / "runs"
+CONFIG_PATH = STATE_DIR / "config.json"
+DEFAULTS_PATH = STATE_DIR / "defaults.json"
+PLAN_PATH = STATE_DIR / "plan.json"
+LAST_RUN_PATH = STATE_DIR / "last_run.json"
+# 活动 watcher 的粗状态（当期活动、每关退避记账、本轮 token）。三个模块都读它，
+# 路径只在这里定义一次。
+WATCH_PATH = STATE_DIR / "activity_watch.json"
+RUN_LOCK_PATH = STATE_DIR / "run.lock"
+LAST_RUN_LOCK_PATH = STATE_DIR / "last_run.lock"
+# 手动场选关请求（`PLAN_MANUAL_RUN.md` M-a）：单文件、同一时刻只有一个请求。
+# 「现在跑」发一张选关卡并写 `pending`，从卡上选了关才派发 `maa_daily.py now <token>`；
+# 10 分钟不选作废。手动关**不写 `plan.json`**（M4），只经这份文件传给手动场。
+MANUAL_RUN_PATH = STATE_DIR / "manual_run.json"
+MANUAL_RUN_TTL = timedelta(minutes=10)
+# 状态文件格式版本（DEV_GUIDE §6.1）。写入时带上，读取时过 `check_schema()`：
+# 缺字段视作 1，更高的未知版本——config / plan / manual_run 拒跑，last_run 告警宽读。
+# **改了某个文件的格式**：把它的版本号 +1，并在调用处给 `check_schema()` 传上
+# `{旧版本: 迁移函数}`；config.json 的迁移另放 `deploy.py` 的 `CONFIG_MIGRATIONS`。
+CONFIG_SCHEMA_VERSION = 1
+PLAN_SCHEMA_VERSION = 1
+LAST_RUN_SCHEMA_VERSION = 1
+MANUAL_RUN_SCHEMA_VERSION = 1
+# 选关卡自己的登记前缀：不在 `hermes:btn:maa:` 下（07:50 / 21:50 建卡整前缀清扫碰不到），
+# 也不在 `hermes:btn:maa-copilot:` 下（`prune_expired_searches()` 碰不到）。
+MANUAL_RUN_BUTTON_PREFIX = "hermes:btn:maa-now:"
+# 定时场优先（M10）：距早晚场开跑不足这么多分钟，手动场既不发卡也不派发。
+# 实测一场手动日常约 14 分钟 + 卡片 10 分钟有效期。
+DEFAULT_MANUAL_RUN_BLACKOUT_MINUTES = 30
+
+# 早晚场的开跑时间（K6）。`config.session_schedule` 可改，Wado's MAA 改时间时由
+# `maa_action schedule` 同步 Hermes cron；计划卡固定提前 `PLAN_CARD_LEAD_MINUTES`。
+# 各场时间限定在自己的半天里：早场 05:00–11:59，晚场 12:00–23:59。早场不早于 05:00
+# 是为了躲开 04:00 换日和 04:30 的 Depot 对表；晚场不过零点，是因为 `plan.json` 的
+# 覆盖按**当天**日期生效，过了零点的「晚场」会读到第二天的空覆盖。
+DEFAULT_SESSION_SCHEDULE: dict[str, dict[str, Any]] = {
+    "am": {"time": "08:00", "enabled": True},
+    "pm": {"time": "22:00", "enabled": True},
+}
+SESSION_WINDOWS = {"am": (5 * 60, 12 * 60), "pm": (12 * 60, 24 * 60)}
+SESSION_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+PLAN_CARD_LEAD_MINUTES = 10
+PHASE_NAMES = {"am": "早场", "pm": "晚场", "now": "手动场"}
+
+# Hermes' persistent-button patch intentionally has one global registry. MAA
+# must merge its keys under the same lock used by agent-book.
+BUTTONS_PATH = HERMES_HOME / "state" / "agent-book" / "buttons.json"
+STATE_LOCK_PATH = HERMES_HOME / "state" / "agent-book" / "state.lock"
+
+DISCORD_API_BASE = "https://discord.com/api/v10"
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+DEFAULT_TASKS = {
+    "fight": True,
+    "infrast": True,
+    "recruit": True,
+    "mall": True,
+    "award": True,
+}
+DEFAULT_PLAN = {
+    "stage": "1-7",
+    # Kept in the normalized snapshot for backwards-compatible reporting.
+    # The policy is fixed: no ordinary medicine, expiring medicine only.
+    "medicine": "expiring",
+    "skip": False,
+    "stone": 0,
+    "tasks": DEFAULT_TASKS,
+}
+EXTRA_PATH_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin")
+PROXY_ENV_KEYS = (
+    "ALL_PROXY",
+    "HTTPS_PROXY",
+    "HTTP_PROXY",
+    "all_proxy",
+    "https_proxy",
+    "http_proxy",
+)
+# 计划的覆盖是**按场次**的（四期 D1~D3）：早场改了关，晚场仍走缺口默认。
+# `now`（手动场）不属于任何场次，永远只吃 defaults（D4）。
+PLAN_PHASES = ("am", "pm")
+# 一个场次覆盖允许持久化的字段。`stage_source` 必须在里面：卡片靠它区分
+# 「这关是自动定的」和「你自己选的」，掉了它点一次「跳过」就会冻住当天的自动定关。
+# `farming_drops` / `farming_fallback_stage` 是四期步骤 3 加的：前者是
+# `{itemId: 还差多少个}`（渲染成 Fight 的 `drops`，刷够即停），后者是刷够之后
+# 接着刷的第二个关。两者由 `maa_plan_card.apply_auto_stage()` 写，
+# `maa_action.set_stage()` 在手动选关时清空——手动选的关不带上限。
+PLAN_SESSION_FIELDS = (
+    "stage",
+    "stage_source",
+    "skip",
+    "source",
+    "updated_at",
+    "farming_drops",
+    "farming_fallback_stage",
+)
+# 上游 itemId 的字符集（`30013` / `mod_unlock_token`）。它会原样变成 `daily.toml`
+# 里 `drops` 表的键，所以在写进计划之前就校验，不留「渲染时再说」的口子。
+SAFE_ITEM_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# 信用商店物品名 / 材料名的白名单（不变量 #51）。渲染器（`maa_daily._mall_item_list()`）
+# 遇到不合规的项静默丢弃，`maa_settings` 写入时整次拒绝——两边必须是同一个正则。
+SAFE_MALL_ITEM_RE = re.compile(r"^[　-鿿·・A-Za-z0-9 \-_]{1,20}$")
+
+
+# ---------------------------------------------------------------------------
+# 状态文件的形状（只给 pyright 看，运行时就是普通 dict）。
+#
+# 全部 `total=False`：这些 dict 来自磁盘上的 JSON，任何键都可能缺；读的地方照旧
+# `.get()` + 自己的兜底 / `normalize_*()` 校验，类型只描述「写进去的应该长什么样」。
+# 加了新键要同步加到这里，否则 pyright 会在写入处报 undefined key。
+# ---------------------------------------------------------------------------
+
+# 场次：`am` / `pm` 是定时场（`PLAN_PHASES`），`now` 是手动场。
+PlanPhase = Literal["am", "pm"]
+Phase = Literal["am", "pm", "now"]
+# `last_run.json` 的 `status`。
+RunStatus = Literal["running", "success", "failed", "skipped"]
+# `manual_run.json` 的 `status`（`maa_action` 写 pending / superseded / expired / failed，
+# 派发时写 dispatched，`maa_daily` 只认 dispatched）。
+ManualRunStatus = Literal["pending", "dispatched", "superseded", "expired", "failed"]
+
+
+def is_phase(value: object) -> TypeGuard[Phase]:
+    return value in ("am", "pm", "now")
+
+
+def is_plan_phase(value: object) -> TypeGuard[PlanPhase]:
+    return value in PLAN_PHASES
+
+
+class Config(TypedDict, total=False):
+    """`config.json`：deploy 按键 merge 种子 `state/config.json`，运行时只有
+    `maa_plan_card` 回写版本号 / 活动快照。键全集 = 种子 + 代码里读的可选键。"""
+
+    schema_version: int
+    channel_id: str
+    game_bundle_id: str
+    playcover_app_path: str
+    playcover_settings_dir: str
+    maatools_address: str
+    game_display_name: str
+    game_launch_timeout: int
+    game_quit_timeout: int
+    game_probe_timeout: int
+    hermes_bin: str
+    maa_bin: str
+    maa_config_dir: str
+    maa_resource_dir: str
+    maa_activity_cache: str
+    maa_disable_proxy: bool
+    connect_retry_limit: int
+    connect_retry_delay: int
+    maa_run_timeout: int
+    cleanup_verify_timeout: int
+    home_screenshot_delay: int
+    home_screenshot_attempts: int
+    medicine_expire_days: int
+    fight_times: int
+    fight_fallback_on_error: bool
+    fight_fallback_min_seconds: int
+    report_drops: bool
+    proxy_failure_limit: int
+    proxy_failure_salvage: bool
+    proxy_failure_salvage_min_seconds: int
+    recruit_times: int
+    award_orundum: bool
+    award_mining: bool
+    award_specialaccess: bool
+    mall_buy_first: list[str]
+    mall_blacklist: list[str]
+    mall_reserve_max_credit: bool
+    mall_only_buy_discount: bool
+    retention_days: int
+    resource_update_timeout: int
+    maa_cli_update_timeout: int
+    maa_cli_formula: str
+    upstream_proxy: str
+    activity_stages: list[Any]
+    all_supply_stages_open: bool
+    maa_cli_version: str
+    maa_core_version: str
+    copilot_blackout_minutes: int
+    copilot_settle_timeout: int
+    copilot_list_item_timeout: int
+    copilot_raid_switch_task: str
+    manual_run_blackout_minutes: int
+    activity_search_retry_minutes: int
+    skland_roster_refresh_days: int
+    auto_copilot_min_lead_minutes: int
+    auto_copilot_max_attempts_per_day: int
+    annihilation_sanity: int
+    depot_timeout: int
+    operbox_timeout: int
+    gamedata_base_url: str
+    farming_weights: dict[str, Any]
+    farming_min_samples: int
+    farming_target_days: int
+    farming_activity_edge: float
+    farming_rerun_days: int
+    farming_scarcity_horizon_days: int
+    farming_stage_table: dict[str, Any]
+    farming_manual_weights: dict[str, Any]
+    session_schedule: dict[str, Any]
+    update_wait_minutes: int
+    config_meta: dict[str, Any]
+
+
+class SessionOverride(TypedDict, total=False):
+    """`plan.json` 里 `sessions.<am|pm>` 的一格（字段见 `PLAN_SESSION_FIELDS`）。"""
+
+    stage: str
+    stage_source: str
+    skip: bool
+    fight: bool
+    source: str
+    updated_at: str
+    farming_drops: dict[str, int]
+    farming_fallback_stage: str
+
+
+class PlanFile(TypedDict, total=False):
+    """`plan.json` 整个文件：只对当天 `date` 有效。"""
+
+    schema_version: int
+    date: str
+    sessions: dict[str, SessionOverride]
+    updated_at: str
+
+
+class Plan(TypedDict, total=False):
+    """`normalize_plan()` / `effective_plan()` 吐出的一场计划。
+
+    最后几个键不落盘，只在一场日常里现算：`annihilation`（`attach_annihilation()`
+    按 `last_run` 和森空岛本周进度算，本周已满时带 `annihilation_skip_reason`）、`farming` / `farming_skip_reason`（`attach_sanity_yield()`）、
+    `fallback_run`（`fallback_fight_plan()` 的补跑计划）。
+    """
+
+    stage: str
+    stage_source: str
+    medicine: str
+    skip: bool
+    stone: int
+    tasks: dict[str, bool]
+    farming_drops: dict[str, int]
+    farming_fallback_stage: str
+    date: str
+    annihilation: bool
+    annihilation_skip_reason: str
+    farming: bool
+    farming_skip_reason: str
+    fallback_run: bool
+
+
+class LastRunThread(TypedDict, total=False):
+    thread_id: str
+    created_at: str
+    delete_failed_at: str
+
+
+class LastRun(TypedDict, total=False):
+    """`last_run.json`：日常 / 抄作业 / depot / 资源更新都往里 merge。
+
+    `phase` 不是 `Phase`：抄作业写的是 `copilot-<token>`。
+    """
+
+    schema_version: int
+    status: RunStatus
+    phase: str
+    plan: Plan
+    stage: str
+    ok: bool
+    started_at: str
+    finished_at: str | None
+    duration_seconds: int | None
+    return_code: int | None
+    log: str | None
+    salvage_log: str | None
+    snapshot: str
+    screenshot: str | None
+    screenshot_error: str | None
+    startup_error: str | None
+    summary: str
+    skip_reason: str
+    game_probe: str
+    home_verified: bool | None
+    home_verify_detail: str | None
+    cleanup_errors: list[str]
+    proxy_failure_batches: int
+    proxy_failure_sanity_refunded: int
+    connect_retries: int
+    inventory_error: str | None
+    thread_id: str | None
+    threads: list[LastRunThread]
+    annihilation_game_day: str
+    annihilation_finished_at: str
+    last_lock_conflict_at: str
+    last_lock_conflict_phase: str
+    last_lock_conflict_reason: str
+    depot_status: str
+    depot_snapshot_at: str | None
+    depot_error: str | None
+    depot_attempted_at: str
+    depot_item_count: int
+    depot_operbox_note: str
+    resource_update_attempted_at: str
+    resource_update_status: Literal["ok", "failed", "skipped"]
+    resource_update_changed: bool
+    resource_update_detail: str
+    resource_update_summary: str
+    maa_cli_version: str
+    maa_core_version: str
+
+
+def now_beijing() -> datetime:
+    return datetime.now(BEIJING)
+
+
+def session_minutes(value: object, phase: str) -> int | None:
+    """`"HH:MM"` → 当天第几分钟；格式不对或不在这一场的半天里返回 None。"""
+    match = SESSION_TIME_RE.fullmatch(value) if isinstance(value, str) else None
+    window = SESSION_WINDOWS.get(phase)
+    if not match or window is None:
+        return None
+    minutes = int(match.group(1)) * 60 + int(match.group(2))
+    return minutes if window[0] <= minutes < window[1] else None
+
+
+def validate_session_schedule(value: object) -> dict[str, dict[str, Any]]:
+    """`config set session_schedule` 的校验：两场都要有，时间合法，`enabled` 是布尔。
+
+    不合规就抛 `ValueError`（中文原因），不做任何猜测或修正。
+    """
+    if not isinstance(value, dict):
+        raise ValueError("session_schedule 必须是 {am: {...}, pm: {...}}")
+    result: dict[str, dict[str, Any]] = {}
+    for phase in PLAN_PHASES:
+        slot = value.get(phase)
+        if not isinstance(slot, dict) or set(slot) - {"time", "enabled"}:
+            raise ValueError(f"{PHASE_NAMES[phase]}只接受 time / enabled 两个字段")
+        if session_minutes(slot.get("time"), phase) is None:
+            low, high = SESSION_WINDOWS[phase]
+            raise ValueError(
+                f"{PHASE_NAMES[phase]}时间要写成 HH:MM，且在 "
+                f"{low // 60:02d}:{low % 60:02d}–{(high - 1) // 60:02d}:{(high - 1) % 60:02d} 之间"
+            )
+        enabled = slot.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise ValueError(f"{PHASE_NAMES[phase]}的 enabled 只能是 true / false")
+        result[phase] = {"time": slot["time"], "enabled": enabled}
+    if set(value) - set(PLAN_PHASES):
+        raise ValueError("session_schedule 只有 am / pm 两场")
+    return result
+
+
+def session_schedule(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """读的时候**宽**：某一场写坏了只退回那一场的默认值，不让一个坏值拖垮日常。"""
+    raw = config.get("session_schedule")
+    result: dict[str, dict[str, Any]] = {}
+    for phase in PLAN_PHASES:
+        default = dict(DEFAULT_SESSION_SCHEDULE[phase])
+        slot = raw.get(phase) if isinstance(raw, dict) else None
+        if isinstance(slot, dict) and session_minutes(slot.get("time"), phase) is not None:
+            default["time"] = slot["time"]
+        if isinstance(slot, dict) and isinstance(slot.get("enabled"), bool):
+            default["enabled"] = slot["enabled"]
+        result[phase] = default
+    return result
+
+
+def session_time(config: Mapping[str, Any], phase: str) -> str:
+    """这一场的 `HH:MM`（`now` 没有固定时间，返回空串）。"""
+    if not is_plan_phase(phase):
+        return ""
+    return str(session_schedule(config)[phase]["time"])
+
+
+def session_label(config: Mapping[str, Any], phase: str) -> str:
+    """「早场 08:00」。"""
+    hhmm = session_time(config, phase)
+    return f"{PHASE_NAMES.get(phase, '本场')} {hhmm}".rstrip()
+
+
+def upcoming_sessions(
+    config: Mapping[str, Any], at: datetime | None = None
+) -> list[tuple[PlanPhase, datetime]]:
+    """开着的场次下一次开跑的时刻，按先后排。关掉的场次（K6）不算。"""
+    now = at or now_beijing()
+    result: list[tuple[PlanPhase, datetime]] = []
+    for phase, slot in session_schedule(config).items():
+        if not slot["enabled"] or not is_plan_phase(phase):
+            continue
+        hour, minute = (int(part) for part in str(slot["time"]).split(":"))
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if now > target:
+            target = target + timedelta(days=1)
+        result.append((phase, target))
+    return sorted(result, key=lambda item: item[1])
+
+
+def session_within(
+    config: Mapping[str, Any], minutes: int, at: datetime | None = None
+) -> tuple[PlanPhase, str] | None:
+    """`minutes` 分钟内有没有一场要开跑：有就返回 `(场次, "HH:MM")`。"""
+    now = at or now_beijing()
+    for phase, target in upcoming_sessions(config, now):
+        if (target - now).total_seconds() / 60 <= minutes:
+            return phase, f"{target.hour:02d}:{target.minute:02d}"
+    return None
+
+
+def ensure_private_dir(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def ensure_state_dirs() -> None:
+    ensure_private_dir(STATE_DIR)
+    ensure_private_dir(RUNS_DIR)
+    ensure_private_dir(BUTTONS_PATH.parent)
+
+
+@contextmanager
+def state_lock() -> Iterator[None]:
+    """Serialize all writers to Hermes' shared persistent-button registry."""
+    ensure_private_dir(STATE_LOCK_PATH.parent)
+    with STATE_LOCK_PATH.open("a+", encoding="utf-8") as lock_file:
+        os.chmod(STATE_LOCK_PATH, 0o600)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+# 锁持有者标记（K15）：拿到 `run.lock` 的一方往锁文件里写**一行 JSON**
+# `{"holder": 种类, "detail": 补充, "pid": 进程号, "since": ISO 时间}`，放锁前清空。
+# 定时场被挡住时据此说「Wado's MAA 正在用」而不是只报锁冲突；日常发现持有者是
+# `update` 时等它跑完（K17）。Wado's MAA（Swift）写同样格式，种类是 `gui`。
+# 标记只在锁**确实被占**时可信：进程被杀时内核会放锁，但文件里的字还在。
+LOCK_HOLDER_LABELS = {
+    "daily": "日常",
+    "copilot": "抄作业",
+    "depot": "仓库对表",
+    "update": "上游更新",
+    "gui": "Wado's MAA",
+}
+
+
+@contextmanager
+def run_lock(
+    *, blocking: bool = False, holder: str = "", detail: str = ""
+) -> Iterator[bool]:
+    """Yield whether this process owns the single MAA execution lock.
+
+    `holder` 非空时，拿到锁就写持有者标记（只探测不写，见 `is_run_locked()`）。
+    """
+    ensure_private_dir(STATE_DIR)
+    with RUN_LOCK_PATH.open("a+", encoding="utf-8") as lock_file:
+        os.chmod(RUN_LOCK_PATH, 0o600)
+        flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+        acquired = False
+        try:
+            fcntl.flock(lock_file.fileno(), flags)
+            acquired = True
+        except BlockingIOError:
+            pass
+        if acquired and holder:
+            marker = {
+                "holder": holder,
+                "detail": detail,
+                "pid": os.getpid(),
+                "since": now_beijing().isoformat(),
+            }
+            lock_file.seek(0)
+            lock_file.truncate()
+            lock_file.write(json.dumps(marker, ensure_ascii=False) + "\n")
+            lock_file.flush()
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                if holder:
+                    lock_file.seek(0)
+                    lock_file.truncate()
+                    lock_file.flush()
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def run_lock_holder() -> dict[str, Any] | None:
+    """现在占着 `run.lock` 的是谁；锁空着、或标记读不懂（旧脚本 / 别的程序）返回 None。"""
+    if not is_run_locked():
+        return None
+    try:
+        first = RUN_LOCK_PATH.read_text(encoding="utf-8").splitlines()[0]
+        marker = json.loads(first)
+    except (OSError, IndexError, ValueError):
+        return None
+    if not isinstance(marker, dict) or not isinstance(marker.get("holder"), str):
+        return None
+    return marker
+
+
+def lock_holder_text(marker: Mapping[str, Any] | None) -> str:
+    """「Wado's MAA（自 14:03）」；没有标记返回空串。"""
+    if not marker:
+        return ""
+    holder = str(marker.get("holder") or "")
+    label = LOCK_HOLDER_LABELS.get(holder, holder[:20] or "另一个任务")
+    detail = str(marker.get("detail") or "")[:30]
+    if detail:
+        label = f"{label}·{detail}"
+    try:
+        since = datetime.fromisoformat(str(marker.get("since"))).astimezone(BEIJING)
+        return f"{label}（自 {since:%H:%M}）"
+    except (TypeError, ValueError):
+        return label
+
+
+def is_run_locked() -> bool:
+    with run_lock(blocking=False) as acquired:
+        return not acquired
+
+
+@contextmanager
+def last_run_lock() -> Iterator[None]:
+    """Serialize last_run.json read-modify-write cycles across MAA processes."""
+    ensure_private_dir(STATE_DIR)
+    with LAST_RUN_LOCK_PATH.open("a+", encoding="utf-8") as lock_file:
+        os.chmod(LAST_RUN_LOCK_PATH, 0o600)
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def load_json(path: Path, default: Any = None) -> Any:
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError:
+        return default
+
+
+class SchemaVersionError(RuntimeError):
+    """状态文件的 `schema_version` 本脚本不认识（多半是回滚到了旧脚本）。"""
+
+
+# 迁移函数：吃一份 vN 的文档，吐一份 vN+1 的文档（`schema_version` 由
+# `check_schema()` 改写，迁移函数不用管）。表的键是**起点**版本 N。
+SchemaMigration = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+def check_schema(
+    name: str,
+    value: Any,
+    current: int,
+    migrations: Mapping[int, SchemaMigration] | None = None,
+    *,
+    strict: bool = True,
+) -> Any:
+    """读状态文件时校验 `schema_version`，必要时逐级升级（DEV_GUIDE §6.1）。
+
+    - 不是 dict：原样返回，「必须是 object」由调用方自己的现有逻辑处理。
+    - 缺 `schema_version`：视作 1（加版本号之前写的文件）。
+    - 等于 `current`：原样返回同一个对象。
+    - 低于 `current`：按 `migrations[v]` 逐级升到 `current`，返回新 dict；
+      **不写回**——下次正常写入时自然带上新版本号。缺哪一级就抛。
+    - 高于 `current` / 不是正整数：`strict` 时抛 `SchemaVersionError` 拒跑；
+      非 strict（只用于汇报的 `last_run.json`）打一条告警到 stderr 后原样返回，
+      交给调用方现有的 normalize 宽读。
+    """
+    if not isinstance(value, dict):
+        return value
+    version = value.get("schema_version", 1)
+    if type(version) is not int or version < 1 or version > current:
+        message = (
+            f"{name} 的 schema_version={version!r} 本脚本不认识（认识 1~{current}）："
+            "多半是回滚到了旧脚本，请重新部署新版脚本，或手动处理这个文件"
+        )
+        if strict:
+            raise SchemaVersionError(message)
+        print(f"警告：{message}；按现有格式宽读", file=sys.stderr)
+        return value
+    if version == current:
+        return value
+    upgraded = dict(value)
+    while version < current:
+        step = (migrations or {}).get(version)
+        if step is None:
+            raise SchemaVersionError(
+                f"{name} 的 schema_version={version} 缺少到 {version + 1} 的迁移函数"
+            )
+        upgraded = dict(step(dict(upgraded)))
+        version += 1
+        upgraded["schema_version"] = version
+    return upgraded
+
+
+def http_get_json(url: str, *, timeout: int = 30, max_bytes: int = MAX_RESPONSE_BYTES) -> Any:
+    """Small dependency-free GET for JSON APIs (prts, etc.)."""
+    request = urllib.request.Request(url, headers={"User-Agent": "Hermes-MAA/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise RuntimeError("HTTP 响应超过大小上限")
+            return json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read(64 * 1024).decode("utf-8", errors="replace")[:300]
+        raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"网络错误: {exc.reason}") from exc
+
+
+def prune_button_registry(
+    prefix: str,
+    keep: set[str] | None = None,
+    remove_only: set[str] | None = None,
+) -> None:
+    """Remove registry keys under a prefix, or only the ids in remove_only.
+
+    Must be called under state_lock().  Returns nothing; the caller decides
+    when to persist.  Never touches keys outside the prefix / remove list.
+    """
+    registry = load_json(BUTTONS_PATH, {})
+    if not isinstance(registry, dict):
+        return
+    keep = keep or set()
+    remove_only = remove_only or set()
+    changed = False
+    for custom_id in list(registry):
+        if remove_only:
+            if custom_id in remove_only:
+                registry.pop(custom_id)
+                changed = True
+        elif custom_id.startswith(prefix) and custom_id not in keep:
+            registry.pop(custom_id)
+            changed = True
+    if changed:
+        atomic_write_json(BUTTONS_PATH, registry)
+
+
+def atomic_write_json(path: Path, value: Any) -> None:
+    """Write private JSON state atomically and durably."""
+    ensure_private_dir(path.parent)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, 0o600)
+        os.replace(tmp_name, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+
+
+def atomic_write_text(path: Path, value: str, *, mode: int = 0o600) -> None:
+    ensure_private_dir(path.parent)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, mode)
+        os.replace(tmp_name, path)
+        os.chmod(path, mode)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+
+
+def load_config() -> Config:
+    raw = check_schema("config.json", load_json(CONFIG_PATH, {}), CONFIG_SCHEMA_VERSION)
+    if not isinstance(raw, dict):
+        raise RuntimeError("config.json 必须是 JSON object")
+    return cast(Config, raw)
+
+
+# 谁在改（K3：界面上要标「几点由 GUI / Discord 改」）。Wado's MAA 调 `maa_action` 时带
+# `MAA_ACTION_SOURCE=gui`；Discord 按钮和聊天不带，记成 discord。
+ACTION_SOURCES = ("gui", "discord")
+
+
+def action_source() -> str:
+    value = os.environ.get("MAA_ACTION_SOURCE", "")
+    return value if value in ACTION_SOURCES else "discord"
+
+
+def update_config(
+    updates: Mapping[str, Any], source: str, at: datetime | None = None
+) -> Config:
+    """改 `config.json` 里的几个键，顺手记下「谁、几点改的」（`config_meta`）。
+
+    只给 `maa_action config set` / `schedule` 用：值必须**已经校验过**。持
+    `state_lock()` 读改写，免得两边同时改丢字段；`config_meta` 里记过的键在
+    `deploy.py` 时保留线上值（用户改过的不被种子盖回去）。
+    """
+    now = at or now_beijing()
+    with state_lock():
+        current = check_schema("config.json", load_json(CONFIG_PATH, {}), CONFIG_SCHEMA_VERSION)
+        if not isinstance(current, dict):
+            raise RuntimeError("config.json 必须是 JSON object")
+        meta_raw = current.get("config_meta")
+        meta: dict[str, Any] = dict(meta_raw) if isinstance(meta_raw, dict) else {}
+        for key, value in updates.items():
+            current[key] = value
+            meta[key] = {"source": source, "updated_at": now.isoformat()}
+        current["config_meta"] = meta
+        current.setdefault("schema_version", CONFIG_SCHEMA_VERSION)
+        atomic_write_json(CONFIG_PATH, current)
+    return cast(Config, current)
+
+
+def require_executable(
+    config: Config,
+    key: str,
+    default: str,
+    label: str,
+) -> str:
+    """Resolve one configured executable or fail before launching the game."""
+    configured = str(config.get(key, default)).strip()
+    resolved = configured if os.path.isabs(configured) else shutil.which(configured)
+    if not resolved or not Path(resolved).is_file() or not os.access(resolved, os.X_OK):
+        raise RuntimeError(f"{label} 不存在或不可执行：{configured}")
+    return str(resolved)
+
+
+def maa_subprocess_env(
+    config: Config,
+    *,
+    keep_proxy: bool = False,
+) -> dict[str, str]:
+    """Build the deterministic environment shared by every maa-cli call.
+
+    Daily ``maa run`` strips proxy variables: MaaCore's in-run hot update
+    misbehaves when those are set. ``maa update`` must keep them so GitHub
+    downloads go through the machine's always-on proxy.
+    """
+    env = os.environ.copy()
+    config_dir = str(config.get("maa_config_dir", MAA_CONFIG_DIR)).strip()
+    if not config_dir:
+        raise RuntimeError("maa_config_dir 不能为空")
+    env["MAA_CONFIG_DIR"] = config_dir
+    # 从 Finder 起的 Wado's MAA、launchd 起的 cron 都可能没有 Homebrew 的 PATH（spike §6(d)5）。
+    path = [part for part in env.get("PATH", "").split(os.pathsep) if part]
+    for extra in EXTRA_PATH_DIRS:
+        if extra not in path:
+            path.append(extra)
+    env["PATH"] = os.pathsep.join(path)
+    if bool(config.get("maa_disable_proxy", False)) and not keep_proxy:
+        for key in PROXY_ENV_KEYS:
+            env.pop(key, None)
+    elif keep_proxy and not any(env.get(key) for key in PROXY_ENV_KEYS):
+        # 联网更新要代理；环境里没有时用 config 里那一份（代理的唯一来源）。
+        proxy = str(config.get("upstream_proxy") or "").strip()
+        if proxy:
+            for key in PROXY_ENV_KEYS:
+                if not key.lower().startswith("all"):
+                    env[key] = proxy
+    return env
+
+
+def _normalized_tasks(value: Any) -> dict[str, bool]:
+    tasks = dict(DEFAULT_TASKS)
+    if isinstance(value, dict):
+        for key in tasks:
+            if key in value:
+                tasks[key] = bool(value[key])
+    return tasks
+
+
+def normalize_plan(value: Any) -> Plan:
+    raw = value if isinstance(value, dict) else {}
+    result: Plan = {
+        "stage": str(raw.get("stage", DEFAULT_PLAN["stage"])),
+        # Medication is intentionally not user-configurable. MaaCore receives
+        # medicine=0 plus medicine_expire_days from the trusted local config.
+        "medicine": "expiring",
+        "skip": bool(raw.get("skip", False)),
+        # Never trust persisted state for this guardrail.
+        "stone": 0,
+        "tasks": _normalized_tasks(raw.get("tasks")),
+    }
+    # `stage_source` 要**穿过**这层规范化：它是「这关是谁定的」的唯一依据。
+    # 以前这里把它连同其余字段一起丢掉，卡片只好绕开 `effective_plan()`
+    # 直接读 `plan.json`（PLAN_CLEARING 不变量 #31 的教训）。
+    stage_source = str(raw.get("stage_source") or "")
+    if stage_source:
+        result["stage_source"] = stage_source
+    # Fight 的 `drops` 上限与「刷够之后接着刷哪关」，同样要穿过这层规范化
+    # （四期步骤 3）。**空值等于没有**：手动选关时写空就是「这关不带上限」。
+    drops = raw.get("farming_drops")
+    if isinstance(drops, dict) and drops:
+        capped: dict[str, int] = {}
+        for item_id, quantity in drops.items():
+            try:
+                count = int(quantity)
+            except (TypeError, ValueError):
+                continue
+            # itemId 会原样进 TOML 的表键，只接受上游那套 id 的字符集。
+            if count > 0 and SAFE_ITEM_ID_RE.match(str(item_id)):
+                capped[str(item_id)] = count
+        if capped:
+            result["farming_drops"] = capped
+    fallback = str(raw.get("farming_fallback_stage") or "")
+    if fallback:
+        result["farming_fallback_stage"] = fallback
+    return result
+
+
+def plan_sessions(at: datetime | None = None) -> dict[str, SessionOverride]:
+    """当天 `plan.json` 的场次表 `{场次: 覆盖}`。
+
+    只认新结构 `{date, sessions: {am, pm}, updated_at}`。**旧的按天格式**
+    （顶层 `stage` / `skip`）读到就当空——它一天后自然失效，不值得为它写迁移。
+    """
+    moment = at or now_beijing()
+    raw = check_schema("plan.json", load_json(PLAN_PATH, {}), PLAN_SCHEMA_VERSION)
+    if not isinstance(raw, dict) or raw.get("date") != moment.date().isoformat():
+        return {}
+    sessions = raw.get("sessions")
+    if not isinstance(sessions, dict):
+        return {}
+    return {
+        str(name): cast(SessionOverride, dict(override))
+        for name, override in sessions.items()
+        if isinstance(override, dict)
+    }
+
+
+def session_override(phase: str, at: datetime | None = None) -> SessionOverride:
+    """一个场次今天的覆盖；没有就是空 dict。"""
+    return plan_sessions(at).get(str(phase), {})
+
+
+def effective_plan(
+    at: datetime | None = None, phase: Phase = "now"
+) -> Plan:
+    """defaults ⊕ 当天 `sessions.<phase>` 的覆盖。
+
+    `phase` 取 `am` / `pm` / `now`。手动场 `now` 从来没有人写过它的场次覆盖，
+    所以它天然等于默认计划——这就是 D4「现在跑取缺口默认关，不看卡片上的手动选择」。
+    """
+    at = at or now_beijing()
+    # 合并时按普通 dict 处理：覆盖来自磁盘，值的类型由下面第二次 normalize_plan() 兜底。
+    merged: dict[str, Any] = dict(normalize_plan(load_json(DEFAULTS_PATH, DEFAULT_PLAN)))
+    override: dict[str, Any] = dict(session_override(phase, at))
+    for key in (
+        "stage",
+        "stage_source",
+        "skip",
+        "farming_drops",
+        "farming_fallback_stage",
+    ):
+        if key in override:
+            merged[key] = override[key]
+    if isinstance(override.get("fight"), bool):
+        # 「这场不清理智」：剿灭和刷理智一起摘掉，基建 / 公招 / 商店 / 领奖照常。
+        merged["tasks"] = {**merged.get("tasks", {}), "fight": override["fight"]}
+    result = normalize_plan(merged)
+    result["date"] = at.date().isoformat()
+    return result
+
+
+def plan_stage_label(plan: Mapping[str, Any]) -> str:
+    return str(plan.get("stage") or "上次的本")
+
+
+def medicine_label(value: str) -> str:
+    del value
+    return "普通理智药 0 · 自动使用临期药"
+
+
+def discord_token() -> str:
+    token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    if token:
+        return token
+
+    env_path = HERMES_HOME / ".env"
+    try:
+        stat = env_path.stat()
+        if stat.st_mode & 0o077:
+            raise RuntimeError("Hermes .env 权限过宽")
+        if stat.st_size > 256 * 1024:
+            raise RuntimeError("Hermes .env 文件过大")
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError as exc:
+        raise RuntimeError("定时任务无法读取 DISCORD_BOT_TOKEN") from exc
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("export "):
+            stripped = stripped[7:].lstrip()
+        key, separator, raw_value = stripped.partition("=")
+        if separator and key.strip() == "DISCORD_BOT_TOKEN":
+            lexer = shlex.shlex(raw_value.strip(), posix=True)
+            lexer.whitespace_split = True
+            lexer.commenters = "#"
+            token = "".join(list(lexer)).strip()
+            if token:
+                return token
+            break
+    raise RuntimeError("定时任务无法读取 DISCORD_BOT_TOKEN")
+
+
+def _discord_http_error(exc: urllib.error.HTTPError) -> tuple[str, float | None]:
+    raw = exc.read(64 * 1024)
+    detail = raw.decode("utf-8", errors="replace")
+    retry_after = None
+    try:
+        payload = json.loads(detail)
+        if isinstance(payload, dict) and payload.get("retry_after") is not None:
+            retry_after = float(payload["retry_after"])
+    except (ValueError, TypeError, json.JSONDecodeError):
+        pass
+    return detail, retry_after
+
+
+def discord_request(
+    token: str,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    *,
+    timeout: int = 20,
+    attempts: int = 4,
+) -> Any:
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    for attempt in range(attempts):
+        request = urllib.request.Request(
+            f"{DISCORD_API_BASE}{path}",
+            data=data,
+            method=method,
+            headers={
+                "Authorization": f"Bot {token}",
+                "Content-Type": "application/json",
+                "User-Agent": "Hermes-MAA/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                if response.status == 204:
+                    return None
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(raw) > MAX_RESPONSE_BYTES:
+                    raise RuntimeError("Discord response exceeded size limit")
+                return json.loads(raw.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail, retry_after = _discord_http_error(exc)
+            if exc.code == 429 and retry_after is not None and attempt + 1 < attempts:
+                time.sleep(min(max(retry_after, 0.1), 30.0))
+                continue
+            raise RuntimeError(f"Discord API {exc.code}: {detail}") from exc
+    raise RuntimeError("Discord API retry limit reached")
+
+
+def retire_discord_components(config: Config, message_id: Any) -> bool:
+    """Remove controls from one tracked Discord message.
+
+    Old search records may not have a message id; that is reported as False.
+    API failures deliberately propagate so callers can make the UI error
+    visible even though the local registry has already been made safe.
+    """
+    channel_id = str(config.get("channel_id") or "")
+    message = str(message_id or "")
+    if not channel_id.isdigit() or not message.isdigit():
+        return False
+    discord_request(
+        discord_token(),
+        "PATCH",
+        f"/channels/{channel_id}/messages/{message}",
+        {"components": []},
+    )
+    return True
+
+
+def discord_upload(
+    token: str,
+    channel_id: str,
+    payload: dict[str, Any],
+    image_path: Path,
+    *,
+    filename: str = "shot.png",
+    timeout: int = 30,
+) -> Any:
+    """Send one Discord message containing payload_json and one PNG file."""
+    if not image_path.is_file():
+        raise FileNotFoundError(image_path)
+    boundary = f"----HermesMAA{secrets.token_hex(16)}"
+    payload_json = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    image_data = image_path.read_bytes()
+    if len(image_data) > 25 * 1024 * 1024:
+        raise RuntimeError("截图超过 Discord 单文件限制")
+    crlf = b"\r\n"
+    parts = [
+        f"--{boundary}".encode(),
+        b'Content-Disposition: form-data; name="payload_json"',
+        b"Content-Type: application/json",
+        b"",
+        payload_json,
+        f"--{boundary}".encode(),
+        f'Content-Disposition: form-data; name="files[0]"; filename="{filename}"'.encode(),
+        b"Content-Type: image/png",
+        b"",
+        image_data,
+        f"--{boundary}--".encode(),
+        b"",
+    ]
+    data = crlf.join(parts)
+    request = urllib.request.Request(
+        f"{DISCORD_API_BASE}/channels/{channel_id}/messages",
+        data=data,
+        method="POST",
+        headers={
+            "Authorization": f"Bot {token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(data)),
+            "User-Agent": "Hermes-MAA/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read(MAX_RESPONSE_BYTES + 1)
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise RuntimeError("Discord response exceeded size limit")
+            return json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail, _retry_after = _discord_http_error(exc)
+        raise RuntimeError(f"Discord API {exc.code}: {detail}") from exc
+
+
+def create_thread(
+    token: str,
+    channel_id: str,
+    message_id: str,
+    name: str,
+) -> dict[str, Any]:
+    return discord_request(
+        token,
+        "POST",
+        f"/channels/{channel_id}/messages/{message_id}/threads",
+        {"name": name[:100], "auto_archive_duration": 1440},
+    )
+
+
+def delete_channel(token: str, channel_id: str) -> None:
+    discord_request(token, "DELETE", f"/channels/{channel_id}")
+
+
+def cleanup_run_files(retention_days: int = 14, at: datetime | None = None) -> list[str]:
+    ensure_private_dir(RUNS_DIR)
+    cutoff = (at or now_beijing()) - timedelta(days=retention_days)
+    removed: list[str] = []
+    for path in RUNS_DIR.iterdir():
+        if not path.is_file() or path.is_symlink():
+            continue
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=BEIJING)
+        if modified < cutoff:
+            path.unlink()
+            removed.append(path.name)
+    return removed
+
+
+def merge_last_run(update: LastRun) -> LastRun:
+    with last_run_lock():
+        current = check_schema(
+            "last_run.json", load_json(LAST_RUN_PATH, {}), LAST_RUN_SCHEMA_VERSION, strict=False
+        )
+        if not isinstance(current, dict):
+            current = {}
+        threads = current.get("threads", [])
+        if not isinstance(threads, list):
+            threads = []
+        safe_update = dict(update)
+        update_threads = safe_update.pop("threads", None)
+        current.update(safe_update)
+        if isinstance(update_threads, list):
+            known = {str(item.get("thread_id")) for item in threads if isinstance(item, dict)}
+            for item in update_threads:
+                if isinstance(item, dict) and str(item.get("thread_id")) not in known:
+                    threads.append(item)
+        current["threads"] = threads
+        current["schema_version"] = LAST_RUN_SCHEMA_VERSION
+        atomic_write_json(LAST_RUN_PATH, current)
+        # 宽读来的文件可能带旧版 / 未知键，这里只承诺「是个 dict」。
+        return cast(LastRun, current)
+
+
+# ---------------------------------------------------------------------------
+# 「你在玩」跳过的统一出口（四期 D18）。探测本身在 `maa_playcover.game_is_online()`。
+# ---------------------------------------------------------------------------
+
+def report_game_busy(
+    config: Config,
+    *,
+    title: str,
+    reason: str,
+    detail: str,
+    at: datetime,
+    state_update: LastRun,
+    token: str = "",
+    channel_id: str = "",
+) -> None:
+    """探到游戏在跑 → 写 `last_run.json` + 发一张灰卡。
+
+    每条自动链路的「已在线」分支都走这里：跳过必须**看得见**，
+    静默 return 是 PLAN_CLEARING 护栏 4 明令禁止的（不变量 #24）。
+    两件事各自 try，任一失败都汇总成 RuntimeError 抛给调用方。
+    """
+    errors: list[str] = []
+    try:
+        merge_last_run(state_update)
+    except Exception as exc:  # noqa: BLE001 — (a) 汇报路径：两步各自兜住，错误汇总后抛给调用方
+        errors.append(f"跳过状态写入失败：{type(exc).__name__}: {exc}")
+    try:
+        channel = channel_id or str(config.get("channel_id", "")).strip()
+        discord_request(
+            token or discord_token(),
+            "POST",
+            f"/channels/{channel}/messages",
+            {
+                "embeds": [
+                    {
+                        "title": title,
+                        "description": f"{reason}\n探测：{detail}",
+                        "color": 0x99AAB5,
+                        "timestamp": at.isoformat(),
+                    }
+                ],
+                "allowed_mentions": {"parse": []},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — (a) 汇报路径：两步各自兜住，错误汇总后抛给调用方
+        errors.append(f"跳过告警发送失败：{type(exc).__name__}: {exc}")
+    if errors:
+        raise RuntimeError("；".join(errors))
+
+
+def cleanup_old_threads(token: str, at: datetime | None = None) -> dict[str, int]:
+    at = at or now_beijing()
+    current = check_schema(
+        "last_run.json", load_json(LAST_RUN_PATH, {}), LAST_RUN_SCHEMA_VERSION, strict=False
+    )
+    if not isinstance(current, dict):
+        current = {}
+    threads = current.get("threads", [])
+    if not isinstance(threads, list):
+        threads = []
+    kept: list[dict[str, Any]] = []
+    deleted = 0
+    failed = 0
+    for item in threads:
+        if not isinstance(item, dict):
+            continue
+        try:
+            created = datetime.fromisoformat(str(item["created_at"])).astimezone(BEIJING)
+            is_old = at - created >= timedelta(hours=24)
+        except (KeyError, ValueError, TypeError):
+            is_old = True
+        if not is_old:
+            kept.append(item)
+            continue
+        try:
+            delete_channel(token, str(item["thread_id"]))
+            deleted += 1
+        except Exception:  # noqa: BLE001 — (c) 删旧线程尽力而为，失败记 delete_failed_at 下次再删
+            item["delete_failed_at"] = at.isoformat()
+            kept.append(item)
+            failed += 1
+    current["threads"] = kept
+    current["schema_version"] = LAST_RUN_SCHEMA_VERSION
+    atomic_write_json(LAST_RUN_PATH, current)
+    return {"deleted": deleted, "failed": failed}

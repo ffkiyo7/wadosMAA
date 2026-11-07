@@ -1,0 +1,104 @@
+[[tasks]]
+name = "启动国服"
+type = "StartUp"
+[tasks.params]
+client_type = "Official"
+start_game_enabled = true
+
+[[tasks]]
+name = "每日剿灭"
+type = "Fight"
+[tasks.params]
+stage = "Annihilation"
+medicine = 0
+medicine_expire_days = 2
+stone = 0
+series = 0
+times = 2147483647
+server = "CN"
+client_type = "Official"
+report_to_penguin = true
+penguin_id = ""
+report_to_yituliu = true
+yituliu_id = ""
+
+[[tasks]]
+name = "刷理智"
+type = "Fight"
+[tasks.params]
+stage = "1-7"
+medicine = 0
+medicine_expire_days = 2
+stone = 0
+series = 0
+times = 2147483647
+server = "CN"
+client_type = "Official"
+report_to_penguin = true
+penguin_id = ""
+report_to_yituliu = true
+yituliu_id = ""
+
+[[tasks]]
+name = "基建换班"
+type = "Infrast"
+[tasks.params]
+mode = 0
+facility = ["Mfg", "Trade", "Power", "Control", "Reception", "Office", "Dorm"]
+drones = "_NotUse"
+threshold = 0.3
+replenish = false
+dorm_trust_enabled = false
+
+[[tasks]]
+name = "公开招募"
+type = "Recruit"
+[tasks.params]
+refresh = true
+select = [4, 5, 6]
+confirm = [3, 4, 5, 6]
+times = 4
+set_time = true
+expedite = false
+server = "CN"
+
+[[tasks]]
+name = "信用商店"
+type = "Mall"
+[tasks.params]
+visit_friends = true
+shopping = true
+force_shopping_if_credit_full = false
+credit_fight = false
+buy_first = []
+blacklist = []
+reserve_max_credit = false
+only_buy_discount = false
+
+[[tasks]]
+name = "领取奖励"
+type = "Award"
+[tasks.params]
+award = true
+mail = true
+recruit = false
+orundum = false
+mining = false
+specialaccess = false
+
+[[tasks]]
+name = "返回主界面"
+type = "Custom"
+[tasks.params]
+task_names = ["Home", "Home@QuickSwitch@ToHome@Entry", "Home@QuickSwitch@ToHome@Open", "Home@ReturnButton", "Home@FromStageSN", "Home@FromAnnihilation"]
+
+# Every name is prefixed with "Home@" on purpose. QuickSwitch is a subroutine
+# that reports success through `#back`, which resolves to the prefix before the
+# first `@`; called bare, `#back` became the non-existent "QuickSwitch" task and
+# was dropped, so the chain span out and failed *after* reaching the home page.
+# This is MAA's own ["Home@QuickSwitch@ToHome#next", "Home@ReturnButtons#next"]
+# expanded by hand — top-level task_names go to ProcessTask verbatim and do not
+# get the `#` expansion that next-lists receive.
+#
+# CloseDown intentionally does not belong here. The final Custom task returns
+# to Home, maa_daily.py takes the screenshot, then closes the game separately.
