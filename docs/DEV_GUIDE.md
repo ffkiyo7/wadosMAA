@@ -477,7 +477,7 @@ executed / execution_failed`，另有 `canceled` / `superseded`。
 2. **抢锁** — `run_lock(blocking=False)`。抢不到时不碰当前持锁任务的顶层状态，只追加
    `last_lock_conflict_*`，发 Discord 红色告警并返回失败；不得把整场日常静默吃掉。
 3. 清理 >14 天产物；把**本场实际使用的计划**快照到 `runs/<date>-<phase>.json`；
-   `last_run.json` 置 `status=running` 并把上一场的终态字段清空（避免运行中读到旧结果）。
+   `last_run.json` 置 `status=running`，用 `merge_last_run(..., new_run=True)` 把上一场的字段整批清掉（避免运行中读到旧结果）。
    > 快照是「跑起来之后再改计划不影响本场」的实现基础——后续对 `plan.json` 的写入
    > 既改不了内存里这个 dict，也改不了这个文件。
 4. `plan.skip` 为真**且 `phase != "now"`** → 发一条灰色「已跳过」Embed，`status=skipped`，
@@ -1064,6 +1064,11 @@ result = normalize_plan(result)             ← 再规范化一次
 
 `merge_last_run()` 语义特殊：普通字段覆盖，`threads` 数组**按 thread_id 去重后追加**——
 子区清理依赖这份累积列表，不能改成整体覆盖。
+`merge_last_run(update, new_run=True)` 是**新一场的第一笔**：先删掉
+`RUN_SCOPED_LAST_RUN_KEYS`（`stage`、`ok`、`skip_reason`、`plan`、`summary` 等只属于某一场的字段）再合并，
+跨场字段（`threads`、剿灭记账、depot、资源更新、`last_lock_conflict_*`）原样保留。日常开跑 / 探测跳过、
+抄作业开跑 / 探测跳过都必须带它，而且只能在持 `run.lock` 时写；锁冲突、Depot、资源更新不带。
+不带的话上一场的 `stage` / `ok` 会挂在新一场上，GUI 读到的就是错的。
 
 同一天同场次的 `runs/` 文件名会复用（`<date>-<phase>`），所以一天里多次 `run now`
 会覆盖 `<date>-now.log/png`。要保留请自行改名或改 `run_stem`。
@@ -1942,7 +1947,7 @@ Wado's MAA（`~/Developer/forks/MaaMacGui` 的 fork）**只通过下面这些东
 | 文件 | GUI 用到的字段 |
 |---|---|
 | `config.json` | `session_schedule`、`config_meta`、`maa_core_version` / `maa_cli_version`，以及 `config get` 列出的键 |
-| `last_run.json` | `status`、`phase`、`started_at` / `finished_at`、`summary`、`resource_update_*` |
+| `last_run.json` | `status`、`phase`（`am` / `pm` / `now` / `copilot-<token>`）、`started_at` / `finished_at`、`summary`、`plan.stage` / `plan.tasks`（日常）、`stage`（抄作业）、`resource_update_*`。新一场开跑时只属于上一场的字段会被整批删掉（§6 `new_run`），读不到就当没有；判成败只看 `status`，不要读 `ok` |
 | `plan.json` / `defaults.json` | 本场关卡、跳过；默认关和默认任务 |
 | `upstream.json` | 见下表 |
 

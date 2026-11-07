@@ -1023,6 +1023,7 @@ def report_game_busy(
         },
         token=token,
         channel_id=channel_id,
+        new_run=True,
     )
 
 
@@ -1794,7 +1795,8 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             return 1
         request = found
         base_plan["stage"] = str(found.get("stage") or "")
-        base_plan["stage_source"] = "discord"
+        # 谁派的就记谁：Wado's MAA 的 `run local` 写 `source="gui"`，选关卡没有这个字段。
+        base_plan["stage_source"] = "gui" if found.get("source") == "gui" else "discord"
         base_plan["farming_drops"] = {}
         base_plan["farming_fallback_stage"] = ""
     plan = attach_sanity_yield(
@@ -1849,7 +1851,8 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 "startup_error": None,
                 "cleanup_errors": [],
                 "summary": "",
-            }
+            },
+            new_run=True,
         )
 
         if should_skip(plan, phase):

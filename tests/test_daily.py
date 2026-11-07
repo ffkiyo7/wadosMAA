@@ -1408,7 +1408,7 @@ class GameProbeTests(unittest.TestCase):
     def setUp(self) -> None:
         isolate_stage_index(self)
 
-    def _execute(self, phase: maa_common.Phase, *, online: bool, probe=None):
+    def _execute(self, phase: maa_common.Phase, *, online: bool, probe=None, manual=None):
         """Drive execute() far enough to observe the probe branch."""
         at = datetime(2026, 8, 8, 8, 0, tzinfo=BEIJING)
         lock = unittest.mock.MagicMock()
@@ -1442,8 +1442,10 @@ class GameProbeTests(unittest.TestCase):
             maa_playcover, "verify_game_installed"
         ), patch.object(
             maa_playcover, "launch_game", side_effect=RuntimeError("STOP: probe passed")
-        ) as opened, patch.object(maa_daily, "send_direct_failure"):
-            code = maa_daily.execute(phase)
+        ) as opened, patch.object(maa_daily, "send_direct_failure"), patch.object(
+            maa_daily, "manual_run_request", return_value=manual
+        ):
+            code = maa_daily.execute(phase, "tok" if manual else "")
         merge.call_args_list = merge.call_args_list + common_merge.call_args_list  # pyright: ignore[reportAttributeAccessIssue]  # 合并两处桩的调用记录
         request.call_args_list = request.call_args_list + common_request.call_args_list  # pyright: ignore[reportAttributeAccessIssue]  # 合并两处桩的调用记录
         return SimpleNamespace(
@@ -1461,6 +1463,11 @@ class GameProbeTests(unittest.TestCase):
                 records = [call.args[0] for call in result.merge.call_args_list]
                 skipped = [r for r in records if r.get("skip_reason") == "game_busy"]
                 self.assertEqual(len(skipped), 1)
+                # 跳过本身就是一场：上一场的 stage / ok 等不能留着。
+                skip_call = next(
+                    c for c in result.merge.call_args_list if c.args[0].get("skip_reason") == "game_busy"
+                )
+                self.assertTrue(skip_call.kwargs.get("new_run"))
                 self.assertEqual(skipped[0]["status"], "skipped")
                 self.assertEqual(skipped[0]["phase"], phase)
                 self.assertEqual(skipped[0]["game_probe"], "探测明细")
@@ -1490,6 +1497,27 @@ class GameProbeTests(unittest.TestCase):
         result = self._execute("now", online=True)
         result.probe.assert_not_called()
         result.opened.assert_called_once()
+
+    def test_run_start_clears_the_previous_runs_fields(self) -> None:
+        result = self._execute("am", online=False)
+        running = [c for c in result.merge.call_args_list if c.args[0].get("status") == "running"]
+        self.assertEqual(len(running), 1)
+        self.assertTrue(running[0].kwargs.get("new_run"))
+
+    def test_manual_run_records_who_picked_the_stage(self) -> None:
+        # 2026-11-06：GUI 派的手动场快照里写成了 discord。
+        for source, expected in (("gui", "gui"), ("discord", "discord"), (None, "discord")):
+            with self.subTest(source=source):
+                request = {"token": "tok", "status": "dispatched", "stage": "TL-9"}
+                if source:
+                    request["source"] = source
+                result = self._execute("now", online=False, manual=request)
+                running = next(
+                    c.args[0] for c in result.merge.call_args_list
+                    if c.args[0].get("status") == "running"
+                )
+                self.assertEqual(running["plan"]["stage"], "TL-9")
+                self.assertEqual(running["plan"]["stage_source"], expected)
 
     def test_only_the_cron_phases_are_probe_gated(self) -> None:
         self.assertEqual(maa_daily.AUTO_PHASES, frozenset({"am", "pm"}))
