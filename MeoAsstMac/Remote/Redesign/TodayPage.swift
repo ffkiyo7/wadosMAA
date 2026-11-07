@@ -219,7 +219,7 @@ struct ManualRunCard: View {
                         ok: "开始"
                     ) { Task { await start(force: false) } }
                 }
-                .disabled(running || store.readOnly || !choices.busy.isEmpty)
+                .disabled(running || store.readOnly || store.lockHolder != nil)
                 if running { ProgressView().controlSize(.small) }
                 if changed {
                     Button("恢复默认") {
@@ -232,8 +232,9 @@ struct ManualRunCard: View {
                 }
                 Spacer(minLength: 0)
             }
-            if !choices.busy.isEmpty {
-                Label("\(choices.busy)正在用游戏", systemImage: "lock").font(.system(size: 12)).foregroundStyle(WM.game)
+            // 以锁文件为准（`RemoteStore` 每 2 秒看一眼），`choices.busy` 是加载那一刻的快照，会过期。
+            if let holder = store.lockHolder {
+                Label("\(holder.text)正在用游戏", systemImage: "lock").font(.system(size: 12)).foregroundStyle(WM.game)
             } else if !choices.blackout.isEmpty {
                 Label(choices.blackout, systemImage: "clock.badge.exclamationmark")
                     .font(.system(size: 12)).foregroundStyle(WM.game)

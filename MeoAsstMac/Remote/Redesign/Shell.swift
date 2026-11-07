@@ -122,6 +122,8 @@ struct RedesignRoot: View {
         .environment(data)
         .tint(accent.color)
         .preferredColorScheme(.dark)
+        // 锁一换人就重拿关卡选项：「现在不能开」的提示（blackout）也可能跟着变。
+        .onChange(of: store.lockHolder) { Task { await data.loadChoices() } }
         // 切了 HERMES_HOME 就丢掉旧环境的列表重新拿。
         .task(id: store.homeGeneration) {
             if store.homeGeneration > 0 { data.reset() }

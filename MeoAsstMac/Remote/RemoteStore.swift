@@ -226,6 +226,7 @@ struct ScheduleReport: Decodable, Sendable {
     @ObservationIgnored private var homeSwitch: Task<Void, Never>?
     @ObservationIgnored private var pendingReload: Task<Void, Never>?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var lockPoll: Task<Void, Never>?
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
 
     /// 成功的回执几秒后自己消失；失败的留到用户关掉、下一次操作或切页。
@@ -360,6 +361,13 @@ struct ScheduleReport: Decodable, Sendable {
                 await self?.reload()
             }
         }
+        // 放锁只是清空 `run.lock` 再 flock 解锁，目录不会变，所以单独每 2 秒看一眼锁。
+        lockPoll = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                self?.checkLock()
+            }
+        }
     }
 
     func stopWatching() {
@@ -367,6 +375,8 @@ struct ScheduleReport: Decodable, Sendable {
         sources.removeAll()
         pollTask?.cancel()
         pollTask = nil
+        lockPoll?.cancel()
+        lockPoll = nil
         pendingReload?.cancel()
         pendingReload = nil
         watchedHome = nil
@@ -406,6 +416,14 @@ struct ScheduleReport: Decodable, Sendable {
         homeGeneration += 1
         startWatching()
         await reload()
+    }
+
+    /// 锁换了人（或放开了）就整个重读一遍：最近一场多半也跟着变了。
+    private func checkLock() {
+        let holder = RunLock.currentHolder()
+        guard holder != lockHolder else { return }
+        lockHolder = holder
+        scheduleReload()
     }
 
     private func scheduleReload() {
