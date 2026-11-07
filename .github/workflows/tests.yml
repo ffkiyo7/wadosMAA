@@ -6,10 +6,16 @@ name: tests
 on:
   push:
     branches: [main]
+    paths: ["maa-remote/**", ".github/workflows/tests.yml"]
   pull_request:
+    paths: ["maa-remote/**", ".github/workflows/tests.yml"]
 
 permissions:
   contents: read
+
+defaults:
+  run:
+    working-directory: maa-remote
 
 concurrency:
   group: tests-${{ github.workflow }}-${{ github.ref }}
