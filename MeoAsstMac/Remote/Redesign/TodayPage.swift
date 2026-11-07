@@ -50,7 +50,7 @@ struct RemoteNotices: View {
                 NoticeLine(ok: false, text: error)
             }
             if let notice = store.notice {
-                NoticeLine(ok: notice.ok, text: notice.text) { store.notice = nil }
+                NoticeLine(ok: notice.ok, text: notice.text) { store.clearNotice() }
             }
         }
         .padding(.bottom, store.schemaProblem == nil && store.loadError == nil && store.notice == nil ? 0 : 14)
@@ -111,6 +111,7 @@ struct ManualRunCard: View {
         }
         .padding(16)
         .wmCard()
+        .autoDismiss(result) { result = nil }
         .alert(
             "定时场优先",
             isPresented: Binding(get: { forceReason != nil }, set: { if !$0 { forceReason = nil } })
@@ -242,6 +243,7 @@ struct ManualRunCard: View {
 
     private func start(force: Bool) async {
         guard let choices = data.choices else { return }
+        result = nil
         running = true
         defer { running = false }
         var payloadDict: [String: Bool] = [:]

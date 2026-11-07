@@ -439,6 +439,19 @@ struct NoticeLine: View {
     }
 }
 
+extension View {
+    /// 页面自己的回执：成功的几秒后清掉，失败的留着。
+    /// 换了新回执时 `.task(id:)` 会先取消旧的计时，旧计时不会清掉新回执。
+    func autoDismiss(_ receipt: (ok: Bool, text: String)?, clear: @escaping () -> Void) -> some View {
+        task(id: receipt.map { "\($0.ok)\u{1}\($0.text)" }) {
+            guard receipt?.ok == true else { return }
+            try? await Task.sleep(for: RemoteStore.noticeLifetime)
+            guard !Task.isCancelled else { return }
+            clear()
+        }
+    }
+}
+
 /// 北京时间的日期工具。
 enum Beijing {
     static var calendar: Calendar {

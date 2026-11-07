@@ -156,6 +156,7 @@ struct ConfigPage: View {
 
     private func save() async {
         guard !store.readOnly else { return }
+        store.clearNotice()
         saving = true
         defer { saving = false }
         var failures: [String] = []
@@ -170,9 +171,11 @@ struct ConfigPage: View {
             }
         }
         await store.reload()
-        store.notice = failures.isEmpty
-            ? (true, "已保存 \(keys.count) 项。")
-            : (false, "有 \(failures.count) 项没保存：\(failures.joined(separator: "；"))")
+        if failures.isEmpty {
+            store.post(true, "已保存 \(keys.count) 项。")
+        } else {
+            store.post(false, "有 \(failures.count) 项没保存：\(failures.joined(separator: "；"))")
+        }
     }
 }
 

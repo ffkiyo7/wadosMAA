@@ -122,7 +122,7 @@ struct RemoteBanner: View {
                         .textSelection(.enabled)
                     Spacer()
                     Button {
-                        store.notice = nil
+                        store.clearNotice()
                     } label: {
                         Image(systemName: "xmark")
                     }
@@ -466,7 +466,7 @@ struct ConfigFieldRow: View {
             parsed = JSONValue.parse(draft)
         }
         guard let parsed else {
-            store.notice = (false, "「\(field.label)」填的不是合法的值")
+            store.post(false, "「\(field.label)」填的不是合法的值")
             return
         }
         Task { await store.setConfig(field.key, parsed) }

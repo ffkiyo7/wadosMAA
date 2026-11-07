@@ -107,6 +107,8 @@ struct RedesignRoot: View {
                 GameConfirmSheet(confirm: confirm) { self.confirm = nil }
             }
         }
+        // 回执只属于刚才那一页，切页就清掉。
+        .onChange(of: page) { store.clearNotice() }
         .environment(\.wmAccent, accent)
         .environment(\.askGame) { confirm = $0 }
         .environment(data)

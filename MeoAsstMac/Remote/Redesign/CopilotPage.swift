@@ -46,6 +46,7 @@ struct CopilotPage: View {
             .padding(.top, 22)
             .padding(.bottom, 40)
         }
+        .autoDismiss(message) { message = nil }
         .task {
             if data.copilot == nil { await data.loadCopilot() }
             if let focus = data.copilotFocus {

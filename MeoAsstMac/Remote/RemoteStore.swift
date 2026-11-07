@@ -193,6 +193,8 @@ struct ScheduleReport: Decodable, Sendable {
     static let shared = RemoteStore()
 
     static let knownSchemaVersion = 1
+    /// 成功回执停留多久。
+    static let noticeLifetime: Duration = .seconds(5)
     static let checkedFiles = ["config.json", "plan.json", "defaults.json", "last_run.json", "upstream.json"]
 
     private(set) var config: ConfigSnapshot?
@@ -204,7 +206,8 @@ struct ScheduleReport: Decodable, Sendable {
     private(set) var schemaProblem: String?
     private(set) var loadError: String?
     private(set) var reloadedAt: Date?
-    var notice: (ok: Bool, text: String)?
+    /// 刚才那次操作的回执。用 `post` / `clearNotice` 改，别直接赋值。
+    private(set) var notice: (ok: Bool, text: String)?
     private(set) var busy = false
 
     var upstream: UpstreamStatus? { upstreamStatus }
@@ -216,6 +219,27 @@ struct ScheduleReport: Decodable, Sendable {
     @ObservationIgnored private var sources: [DispatchSourceFileSystemObject] = []
     @ObservationIgnored private var pendingReload: Task<Void, Never>?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
+    @ObservationIgnored private var noticeTimer: Task<Void, Never>?
+
+    /// 成功的回执几秒后自己消失；失败的留到用户关掉、下一次操作或切页。
+    /// 新回执会取消旧的计时，旧定时器不会清掉新回执（都在主线程上，取消先于检查）。
+    func post(_ ok: Bool, _ text: String) {
+        noticeTimer?.cancel()
+        noticeTimer = nil
+        notice = (ok, text)
+        guard ok else { return }
+        noticeTimer = Task { [weak self] in
+            try? await Task.sleep(for: Self.noticeLifetime)
+            guard !Task.isCancelled else { return }
+            self?.notice = nil
+        }
+    }
+
+    func clearNotice() {
+        noticeTimer?.cancel()
+        noticeTimer = nil
+        notice = nil
+    }
 
     // MARK: 读
 
@@ -251,7 +275,7 @@ struct ScheduleReport: Decodable, Sendable {
         if let status = await RemoteGate.refreshStatus(online: online) {
             upstreamStatus = status
         } else {
-            notice = (false, RemoteGate.lastStatusError ?? "查不到上游状态")
+            post(false, RemoteGate.lastStatusError ?? "查不到上游状态")
         }
     }
 
@@ -281,18 +305,19 @@ struct ScheduleReport: Decodable, Sendable {
     @discardableResult
     func perform(_ args: [String], timeout: TimeInterval = 30) async -> RemoteReceipt? {
         guard !readOnly else {
-            notice = (false, schemaProblem ?? "只读")
+            post(false, schemaProblem ?? "只读")
             return nil
         }
+        clearNotice()
         busy = true
         defer { busy = false }
         do {
             let receipt = try await RemoteBridge.run(args, timeout: timeout)
-            notice = (receipt.ok, receipt.message)
+            post(receipt.ok, receipt.message)
             await reload()
             return receipt
         } catch {
-            notice = (false, error.localizedDescription)
+            post(false, error.localizedDescription)
             return nil
         }
     }
