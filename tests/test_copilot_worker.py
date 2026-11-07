@@ -130,6 +130,22 @@ class LedgerTests(unittest.TestCase):
         self.assertEqual(json.loads(archive.read_text("utf-8"))["activity_key"], SR_KEY)
         self.assertEqual(ledger["stages"], {})
 
+    def test_switching_back_restores_the_archived_ledger(self) -> None:
+        """两个来源认出不同的 key 来回切，也不能用空账把归档盖掉（2026-11-07）。"""
+        tl = "SideStory「时间啊，向前！」|TL"
+        ledger, _note = self._ensure(tl)
+        maa_copilot.record_copilot_attempt(ledger, "TL-3", "normal", outcome="won")
+        maa_copilot.save_ledger(ledger, self.path)
+        self._ensure("SideStory「墟」复刻|AT")
+        back, note = self._ensure(tl)
+        self.assertIn("接回", note)
+        self.assertTrue(back["stages"]["TL-3"]["normal"])
+        self.assertTrue(json.loads(self.path.read_text("utf-8"))["stages"]["TL-3"]["normal"])
+        # 再切走一次，归档里还是那份带记录的账。
+        self._ensure("SideStory「墟」复刻|AT")
+        archive = json.loads((self.path.parent / "ledger-SideStory-TL.json").read_text("utf-8"))
+        self.assertTrue(archive["stages"]["TL-3"]["normal"])
+
     def test_a_non_activity_stage_never_archives_the_running_ledger(self) -> None:
         """手动抄资源本 / 主线时 `activity_key` 是空串（四期步骤 5 修的线上隐患）。
 
@@ -974,7 +990,10 @@ class ManualClearMarkTests(unittest.TestCase):
             ledger_file = root / "ledger.json"
             if ledger is not None:
                 maa_common.atomic_write_json(ledger_file, ledger)
+            # 当期活动由 `maa_plan_card.current_activity_key()` 认：缓存在临时 HOME 下不存在，
+            # 退回读的是 `maa_plan_card` 那份 WATCH_PATH，两处都要指过来。
             with patch.object(maa_action, "WATCH_PATH", watch), \
+                 patch.object(maa_plan_card, "WATCH_PATH", watch), \
                  patch.object(maa_action, "load_config", return_value=config or {}), \
                  patch.object(maa_action, "state_lock", return_value=contextlib.nullcontext()), \
                  patch.object(maa_copilot, "LEDGER_PATH", ledger_file), \
@@ -1088,6 +1107,7 @@ class ManualCopilotPathTests(unittest.TestCase):
             searches = Path(raw) / "searches"
             searches.mkdir()
             with patch.object(maa_action, "WATCH_PATH", watch), \
+                 patch.object(maa_plan_card, "WATCH_PATH", watch), \
                  patch.object(maa_action, "load_config", return_value=config or {}), \
                  patch.object(maa_copilot, "SEARCHES_DIR", searches), \
                  patch.object(maa_copilot, "ensure_private_dirs"), \
@@ -1476,6 +1496,26 @@ class CopilotCardTests(unittest.TestCase):
         embed, _options = self._view({}, watch=watch)
         self.assertIn("🚫 练度不满足（缺：史尔特尔 专精3（你技能7））",
                       embed["fields"][0]["value"])
+
+    def test_a_stale_watch_neither_picks_the_activity_nor_lends_its_failures(self) -> None:
+        """监控停着：watch 还是上一期，当期活动看 MaaCore 缓存，旧的逐关失败不套过来。"""
+        cache = self.root / "StageActivityV2.json"
+        cache.write_text(json.dumps({"Official": {"sideStoryStage": {"SR": {
+            "Activity": {"Tip": "SideStory「月行水上」", "UtcStartTime": "2026/09/01 16:00:00",
+                         "UtcExpireTime": "2026/09/18 03:59:59", "TimeZone": 8},
+            "Stages": [{"Value": "SR-8"}],
+        }}}}, ensure_ascii=False), encoding="utf-8")
+        watch = {"activity_key": "SideStory「昨日海」|YW", "stage_state": {}}
+        maa_clearing.record_stage_failure(
+            watch, "SR-8", kind="op", detail="SR-8 暂无完全满足当前干员练度的作业",
+            gaps=["史尔特尔 专精3（你技能7）"],
+        )
+        embed, options = self._view(
+            {"maa_activity_cache": str(cache)}, watch=watch,
+            at=datetime(2026, 9, 9, 12, 0, tzinfo=BEIJING),
+        )
+        self.assertEqual([stage for _l, stage, _d in options], ["SR-1", "SR-5", "SR-8"])
+        self.assertNotIn("练度不满足", embed["fields"][0]["value"])
 
     def test_without_an_activity_it_degrades_to_supplies_and_main(self) -> None:
         embed, options = self._view(
