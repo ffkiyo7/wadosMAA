@@ -6,3 +6,5 @@
 |---|---|
 | `maa-remote/` | 日常、抄作业、Discord 卡片等自动化脚本，部署到 `~/.hermes/scripts/` |
 | `gui/` | Wado's MAA 界面，MaaMacGui 的 fork |
+
+许可证：`maa-remote/` 是 MIT（见 `maa-remote/LICENSE`）；`gui/` 跟随上游 MAA 的 AGPL-3.0。
