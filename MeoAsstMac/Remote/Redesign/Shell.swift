@@ -60,6 +60,14 @@ enum WMPage: String, CaseIterable, Identifiable, Hashable {
         (copilot?.stages ?? []).filter { $0.status != "cleared" }
     }
 
+    func reset() {
+        choices = nil
+        choicesError = nil
+        copilot = nil
+        copilotError = nil
+        copilotFocus = nil
+    }
+
     func loadChoices() async {
         do {
             choices = try await RemoteBridge.run(["run", "choices"]).decode(RunChoices.self, snakeCase: false)
@@ -114,7 +122,9 @@ struct RedesignRoot: View {
         .environment(data)
         .tint(accent.color)
         .preferredColorScheme(.dark)
-        .task {
+        // 切了 HERMES_HOME 就丢掉旧环境的列表重新拿。
+        .task(id: store.homeGeneration) {
+            if store.homeGeneration > 0 { data.reset() }
             await data.loadChoices()
             await data.loadCopilot()
         }

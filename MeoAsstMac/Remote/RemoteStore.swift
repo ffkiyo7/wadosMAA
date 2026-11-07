@@ -216,7 +216,14 @@ struct ScheduleReport: Decodable, Sendable {
     /// 有更高版本的状态文件时不许改。
     var readOnly: Bool { schemaProblem != nil }
 
+    /// 每切一次 HERMES_HOME 加一；共用列表（`RunData`）靠它重新加载。
+    private(set) var homeGeneration = 0
+
     @ObservationIgnored private var sources: [DispatchSourceFileSystemObject] = []
+    /// 正在监听的 HERMES_HOME；还没开始监听时是 nil。
+    @ObservationIgnored private var watchedHome: URL?
+    @ObservationIgnored private var homeObserver: NSKeyValueObservation?
+    @ObservationIgnored private var homeSwitch: Task<Void, Never>?
     @ObservationIgnored private var pendingReload: Task<Void, Never>?
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
@@ -329,9 +336,13 @@ struct ScheduleReport: Decodable, Sendable {
     // MARK: 监听
 
     /// `state/maa/` 和 `cron/` 一变就重读（防抖 0.5 秒）；再加 60 秒一次的兜底轮询。
+    /// 设置里切了 HERMES_HOME 就换到新目录去监听（见 `switchHome`）。
     func startWatching() {
-        guard sources.isEmpty else { return }
-        for directory in [RemoteConfig.stateDirectory, RemoteConfig.hermesHome.appending(path: "cron")] {
+        observeHome()
+        guard sources.isEmpty, pollTask == nil else { return }
+        let home = RemoteConfig.hermesHome
+        watchedHome = home
+        for directory in [RemoteConfig.stateDirectory, home.appending(path: "cron")] {
             let fd = open(directory.path, O_EVTONLY)
             guard fd >= 0 else { continue }
             let source = DispatchSource.makeFileSystemObjectSource(
@@ -356,6 +367,45 @@ struct ScheduleReport: Decodable, Sendable {
         sources.removeAll()
         pollTask?.cancel()
         pollTask = nil
+        pendingReload?.cancel()
+        pendingReload = nil
+        watchedHome = nil
+    }
+
+    /// 盯着 `RemoteHermesHome`：设置页改的、`defaults write` 改的都能收到。
+    private func observeHome() {
+        guard homeObserver == nil else { return }
+        homeObserver = UserDefaults.standard.observe(\.RemoteHermesHome) { [weak self] _, _ in
+            Task { @MainActor in self?.homeMaybeChanged() }
+        }
+    }
+
+    /// 设置页的输入框每敲一个字都会写一次，停手 0.8 秒后再换。
+    private func homeMaybeChanged() {
+        guard let watchedHome else { return }
+        homeSwitch?.cancel()
+        guard RemoteConfig.hermesHome.path != watchedHome.path else { return }
+        homeSwitch = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(800))
+            guard !Task.isCancelled else { return }
+            await self?.switchHome()
+        }
+    }
+
+    /// 换环境：丢掉旧环境读到的东西，换目录监听，重读。
+    private func switchHome() async {
+        stopWatching()
+        clearNotice()
+        config = nil
+        defaults = nil
+        schedule = nil
+        scheduleError = nil
+        lastRun = [:]
+        lockHolder = nil
+        loadError = nil
+        homeGeneration += 1
+        startWatching()
+        await reload()
     }
 
     private func scheduleReload() {
@@ -366,4 +416,9 @@ struct ScheduleReport: Decodable, Sendable {
             await self?.reload()
         }
     }
+}
+
+extension UserDefaults {
+    /// KVO 用：名字必须和 `RemoteConfig.hermesHomeKey` 一字不差（大小写也算）。
+    @objc dynamic var RemoteHermesHome: String? { string(forKey: RemoteConfig.hermesHomeKey) }
 }
