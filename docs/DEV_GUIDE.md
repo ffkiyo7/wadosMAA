@@ -408,6 +408,8 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
    │
    ├─ 没活动 → 连续 2 次空快照才 idle（不变量 #20），作废未打完的一轮并发通知
    ├─ key 变了 → 归档旧记账 → 新开账本 → 清 stage_state → 发「🆕 已上线」
+   ├─ 刷新游戏数据 _refresh_gamedata()（一天一次；缺当期关时一小时一次）
+   │    **和自动作业解耦**：暂停自动作业 / 开打前停排 / 一轮在打，都照刷
    │
    ├─ 已有 batch_token
    │    executing → 记 running；queued → 20 分钟失联则放回 scheduled；
@@ -423,6 +425,12 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
         写 searches/<token>.json（status=scheduled）→ publish_round() 发「已排程」卡
         dispatch_blocker()  到点？blackout？Depot 窗口？时间预算？run.lock？游戏在跑？
 ```
+
+**游戏数据刷新不受「暂停自动作业」影响**（2026-11-07）：`copilot/gamedata.json` 也是抄作业页
+（`copilot stages`）和手动抄作业判「能不能导航」的依据。原来刷新排在暂停 / 停排判断之后，
+线上自动作业从 10-19 暂停，TL 上线一周游戏数据里还没有它，抄作业页整页 no_nav。
+**所以活动监控 cron 要一直开着**；不想让它开游戏，用「暂停自动作业」（`copilot auto off`），
+而不是暂停 cron。暂停时换活动的「🆕 已上线」通知会写明不会自动排轮。
 
 **判定「空窗」还是「格式变了」只有一个判据**：`is_side_story_heading()`，闸门与
 `parse_activity_events()` 共用它，两边不可能对「什么算分区标题」有分歧。三种结局：
