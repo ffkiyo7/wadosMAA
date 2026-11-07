@@ -292,6 +292,8 @@ struct RunReport: Identifiable, Equatable, Sendable {
     private(set) var homeGeneration = 0
     /// 刚跑完的那一场；App 在前台时首页上方弹一下，在后台时发系统通知。
     private(set) var runReport: RunReport?
+    /// maa-remote 正在跑的那一场到了哪个阶段（跟 `last_run.log`）。
+    let progress = RunProgress()
 
     @ObservationIgnored private var sources: [DispatchSourceFileSystemObject] = []
     /// 正在监听的 HERMES_HOME；还没开始监听时是 nil。
@@ -334,6 +336,7 @@ struct RunReport: Identifiable, Equatable, Sendable {
         checkSchemas()
         lockHolder = RunLock.currentHolder()
         lastRun = Self.readJSON("last_run.json")
+        progress.update(run: lastRun)
         noticeFinishedRun()
         do {
             config = try await RemoteBridge.run(["config", "get"]).decode(ConfigSnapshot.self, snakeCase: false)
@@ -499,6 +502,7 @@ struct RunReport: Identifiable, Equatable, Sendable {
         pendingReload?.cancel()
         pendingReload = nil
         watchedHome = nil
+        progress.stop()
     }
 
     /// 盯着 `RemoteHermesHome`：设置页改的、`defaults write` 改的都能收到。

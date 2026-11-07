@@ -3,7 +3,7 @@
 //  Wado's MAA
 //
 //  重设计的窗口外壳：边栏（今天 / 自动抄作业 / 日程与默认 / 日常配置 / 工具与更多 / 设置）、
-//  顶部状态条（空闲或运行中、「日志」按钮；环境只在设置里看）、右侧日志检查器、会连游戏的统一确认框。
+//  顶部状态条（空闲或运行中 + 当前阶段、「日志」按钮；环境只在设置里看）、右侧日志检查器、会连游戏的统一确认框。
 //
 
 import SwiftUI
@@ -222,6 +222,9 @@ struct RunStateView: View {
                         .background(Circle().fill(WM.game.opacity(0.18)).frame(width: 16, height: 16))
                     Text("运行中").fontWeight(.semibold)
                     Text(busy).foregroundStyle(WM.f2).lineLimit(1)
+                    if let stage = remoteStage {
+                        Text(stage.label).fontWeight(.medium).lineLimit(1)
+                    }
                     ProgressView().progressViewStyle(.linear).frame(width: 140).tint(WM.game)
                     if viewModel.status == .busy {
                         Button {
@@ -255,6 +258,13 @@ struct RunStateView: View {
     private var busyText: String? {
         if viewModel.status != .idle { return "本 App 的上游任务" }
         return store.lockHolder?.text
+    }
+
+    /// maa-remote 这一场现在在哪个阶段（「刷理智」）。
+    private var remoteStage: RunStage? {
+        guard viewModel.status == .idle, store.lockHolder != nil, store.lastRun["status"]?.string == "running"
+        else { return nil }
+        return store.progress.current
     }
 
     /// 上次成功：今天只写时刻，昨天写「昨天 22:16」，更早只写日期。判成败只看 `status`。
@@ -336,10 +346,42 @@ struct RunReportBanner: View {
     }
 }
 
-/// 右侧日志检查器：本 App 的运行日志。
+/// 右侧日志检查器：本 App 的运行日志，按时间插进 maa-remote 正在跑的那一场的阶段（不刷 maa-cli 原文）。
 struct LogInspector: View {
     @Environment(NewViewModel.self) private var newModel
+    @Environment(RemoteStore.self) private var store
     @Environment(\.wmAccent) private var accent
+
+    private enum Row: Identifiable {
+        case app(MAALog)
+        case stage(RunProgress.Entry)
+
+        var id: UUID {
+            switch self {
+            case let .app(log): log.id
+            case let .stage(entry): entry.id
+            }
+        }
+    }
+
+    /// 两边各自按时间排好，归并成一列；同一时刻阶段行在前。
+    private var rows: [Row] {
+        let logs = newModel.logs
+        let stages = store.progress.entries
+        var rows: [Row] = []
+        rows.reserveCapacity(logs.count + stages.count)
+        var i = 0, j = 0
+        while i < logs.count || j < stages.count {
+            if j < stages.count, i == logs.count || stages[j].date <= logs[i].date {
+                rows.append(.stage(stages[j]))
+                j += 1
+            } else {
+                rows.append(.app(logs[i]))
+                i += 1
+            }
+        }
+        return rows
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -359,17 +401,16 @@ struct LogInspector: View {
             .padding(.top, 16)
             .padding(.bottom, 8)
             ScrollViewReader { proxy in
+                let rows = rows
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 3) {
-                        if newModel.logs.isEmpty {
+                        if rows.isEmpty {
                             Text("还没有日志").foregroundStyle(WM.f3)
                         }
-                        ForEach(newModel.logs) { log in
-                            (Text(log.date.formatted(date: .omitted, time: .standard) + " ")
-                                .foregroundStyle(WM.f3)
-                                + Text(log.content).foregroundStyle(color(log)))
+                        ForEach(rows) { row in
+                            line(row)
                                 .textSelection(.enabled)
-                                .id(log.id)
+                                .id(row.id)
                         }
                     }
                     .font(.system(size: 11, design: .monospaced))
@@ -378,10 +419,33 @@ struct LogInspector: View {
                     .padding(.bottom, 16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .onChange(of: newModel.logs.count) {
-                    if let last = newModel.logs.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                .onChange(of: rows.count) {
+                    if let last = rows.last { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
+        }
+    }
+
+    private func line(_ row: Row) -> Text {
+        switch row {
+        case let .app(log):
+            return Text(log.date.formatted(date: .omitted, time: .standard) + " ").foregroundStyle(WM.f3)
+                + Text(log.content).foregroundStyle(color(log))
+        case let .stage(entry):
+            // 打开 App 之前就过去的阶段只知道顺序，时刻那一栏空着。
+            let time = entry.date.formatted(date: .omitted, time: .standard)
+            let stamp = entry.exact ? time : String(repeating: " ", count: time.count)
+            return Text(stamp + " ").foregroundStyle(WM.f3)
+                + Text(entry.text).foregroundStyle(color(entry.tone)).fontWeight(entry.tone == .stage ? .regular : .semibold)
+        }
+    }
+
+    private func color(_ tone: RunProgress.Entry.Tone) -> Color {
+        switch tone {
+        case .run: accent.color
+        case .stage: .primary
+        case .ok: WM.ok
+        case .error: WM.danger
         }
     }
 
