@@ -588,16 +588,16 @@ struct RecentRunsSection: View {
 
     private var lastRunRow: some View {
         let run = store.lastRun
-        let phase = run["phase"]?.string
-        let plan = run["plan"]?.object
-        let stage = plan?["stage"]?.string ?? ""
+        // 抄作业（phase 是 copilot-<token>）没有 plan，关卡在顶层 stage；下面一行用 summary。
+        let plan = LastRunText.isCopilot(run) ? nil : run["plan"]?.object
+        let stage = LastRunText.stage(run)
         let names = ["fight": "刷理智", "infrast": "基建", "recruit": "公招", "mall": "信用商店", "award": "领奖"]
         let tasks = Set((plan?["tasks"]?.object ?? [:]).filter { $0.value.bool == true }.keys)
         let order = ["fight", "infrast", "recruit", "mall", "award"]
         let taskText = order.filter { tasks.contains($0) }.compactMap { names[$0] }.joined(separator: "、")
         let started = run["started_at"]?.string.flatMap(RunLock.parseISO)
         let status = run["status"]?.string ?? ""
-        let title = (phase == "am" ? "早场" : phase == "pm" ? "晚场" : "手动场") + (stage.isEmpty ? "" : " · \(stage)")
+        let title = LastRunText.title(run)
         return HStack(spacing: 12) {
             Swatch(code: stage, size: 24, radius: 6)
             VStack(alignment: .leading, spacing: 1) {
@@ -610,7 +610,7 @@ struct RecentRunsSection: View {
                 Text("\(Beijing.monthDay(started)) \(RunLock.beijingClock(started))")
                     .font(.system(size: 12)).foregroundStyle(WM.f2).monospacedDigit()
             }
-            Text(status == "success" ? "成功" : status)
+            Text(LastRunText.statusWord(status))
                 .font(.system(size: 12))
                 .foregroundStyle(status == "success" ? WM.ok : status == "running" ? WM.game : WM.danger)
         }
