@@ -3,7 +3,7 @@
 //  Wado's MAA
 //
 //  重设计的窗口外壳：边栏（今天 / 自动抄作业 / 日程与默认 / 日常配置 / 工具与更多 / 设置）、
-//  顶部状态条（空闲或运行中、环境标记、「日志」按钮）、右侧日志检查器、会连游戏的统一确认框。
+//  顶部状态条（空闲或运行中、「日志」按钮；环境只在设置里看）、右侧日志检查器、会连游戏的统一确认框。
 //
 
 import SwiftUI
@@ -173,15 +173,7 @@ struct RedesignRoot: View {
         ToolbarItem(placement: .navigation) {
             RunStateView()
         }
-        ToolbarItemGroup(placement: .primaryAction) {
-            Text(RemoteConfig.isLiveHome ? "线上" : "开发环境")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(RemoteConfig.isLiveHome ? WM.ok : WM.f2)
-                .padding(.horizontal, 6)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 5)
-                        .strokeBorder(RemoteConfig.isLiveHome ? WM.ok.opacity(0.5) : WM.line2))
-                .help("maa-remote 环境：\(RemoteConfig.hermesHome.path)。在设置里切换")
+        ToolbarItem(placement: .primaryAction) {
             Button {
                 showLog.toggle()
             } label: {
