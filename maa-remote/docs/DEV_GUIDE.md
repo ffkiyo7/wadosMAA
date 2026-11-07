@@ -261,14 +261,23 @@ stdout 不投递到 Discord（消息由脚本自己用 Discord REST API 发）�
 ```
 聊天「抄作业 / 有什么关能抄」
   → maa_action.py copilot card      只读本地，一次 Discord POST，同步做完（<20s）
-      ├─ copilot_card_stages()：activity_stages（无活动 → 当天资源本 + 1-7）
-      │    × stage_drops() 主掉落 × maa_clearing.nav_checker() 导航键 × 本地关卡索引
+      ├─ copilot_card_stages()：当期活动 current_activity_key() 的整个前缀（无活动 → 当天资源本 + 1-7）
+      │    × stage_drops() 主掉落 × maa_copilot.copilot_nav_checker() × 本地关卡索引
       ├─ 一览列全部候选（每关标 ✅已通 / 🔁突袭待补 / ⏳排程 / 🚫练度不满足 / ⛔无导航）
       ├─ 收旧卡：retire_discord_components(上一张 message_id) → 删旧登记
       ├─ state_lock() 下 merge 写 hermes:btn:maa-copilot:card:stage-select
       └─ 发卡 → 把新 message_id 写进 copilot/card.json（0600）
   选中一关 → select_args → ["copilot","find",<关卡>] → 搜索 worker → **选中即执行**（§5.5）
 ```
+
+**「当期活动」以 MaaCore 活动缓存为准**（`maa_plan_card.current_activity_key()`，2026-11-07）：
+读 `StageActivityV2.json`（`config.maa_activity_cache`，默认 `~/Library/Caches/com.loong.maa/`）里
+**此刻开放**的 SideStory，key 拼法与 watcher 的 `activity_target()` 一致（`Tip|前缀`，复刻条目
+`SSReopen` 的前缀从它的关卡里取，同时开放几期取开始最晚的）；缓存读不出来才退回
+`activity_watch.json` 的 `activity_key`。原来只认 watch，而 watch 只有活动监控 cron 在跑时才更新——
+cron 暂停期间抄作业页一直列 10 月的 YW。抄作业卡、`copilot stages`、`copilot find` / `preview` /
+`mark-cleared` / `unmark` 都走它；watch 的逐关失败记录（`stage_state`）只在 watch 的 key 与当期一致时才用。
+watcher 自己仍按 `maa activity` 认活动，worker 开打前也按 `maa activity` 复核（两者 key 拼法相同）。
 
 **第四个按钮前缀 `hermes:btn:maa-copilot:card:`**：它在 `hermes:btn:maa-copilot:` 之下，
 所以计划卡那趟 `hermes:btn:maa:` 的整段清扫碰不到；又因为 `card` 不是 12 位 hex
@@ -399,6 +408,8 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
    │
    ├─ 没活动 → 连续 2 次空快照才 idle（不变量 #20），作废未打完的一轮并发通知
    ├─ key 变了 → 归档旧记账 → 新开账本 → 清 stage_state → 发「🆕 已上线」
+   ├─ 刷新游戏数据 _refresh_gamedata()（一天一次；缺当期关时一小时一次）
+   │    **和自动作业解耦**：暂停自动作业 / 开打前停排 / 一轮在打，都照刷
    │
    ├─ 已有 batch_token
    │    executing → 记 running；queued → 20 分钟失联则放回 scheduled；
@@ -414,6 +425,12 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
         写 searches/<token>.json（status=scheduled）→ publish_round() 发「已排程」卡
         dispatch_blocker()  到点？blackout？Depot 窗口？时间预算？run.lock？游戏在跑？
 ```
+
+**游戏数据刷新不受「暂停自动作业」影响**（2026-11-07）：`copilot/gamedata.json` 也是抄作业页
+（`copilot stages`）和手动抄作业判「能不能导航」的依据。原来刷新排在暂停 / 停排判断之后，
+线上自动作业从 10-19 暂停，TL 上线一周游戏数据里还没有它，抄作业页整页 no_nav。
+**所以活动监控 cron 要一直开着**；不想让它开游戏，用「暂停自动作业」（`copilot auto off`），
+而不是暂停 cron。暂停时换活动的「🆕 已上线」通知会写明不会自动排轮。
 
 **判定「空窗」还是「格式变了」只有一个判据**：`is_side_story_heading()`，闸门与
 `parse_activity_events()` 共用它，两边不可能对「什么算分区标题」有分歧。三种结局：
@@ -477,7 +494,7 @@ executed / execution_failed`，另有 `canceled` / `superseded`。
 2. **抢锁** — `run_lock(blocking=False)`。抢不到时不碰当前持锁任务的顶层状态，只追加
    `last_lock_conflict_*`，发 Discord 红色告警并返回失败；不得把整场日常静默吃掉。
 3. 清理 >14 天产物；把**本场实际使用的计划**快照到 `runs/<date>-<phase>.json`；
-   `last_run.json` 置 `status=running` 并把上一场的终态字段清空（避免运行中读到旧结果）。
+   `last_run.json` 置 `status=running`，用 `merge_last_run(..., new_run=True)` 把上一场的字段整批清掉（避免运行中读到旧结果）。
    > 快照是「跑起来之后再改计划不影响本场」的实现基础——后续对 `plan.json` 的写入
    > 既改不了内存里这个 dict，也改不了这个文件。
 4. `plan.skip` 为真**且 `phase != "now"`** → 发一条灰色「已跳过」Embed，`status=skipped`，
@@ -872,6 +889,8 @@ executed / execution_failed`，另有 `canceled` / `superseded`。
   ②是 zone 粒度的妥协——代价是用户自己手打过的关可能被再抄一遍，用户已接受。
 - `activity_key` 变了（新活动 / 复刻）→ 旧账**归档**成 `ledger-<安全化的 key>.json` 再新开
   （`ensure_ledger()`）。归档而不是删：回头想知道上个活动抄到哪了只有这份说得清。
+  **切回一期归档过的活动就接回那份归档**（2026-11-07）：当期活动有 watch 和 MaaCore 缓存两个来源，
+  两期同时开放时可能认出不同的 key；原来来回切一次，新开的空账就会把归档盖掉。
 - **非活动关（资源本 / 主线）另有一份 `ledger-standalone.json`**（四期步骤 5 修的线上隐患）：
   手动抄 `CE-6` / `1-7` 时 `start_copilot_search()` 写的 `activity_key` 是**空串**，
   worker 照样 `ensure_ledger("")`。原来这一步见 key 不同就把当期活动账本归档、新开一份
@@ -1064,6 +1083,11 @@ result = normalize_plan(result)             ← 再规范化一次
 
 `merge_last_run()` 语义特殊：普通字段覆盖，`threads` 数组**按 thread_id 去重后追加**——
 子区清理依赖这份累积列表，不能改成整体覆盖。
+`merge_last_run(update, new_run=True)` 是**新一场的第一笔**：先删掉
+`RUN_SCOPED_LAST_RUN_KEYS`（`stage`、`ok`、`skip_reason`、`plan`、`summary` 等只属于某一场的字段）再合并，
+跨场字段（`threads`、剿灭记账、depot、资源更新、`last_lock_conflict_*`）原样保留。日常开跑 / 探测跳过、
+抄作业开跑 / 探测跳过都必须带它，而且只能在持 `run.lock` 时写；锁冲突、Depot、资源更新不带。
+不带的话上一场的 `stage` / `ok` 会挂在新一场上，GUI 读到的就是错的。
 
 同一天同场次的 `runs/` 文件名会复用（`<date>-<phase>`），所以一天里多次 `run now`
 会覆盖 `<date>-now.log/png`。要保留请自行改名或改 `run_stem`。
@@ -1942,7 +1966,7 @@ Wado's MAA（`~/Developer/forks/MaaMacGui` 的 fork）**只通过下面这些东
 | 文件 | GUI 用到的字段 |
 |---|---|
 | `config.json` | `session_schedule`、`config_meta`、`maa_core_version` / `maa_cli_version`，以及 `config get` 列出的键 |
-| `last_run.json` | `status`、`phase`、`started_at` / `finished_at`、`summary`、`resource_update_*` |
+| `last_run.json` | `status`、`phase`（`am` / `pm` / `now` / `copilot-<token>`）、`started_at` / `finished_at`、`summary`、`plan.stage` / `plan.tasks`（日常）、`stage`（抄作业）、`resource_update_*`、`log`（本场 maa-cli 日志的绝对路径。日常、手动场、抄作业**开跑那一笔就写上**，运行中逐行追加，GUI 只读新增部分、按 `<Task> Start` 显示当前阶段；文件可能还没建，或者在 maa run 开写前仍是同名旧场的内容——修改时间早于 `started_at` 的当没有，文件变短就从头读）。新一场开跑时只属于上一场的字段会被整批删掉（§6 `new_run`），读不到就当没有；判成败只看 `status`，不要读 `ok` |
 | `plan.json` / `defaults.json` | 本场关卡、跳过；默认关和默认任务 |
 | `upstream.json` | 见下表 |
 

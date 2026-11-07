@@ -974,7 +974,8 @@ def ensure_ledger(
 ) -> tuple[Ledger, str]:
     """拿到当期活动的账本，返回 `(ledger, 变更说明)`。
 
-    活动 key 变了（新活动 / 复刻）→ 旧账归档到 `ledger-<key>.json` 再新开一份。
+    活动 key 变了（新活动 / 复刻）→ 旧账归档到 `ledger-<key>.json` 再新开一份；
+    新 key 自己有归档（切回来了）就接回那份。
     归档而不是删：用户回头想知道上个活动抄到哪了，只有这份记录说得清。
 
     **空 key 永远不归档、也永远碰不到活动账本**（2026-09-09 修）：手动抄资源本 /
@@ -1017,7 +1018,16 @@ def ensure_ledger(
         atomic_write_json(archive, ledger)
         os.chmod(archive, 0o600)
         note = f"旧账已归档到 {archive.name}"
-    fresh = seed_ledger(new_ledger(activity_key), activity_key)
+    # 切回一期**归档过**的活动就把那份账接回来，而不是新开空账（2026-11-07）：
+    # 当期活动有两个来源（活动监控写的 watch、`current_activity_key()` 读的 MaaCore
+    # 缓存），两期同时开放时它们可能认出不同的 key。原来来回切一次，空账就把
+    # 归档盖掉，真实通关记录整份丢失。
+    restored = load_ledger(target.parent / f"ledger-{_safe_key(activity_key)}.json")
+    if restored is not None and restored.get("activity_key") == str(activity_key or ""):
+        fresh = seed_ledger(restored, activity_key)
+        note = "；".join(filter(None, [note, "接回了这期活动归档的账"]))
+    else:
+        fresh = seed_ledger(new_ledger(activity_key), activity_key)
     save_ledger(fresh, target)
     return fresh, note
 

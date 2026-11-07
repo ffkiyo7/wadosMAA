@@ -275,6 +275,34 @@ class LastRunSchemaTests(TempDirTestCase):
         self.assertEqual([t["thread_id"] for t in result["threads"]], ["1", "2"])
         self.assertEqual(read(self.path)["schema_version"], maa_common.LAST_RUN_SCHEMA_VERSION)
 
+    def test_a_new_run_drops_the_previous_runs_fields_but_keeps_cross_run_ones(self) -> None:
+        # 2026-11-06 现场：抄作业留下的 stage / ok 和旧版的 skip_reason 挂在 GUI 手动场上。
+        write(self.path, {
+            "status": "failed", "phase": "copilot-abc", "stage": "YW-EX-3", "ok": False,
+            "skip_reason": "emulator_busy", "emulator_probe": "BlueStacks 进程在跑",
+            "summary": "抄作业：0/1 通过", "threads": [{"thread_id": "1"}],
+            "annihilation_game_day": "2026-11-05", "resource_update_status": "ok",
+            "depot_status": "not_due", "last_lock_conflict_phase": "am",
+        })
+        result = maa_common.merge_last_run(
+            {"status": "running", "phase": "now", "started_at": "t"}, new_run=True
+        )
+        on_disk = read(self.path)
+        for key in ("stage", "ok", "skip_reason", "emulator_probe", "summary"):
+            self.assertNotIn(key, on_disk)
+        self.assertEqual(result["status"], "running")
+        self.assertEqual(on_disk["phase"], "now")
+        self.assertEqual([t["thread_id"] for t in on_disk["threads"]], ["1"])
+        self.assertEqual(on_disk["annihilation_game_day"], "2026-11-05")
+        self.assertEqual(on_disk["resource_update_status"], "ok")
+        self.assertEqual(on_disk["depot_status"], "not_due")
+        self.assertEqual(on_disk["last_lock_conflict_phase"], "am")
+
+    def test_a_plain_merge_still_keeps_every_field(self) -> None:
+        write(self.path, {"status": "running", "stage": "1-7", "ok": True})
+        maa_common.merge_last_run({"summary": "进行中"})
+        self.assertEqual(read(self.path)["stage"], "1-7")
+
     def test_an_unknown_newer_last_run_only_warns_and_is_read_leniently(self) -> None:
         write(self.path, {"schema_version": FUTURE, "status": "running", "threads": "garbage"})
         stderr = io.StringIO()

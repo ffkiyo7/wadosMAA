@@ -141,6 +141,68 @@ def activity_deadlines(
     return result
 
 
+ACTIVITY_STAGE_RE = re.compile(r"^([A-Za-z]{1,8})-\d{1,2}$")
+
+
+def cached_activity_key(
+    path: Path | None = None, at: datetime | None = None
+) -> str | None:
+    """MaaCore 活动缓存里**此刻开放**的 SideStory 的 key（`标题|前缀`，同 `activity_target()`）。
+
+    缓存在、但此刻没有开放的活动 → `""`；缓存读不出来 → `None`（调用方退回别的来源）。
+    几个同时开放时取开始最晚的那个。复刻条目（`SSReopen`）的前缀从它的关卡里取。
+    """
+    try:
+        raw = load_json(path or DEFAULT_STAGE_ACTIVITY_PATH, None)
+    except (OSError, ValueError):
+        return None
+    side_stories = (raw.get("Official") or {}).get("sideStoryStage") if isinstance(raw, dict) else None
+    if not isinstance(side_stories, dict):
+        return None
+    moment = at or now_beijing()
+    best: tuple[datetime, str] | None = None
+    for entry in side_stories.values():
+        activity = entry.get("Activity") if isinstance(entry, dict) else None
+        if not isinstance(activity, dict):
+            continue
+        try:
+            offset = timezone(timedelta(hours=int(activity.get("TimeZone", 8))))
+            start = datetime.strptime(
+                str(activity["UtcStartTime"]), "%Y/%m/%d %H:%M:%S"
+            ).replace(tzinfo=offset)
+            expire = datetime.strptime(
+                str(activity["UtcExpireTime"]), "%Y/%m/%d %H:%M:%S"
+            ).replace(tzinfo=offset)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not start <= moment < expire:
+            continue
+        family = ""
+        for stage in entry.get("Stages") or []:
+            match = ACTIVITY_STAGE_RE.match(str(stage.get("Value") or "") if isinstance(stage, dict) else "")
+            if match:
+                family = match.group(1)
+                break
+        if not family:
+            continue
+        title = str(activity.get("Tip") or activity.get("StageName") or "当前活动")[:120]
+        if best is None or start > best[0]:
+            best = (start, f"{title}|{family}")
+    return best[1] if best else ""
+
+
+def current_activity_key(config: Config, at: datetime | None = None) -> str:
+    """抄作业认的「当期活动」：先看 MaaCore 活动缓存（跟着游戏实际开放的活动走），
+    缓存读不出来才退回 `activity_watch.json`（那份只有活动监控 cron 在跑时才会更新）。
+    """
+    configured = str(config.get("maa_activity_cache") or "").strip()
+    live = cached_activity_key(Path(configured) if configured else None, at)
+    if live is not None:
+        return live
+    watch = load_json(WATCH_PATH, {})
+    return str(watch.get("activity_key") or "") if isinstance(watch, dict) else ""
+
+
 def activity_deadline_text(
     config: Config, at: datetime | None = None
 ) -> str:
@@ -858,7 +920,8 @@ def copilot_card_stages(
     允许重打（D14）。没有活动时退化成**当天开放的资源本 + `1-7`**。
 
     **只读本地**：关卡索引、上游 `tasks/Stages/*.json` 的导航键、`stages.json`
-    的主掉落、`copilot/ledger.json`、`copilot/roster.json`、`activity_watch.json`。
+    的主掉落、`copilot/ledger.json`、`copilot/roster.json`、MaaCore 活动缓存、
+    `activity_watch.json`。
     零网络、零子进程，整条按钮路径必须 < 20s（不变量 #6）。
     """
     import maa_clearing
@@ -866,10 +929,15 @@ def copilot_card_stages(
     index = maa_copilot.load_stage_index(config)
     drops = stage_drops(config)
     watch = load_json(WATCH_PATH, {})
-    activity_key = str(watch.get("activity_key") or "") if isinstance(watch, dict) else ""
+    activity_key = current_activity_key(config, at)
     prefix = maa_copilot._activity_prefix(activity_key)
     nav_of = maa_copilot.copilot_nav_checker(config, prefix, index)
-    stage_state = watch.get("stage_state") if isinstance(watch, dict) else {}
+    # 监控停着时它存的还是上一期活动：那份逐关失败记录不能套到这一期上。
+    stage_state = (
+        watch.get("stage_state")
+        if isinstance(watch, dict) and watch.get("activity_key") == activity_key
+        else {}
+    )
     if not isinstance(stage_state, dict):
         stage_state = {}
     ledger = maa_copilot.load_ledger() or {}

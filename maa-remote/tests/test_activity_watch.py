@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
+from typing import Any
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -340,6 +341,37 @@ class ActivityWatchTickTests(unittest.TestCase):
         self.assertNotIn("batch_token", result.state)
         self.assertEqual([r["status"] for r in result.rounds], ["superseded"])
         result.dispatch.assert_not_called()
+
+    def test_game_data_is_refreshed_even_while_auto_copilot_is_paused(self) -> None:
+        """2026-11-07：自动作业从 10-19 暂停着，TL 上线一周游戏数据还没有它，抄作业页整页 no_nav。
+
+        游戏数据是抄作业页和手动路径的依据，不能跟着「暂停自动作业」一起停。
+        """
+        import maa_gamedata
+
+        for paused, blocked in ((True, False), (False, True)):
+            with self.subTest(paused=paused, blocked=blocked), patch.object(
+                maa_gamedata, "refresh_layout",
+                return_value=({"stages": {}, "zones": {}}, ""),
+            ) as refresh:
+                state: dict[str, Any] = {"activity_key": SR_KEY, "prefix": "SR"}
+                if blocked:
+                    state["prefight_failures"] = {
+                        "date": maa_common.now_beijing().strftime("%Y-%m-%d"), "count": 9}
+                result = self._tick(state, targets=self.TARGETS, entries=self.ENTRIES,
+                                    paused=paused)
+                self.assertEqual(result.state["status"], "paused" if paused else "blocked")
+                refresh.assert_called_once()
+                result.dispatch.assert_not_called()
+
+    def test_a_new_activity_while_paused_does_not_promise_auto_runs(self) -> None:
+        bodies: list[str] = []
+        self._tick(
+            {"activity_key": "旧活动|AT"}, paused=True,
+            notify=lambda config, title, body, color: bodies.append(body),
+        )
+        self.assertTrue(any("自动作业已暂停" in body for body in bodies))
+        self.assertFalse(any("静默执行" in body for body in bodies))
 
     def test_a_new_activity_resets_the_watch_state_and_announces_itself(self) -> None:
         notices: list[str] = []

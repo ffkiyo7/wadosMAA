@@ -837,7 +837,8 @@ def log_tail() -> tuple[bool, str]:
     summary = str(state.get("summary", "")).strip()
     # Existing state may have been produced by the pre-translation runner.
     # Rebuild it from the local log without ever exposing raw CLI lines.
-    if not summary.startswith("🌟 总体："):
+    # 运行中 `log` 已指向本场还在追加的日志（§12.3），拿半截日志拼不出总结，不读。
+    if not summary.startswith("🌟 总体：") and state.get("status") != "running":
         log_path = Path(str(state.get("log", "")))
         if log_path.is_file():
             from maa_daily import extract_summary
@@ -1139,7 +1140,9 @@ def start_copilot_search(stage: str, *more: str) -> tuple[bool, str, str | None]
     **`config.copilot_raid_switch_task` 为空时突袭功能整体关闭**，活动关也只排普通。
     """
     config = load_config()
-    activity_key = str(load_json(WATCH_PATH, {}).get("activity_key") or "")
+    from maa_plan_card import current_activity_key  # 和抄作业卡认同一期活动
+
+    activity_key = current_activity_key(config)
     prefix = maa_copilot._activity_prefix(activity_key)
     targets, refusal, skip_note = _expand_copilot_targets(
         [stage, *more], config, prefix, activity_key
@@ -1227,7 +1230,9 @@ def _ledger_target(stage: str) -> tuple[str, str, str, Config] | str:
     if resolved is None:
         return f"关卡 {stage[:40]} 不在本地关卡索引里；只接受当期活动关、主线或资源关。"
     _stage_id, code = resolved
-    activity_key = str(load_json(WATCH_PATH, {}).get("activity_key") or "")
+    from maa_plan_card import current_activity_key  # 和抄作业卡认同一期活动
+
+    activity_key = current_activity_key(config)
     prefix = maa_copilot._activity_prefix(activity_key)
     if not (prefix and code.startswith(f"{prefix}-")):
         activity_key = ""
@@ -1540,7 +1545,9 @@ def copilot_preview(stage: str) -> tuple[bool, str, dict[str, Any]]:
     from maa_copilot_worker import _stage_cost  # 理智查表只有一份实现（不变量 #45）
 
     config = load_config()
-    activity_key = str(load_json(WATCH_PATH, {}).get("activity_key") or "")
+    from maa_plan_card import current_activity_key  # 和抄作业卡认同一期活动
+
+    activity_key = current_activity_key(config)
     prefix = maa_copilot._activity_prefix(activity_key)
     targets, refusal, _ = _expand_copilot_targets([stage], config, prefix, activity_key)
     if refusal:

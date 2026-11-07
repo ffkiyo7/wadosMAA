@@ -1023,6 +1023,7 @@ def report_game_busy(
         },
         token=token,
         channel_id=channel_id,
+        new_run=True,
     )
 
 
@@ -1794,7 +1795,8 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             return 1
         request = found
         base_plan["stage"] = str(found.get("stage") or "")
-        base_plan["stage_source"] = "discord"
+        # 谁派的就记谁：Wado's MAA 的 `run local` 写 `source="gui"`，选关卡没有这个字段。
+        base_plan["stage_source"] = "gui" if found.get("source") == "gui" else "discord"
         base_plan["farming_drops"] = {}
         base_plan["farming_fallback_stage"] = ""
     plan = attach_sanity_yield(
@@ -1843,13 +1845,17 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 "finished_at": None,
                 "duration_seconds": None,
                 "return_code": None,
-                "log": None,
+                # 本场自己的日志路径不算「上一场的终态字段」：GUI 运行中靠它逐行跟
+                # maa-cli 的 `<Task> Start` 显示当前阶段（DEV_GUIDE §12.3）。文件此刻
+                # 可能还不存在，或仍是同名旧场的内容，等 maa run 开写才会被截断重写。
+                "log": str(log_path),
                 "screenshot": None,
                 "screenshot_error": None,
                 "startup_error": None,
                 "cleanup_errors": [],
                 "summary": "",
-            }
+            },
+            new_run=True,
         )
 
         if should_skip(plan, phase):

@@ -912,7 +912,8 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
                 "summary": GAME_BUSY_NOTICE,
                 "game_probe": probe_detail,
                 "finished_at": now_beijing().isoformat(),
-            }
+            },
+            new_run=True,
         )
         return 0
 
@@ -964,7 +965,8 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
                 "stage": str(entries[0].get("stage") or ""),
                 "started_at": at.isoformat(),
                 "log": str(log_path),
-            }
+            },
+            new_run=True,
         )
         _notice(
             config,

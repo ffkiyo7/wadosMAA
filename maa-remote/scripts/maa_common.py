@@ -345,6 +345,20 @@ class LastRun(TypedDict, total=False):
     maa_core_version: str
 
 
+# 只属于「某一场」的 `last_run.json` 字段：新一场（日常开跑 / 跳过、抄作业开跑 / 跳过）
+# 写进来之前整批删掉，免得上一场的 `stage` / `ok` / `skip_reason` 挂在新一场上（GUI 会读错）。
+# 跨场的（`threads`、剿灭记账、depot、资源更新、锁冲突）不在这里。
+# `emulator_probe` 是旧版写的，现在没人写，顺手清掉。
+RUN_SCOPED_LAST_RUN_KEYS: frozenset[str] = frozenset({
+    "status", "phase", "plan", "stage", "ok", "started_at", "finished_at",
+    "duration_seconds", "return_code", "log", "salvage_log", "snapshot", "screenshot",
+    "screenshot_error", "startup_error", "summary", "skip_reason", "game_probe",
+    "emulator_probe", "home_verified", "home_verify_detail", "cleanup_errors",
+    "proxy_failure_batches", "proxy_failure_sanity_refunded", "connect_retries",
+    "inventory_error", "thread_id",
+})
+
+
 def now_beijing() -> datetime:
     return datetime.now(BEIJING)
 
@@ -1107,13 +1121,20 @@ def cleanup_run_files(retention_days: int = 14, at: datetime | None = None) -> l
     return removed
 
 
-def merge_last_run(update: LastRun) -> LastRun:
+def merge_last_run(update: LastRun, *, new_run: bool = False) -> LastRun:
+    """普通字段覆盖、`threads` 去重追加。
+
+    `new_run=True`：这是新一场的第一笔，先删掉 `RUN_SCOPED_LAST_RUN_KEYS` 再写，
+    跨场字段原样保留。
+    """
     with last_run_lock():
         current = check_schema(
             "last_run.json", load_json(LAST_RUN_PATH, {}), LAST_RUN_SCHEMA_VERSION, strict=False
         )
         if not isinstance(current, dict):
             current = {}
+        if new_run:
+            current = {k: v for k, v in current.items() if k not in RUN_SCOPED_LAST_RUN_KEYS}
         threads = current.get("threads", [])
         if not isinstance(threads, list):
             threads = []
@@ -1146,8 +1167,11 @@ def report_game_busy(
     state_update: LastRun,
     token: str = "",
     channel_id: str = "",
+    new_run: bool = False,
 ) -> None:
     """探到游戏在跑 → 写 `last_run.json` + 发一张灰卡。
+
+    `new_run`：这次跳过本身就算一场（日常），写之前清掉上一场的字段；Depot 不算。
 
     每条自动链路的「已在线」分支都走这里：跳过必须**看得见**，
     静默 return 是 PLAN_CLEARING 护栏 4 明令禁止的（不变量 #24）。
@@ -1155,7 +1179,7 @@ def report_game_busy(
     """
     errors: list[str] = []
     try:
-        merge_last_run(state_update)
+        merge_last_run(state_update, new_run=new_run)
     except Exception as exc:  # noqa: BLE001 — (a) 汇报路径：两步各自兜住，错误汇总后抛给调用方
         errors.append(f"跳过状态写入失败：{type(exc).__name__}: {exc}")
     try:

@@ -535,13 +535,24 @@ def run_once() -> dict[str, Any]:
         # 先落状态再发消息：Discord 挂了不能让下一 tick 把「换活动」重放一遍
         # （归档已经做过了，重放只会多发一条通知）。
         _save(state, now)
+        intro = (
+            "自动作业已暂停，不会自动排轮；说「抄作业」可手动选关，说「恢复自动作业」再开始自动排。"
+            if maa_copilot.auto_pause_state()
+            else "开始自动匹配上游写了导航定义的关（普通 + 突袭），排到就静默执行、跑完发战报。"
+        )
         _notify(
             config,
             f"🆕 {target['title']} 已上线",
-            "开始自动匹配上游写了导航定义的关（普通 + 突袭），"
-            "排到就静默执行、跑完发战报。" + (f"\n{note}。" if note else ""),
+            intro + (f"\n{note}。" if note else ""),
             0x5865F2,
         )
+
+    # 游戏数据跟着活动走，和自动作业解耦（2026-11-07）：它也是抄作业页 / 手动抄作业判
+    # 「能不能导航」的依据。原来刷新排在「暂停自动作业」「开打前停排」之后，自动作业
+    # 一暂停（线上 10-19 起），新活动 TL 上线一周了游戏数据里还没有它，整页 no_nav。
+    index = maa_copilot.load_stage_index(config)
+    prefix = str(state.get("prefix") or maa_copilot._activity_prefix(target["key"]))
+    _refresh_gamedata(config, state, index, prefix, now)
 
     token = str(state.get("batch_token") or "")
     if token:
@@ -588,9 +599,6 @@ def run_once() -> dict[str, Any]:
         return _save(state, now)
     state.pop("blocked_reason", None)
 
-    index = maa_copilot.load_stage_index(config)
-    prefix = str(state.get("prefix") or maa_copilot._activity_prefix(target["key"]))
-    _refresh_gamedata(config, state, index, prefix, now)
     ledger, _note = maa_copilot.ensure_ledger(target["key"])
     roster = maa_copilot.load_roster()
     targets, excluded = collect_targets(

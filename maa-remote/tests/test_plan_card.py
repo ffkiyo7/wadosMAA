@@ -876,5 +876,122 @@ class ActivityDeadlineTests(unittest.TestCase):
 
 
 
+def _side_story(tip, start, expire, stages, timezone=8):
+    return {
+        "Activity": {
+            "Tip": tip,
+            "StageName": tip,
+            "UtcStartTime": start,
+            "UtcExpireTime": expire,
+            "TimeZone": timezone,
+        },
+        "Stages": [{"Value": stage} for stage in stages],
+    }
+
+
+class CurrentActivityKeyTests(unittest.TestCase):
+    """当期活动跟着 MaaCore 活动缓存走，不再只认活动监控写的 `activity_watch.json`。
+
+    2026-11-07：监控 cron 暂停，watch 停在 10 月的「昨日海」，抄作业页一直列 YW 关，
+    而游戏开的是「时间啊，向前！」（TL）。
+    """
+
+    TL = _side_story("SideStory「时间啊，向前！」", "2026/11/01 12:00:00",
+                     "2026/11/22 03:59:59", ["TL-9", "TL-8"])
+    YW = _side_story("SideStory「昨日海」", "2026/10/01 16:00:00",
+                     "2026/10/15 03:59:59", ["YW-8"])
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.cache = self.root / "StageActivityV2.json"
+        self.watch = self.root / "activity_watch.json"
+        self.at = datetime(2026, 11, 7, 12, 0, tzinfo=BEIJING)
+
+    def _cache(self, **side_stories) -> None:
+        self.cache.write_text(
+            json.dumps({"Official": {"sideStoryStage": side_stories}}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+    def _current(self, watch=None) -> str:
+        maa_common.atomic_write_json(self.watch, watch or {})
+        with patch.object(maa_plan_card, "WATCH_PATH", self.watch):
+            return maa_plan_card.current_activity_key(
+                {"maa_activity_cache": str(self.cache)}, self.at
+            )
+
+    def test_the_open_side_story_wins_over_an_expired_one(self) -> None:
+        self._cache(YW=self.YW, TL=self.TL)
+        self.assertEqual(
+            maa_plan_card.cached_activity_key(self.cache, self.at),
+            "SideStory「时间啊，向前！」|TL",
+        )
+
+    def test_the_key_matches_what_the_watcher_derives_from_maa_activity(self) -> None:
+        """换个来源 key 也不能变：`ensure_ledger()` 见 key 不同就归档账本。"""
+        self._cache(TL=self.TL)
+        snapshot = {"stages": ["TL-8"], "events": [
+            {"title": "SideStory「时间啊，向前！」", "stages": ["TL-8", "TL-9"]}]}
+        target = maa_plan_card.activity_target(snapshot)
+        assert target is not None
+        self.assertEqual(maa_plan_card.cached_activity_key(self.cache, self.at), target["key"])
+
+    def test_bounds_are_read_in_the_declared_timezone(self) -> None:
+        self._cache(TL=self.TL)
+        before = datetime(2026, 11, 1, 11, 59, tzinfo=BEIJING)
+        last = datetime(2026, 11, 22, 3, 59, tzinfo=BEIJING)
+        after = datetime(2026, 11, 22, 4, 0, tzinfo=BEIJING)
+        self.assertEqual(maa_plan_card.cached_activity_key(self.cache, before), "")
+        self.assertTrue(maa_plan_card.cached_activity_key(self.cache, last))
+        self.assertEqual(maa_plan_card.cached_activity_key(self.cache, after), "")
+
+    def test_a_rerun_takes_its_prefix_from_the_stages_not_the_entry_name(self) -> None:
+        self._cache(SSReopen=_side_story(
+            "SideStory「墟」复刻", "2026/11/05 16:00:00", "2026/11/15 03:59:59",
+            ["SSReopen-AT", "AT-8", "AT-7"],
+        ))
+        self.assertEqual(
+            maa_plan_card.cached_activity_key(self.cache, self.at), "SideStory「墟」复刻|AT"
+        )
+
+    def test_the_later_start_wins_when_two_are_open(self) -> None:
+        self._cache(TL=self.TL, SSReopen=_side_story(
+            "SideStory「墟」复刻", "2026/11/05 16:00:00", "2026/11/15 03:59:59", ["AT-8"],
+        ))
+        self.assertEqual(
+            maa_plan_card.cached_activity_key(self.cache, self.at), "SideStory「墟」复刻|AT"
+        )
+
+    def test_no_open_activity_is_an_empty_key_not_the_stale_watch(self) -> None:
+        self._cache(YW=self.YW)
+        self.assertEqual(self._current({"activity_key": "SideStory「昨日海」|YW"}), "")
+
+    def test_the_cache_overrides_a_stale_watch(self) -> None:
+        self._cache(YW=self.YW, TL=self.TL)
+        self.assertEqual(
+            self._current({"activity_key": "SideStory「昨日海」|YW"}),
+            "SideStory「时间啊，向前！」|TL",
+        )
+
+    def test_an_unreadable_cache_falls_back_to_the_watch(self) -> None:
+        for name, content in (
+            ("missing", None),
+            ("broken", "{ 坏 json"),
+            ("wrong-shape", json.dumps({"Official": {"sideStoryStage": "不是对象"}})),
+        ):
+            with self.subTest(name):
+                self.cache.unlink(missing_ok=True)
+                if content is not None:
+                    self.cache.write_text(content, encoding="utf-8")
+                self.assertIsNone(maa_plan_card.cached_activity_key(self.cache, self.at))
+                self.assertEqual(
+                    self._current({"activity_key": "SideStory「昨日海」|YW"}),
+                    "SideStory「昨日海」|YW",
+                )
+
+
+
 if __name__ == "__main__":
     unittest.main()
