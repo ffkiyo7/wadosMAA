@@ -470,7 +470,9 @@ struct StatusStack: View {
             return ("有更新", accent.color)
         }
         switch status.verdict {
-        case "ok": return ("已是今天的", WM.ok)
+        case "ok":
+            guard let last = status.lastSuccessAt.flatMap(RunLock.parseISO) else { return ("已是今天的", WM.ok) }
+            return ("最后更新 \(Beijing.monthDay(last))", WM.ok)
         case "stale": return ("今天还没更新", accent.color)
         case "blocked": return ("被挡住", WM.danger)
         case "running": return ("更新中", WM.game)
