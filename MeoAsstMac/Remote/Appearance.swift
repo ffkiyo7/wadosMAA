@@ -152,7 +152,6 @@ struct AppearanceSettingsView: View {
             Section("背景图") {
                 imageRow(title: "浅色模式", path: $lightPath, dark: false)
                 imageRow(title: "深色模式", path: $darkPath, dark: true)
-                Text("只设一张时两种模式共用。").font(.caption).foregroundStyle(.secondary)
             }
             Section("显示") {
                 Picker("填充方式", selection: $fill) {

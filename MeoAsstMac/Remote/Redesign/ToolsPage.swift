@@ -29,7 +29,7 @@ struct ToolsPage: View {
                         taskCard("肉鸽", kind: .roguelike)
                         taskCard("生息演算", kind: .reclamation)
                         tool(
-                            "任务列表", detail: "\(viewModel.tasks.count) 项上游任务",
+                            "任务列表", detail: "\(viewModel.tasks.count) 项",
                             help: "按上游任务列表开始（不发 Discord 战报）"
                         ) {
                             Button("选项…") { path.append(.tasks(nil)) }.buttonStyle(WMButtonStyle())
@@ -42,7 +42,7 @@ struct ToolsPage: View {
                             }
                             .disabled(viewModel.status != .idle)
                         }
-                        tool("手贴作业", detail: "内置、本地文件、作业集", help: "上游的自动战斗：手动贴作业码") {
+                        tool("手贴作业", help: "上游的自动战斗：内置、本地文件、作业集") {
                             Button("打开…") { path.append(.manualCopilot) }.buttonStyle(WMButtonStyle())
                                 .help("打开上游的作业列表")
                         }
@@ -110,7 +110,7 @@ struct ToolsPage: View {
 
     private func taskCard(_ name: String, kind: Kind) -> some View {
         let task = firstTask(kind)
-        return tool(name, detail: task == nil ? "任务列表里还没有" : "上游任务", help: "上游的\(name)，开跑前先抢游戏锁") {
+        return tool(name, detail: task == nil ? "任务列表里还没有" : nil, help: "上游的\(name)，开跑前先抢游戏锁") {
             Button("选项…") { path.append(.tasks(task?.id)) }.buttonStyle(WMButtonStyle())
                 .help(task == nil ? "打开任务列表，用「添加」加一项\(name)" : "\(name)的设置")
             GameButton(title: "开始", help: "会连接游戏：只跑\(name)（加上开始唤醒）") {
@@ -147,11 +147,11 @@ struct ToolsPage: View {
     }
 
     private func tool<Buttons: View>(
-        _ name: String, detail: String, help: String, @ViewBuilder buttons: () -> Buttons
+        _ name: String, detail: String? = nil, help: String, @ViewBuilder buttons: () -> Buttons
     ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(name).font(.system(size: 16, weight: .bold)).help(help)
-            Text(detail).font(.system(size: 11.5)).foregroundStyle(WM.f2)
+            if let detail { Text(detail).font(.system(size: 11.5)).foregroundStyle(WM.f2) }
             Spacer(minLength: 12)
             FlowRow(spacing: 8) { buttons() }
         }

@@ -10,7 +10,6 @@ import SwiftUI
 
 struct CopilotPage: View {
     @Environment(RunData.self) private var data
-    @Environment(RemoteStore.self) private var store
     @Environment(\.wmAccent) private var accent
 
     @State private var selected: String?
@@ -62,10 +61,9 @@ struct CopilotPage: View {
         return all.filter { $0.status != "cleared" } + all.filter { $0.status == "cleared" }
     }
 
+    /// 未通的关数边栏角标已经有了，这里只说活动。
     private var caption: String? {
-        guard let stages = data.copilot else { return nil }
-        let todo = data.copilotTodo.count
-        return stages.inActivity ? "活动进行中 · \(todo) 关未通" : "\(todo) 关未通"
+        data.copilot?.inActivity == true ? "活动进行中" : nil
     }
 
     // MARK: 关卡
@@ -108,7 +106,7 @@ struct CopilotPage: View {
         VStack(alignment: .leading, spacing: 0) {
             SectionTitle(
                 title: selected.map { "\($0) 的候选作业" } ?? "候选作业",
-                caption: preview.map { "搜到 \($0.total ?? $0.candidates.count) 份" })
+                caption: preview.flatMap { p in p.total.flatMap { $0 > p.candidates.count ? "共 \($0) 份" : nil } })
             if let preview {
                 VStack(spacing: 0) {
                     ForEach(Array(preview.candidates.enumerated()), id: \.element.id) { index, candidate in
@@ -203,10 +201,6 @@ struct CopilotPage: View {
                 GridRow {
                     Text("方式").foregroundStyle(WM.f3)
                     Text((preview?.modes ?? []).joined(separator: "、").isEmpty ? "—" : (preview?.modes ?? []).joined(separator: "、"))
-                }
-                GridRow {
-                    Text("游戏锁").foregroundStyle(WM.f3)
-                    Text(store.lockHolder == nil ? "空闲" : "使用中")
                 }
             }
             .font(.system(size: 12)).monospacedDigit()

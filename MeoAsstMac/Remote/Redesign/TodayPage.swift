@@ -220,20 +220,15 @@ struct ManualRunCard: View {
                 }
                 .disabled(running || store.readOnly || !choices.busy.isEmpty)
                 if running { ProgressView().controlSize(.small) }
-                HStack(spacing: 4) {
-                    Text("\(stageText) · \(on.count) 个环节")
-                    if changed {
-                        Text("·")
-                        Button("恢复默认") {
-                            stage = nil
-                            switches = [:]
-                        }
-                        .buttonStyle(WMLinkStyle())
-                        .help("关卡和环节回到「日程与默认」里的设置")
+                if changed {
+                    Button("恢复默认") {
+                        stage = nil
+                        switches = [:]
                     }
+                    .buttonStyle(WMLinkStyle())
+                    .font(.system(size: 11.5))
+                    .help("关卡和环节回到「日程与默认」里的设置")
                 }
-                .font(.system(size: 11.5))
-                .foregroundStyle(WM.f2)
                 Spacer(minLength: 0)
             }
             if !choices.busy.isEmpty {
@@ -420,8 +415,9 @@ struct StatusStack: View {
             key("lock", "游戏锁")
             Text(store.lockHolder == nil ? "空闲" : "使用中")
                 .font(.system(size: 24, weight: .bold)).monospacedDigit()
-            Text(store.lockHolder.map { "被 \($0.text) 占用" } ?? "run.lock 没有人拿着")
-                .font(.system(size: 11.5)).foregroundStyle(WM.f2)
+            if let holder = store.lockHolder {
+                Text(holder.text).font(.system(size: 11.5)).foregroundStyle(WM.f2)
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
@@ -490,7 +486,7 @@ struct CopilotPreviewSection: View {
     var body: some View {
         let todo = data.copilotTodo
         VStack(alignment: .leading, spacing: 0) {
-            SectionTitle(title: "自动抄作业", caption: data.copilot == nil ? nil : "\(todo.count) 关未通") {
+            SectionTitle(title: "自动抄作业") {
                 Button("全部 ›") { go(.copilot) }.buttonStyle(WMLinkStyle()).help("打开「自动抄作业」")
             }
             VStack(spacing: 0) {
@@ -527,7 +523,9 @@ struct CopilotStageListRow: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text(row.stage).fontWeight(.semibold).monospacedDigit()
                     .foregroundStyle(row.status == "cleared" ? WM.f2 : Color.primary)
-                Text(CopilotText.detail(row)).font(.system(size: 11.5)).foregroundStyle(WM.f2)
+                if let reason = CopilotText.reason(row) {
+                    Text(reason).font(.system(size: 11.5)).foregroundStyle(WM.f2)
+                }
             }
             Spacer()
             Text(CopilotText.state(row)).font(.system(size: 12))
@@ -552,10 +550,15 @@ enum CopilotText {
         return status(row).isEmpty ? (row.status ?? "") : status(row)
     }
 
+    /// maa-remote 给的原因（导航不过去等）；没有就不占一行。
+    static func reason(_ row: CopilotStageRow) -> String? {
+        guard let reason = row.reason, !reason.isEmpty else { return nil }
+        return reason
+    }
+
     static func detail(_ row: CopilotStageRow) -> String {
         if row.nav == false { return row.reason ?? "导航不过去" }
-        if let reason = row.reason, !reason.isEmpty { return reason }
-        return row.status == "cleared" ? "已通" : "可以去搜作业"
+        return reason(row) ?? (row.status == "cleared" ? "已通" : "可以去搜作业")
     }
 }
 

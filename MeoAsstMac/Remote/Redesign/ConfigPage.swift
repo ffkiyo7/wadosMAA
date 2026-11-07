@@ -74,9 +74,9 @@ struct ConfigPage: View {
 
     private func saveBar(_ dirty: Bool) -> some View {
         HStack(spacing: 8) {
-            Text(dirty ? "有 \(changedKeys.count) 项未保存的修改" : "已保存")
-                .fontWeight(dirty ? .semibold : .regular)
-                .foregroundStyle(dirty ? Color.accentColor : WM.f2)
+            if dirty {
+                Text("\(changedKeys.count) 项未保存").fontWeight(.semibold).foregroundStyle(Color.accentColor)
+            }
             if saving { ProgressView().controlSize(.small) }
             Spacer()
             Button("还原") { draft = [:] }

@@ -63,7 +63,7 @@ struct SettingsPage: View {
                             .help("切到线上之前先读 PLAN_MACGUI 的 S7")
                         }
                         FormRow(title: "HERMES_HOME", sub: RemoteConfig.hermesHome.path) {
-                            TextField("HERMES_HOME", text: $hermesHome, prompt: Text("留空 = 开发副本"))
+                            TextField("HERMES_HOME", text: $hermesHome, prompt: Text("开发副本"))
                                 .labelsHidden().frame(width: 220)
                                 .help("留空 = \(RemoteConfig.developmentHermesHome)")
                         }

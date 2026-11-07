@@ -26,8 +26,8 @@ struct SchedulePage: View {
                         SessionRow(phase: "am")
                         SessionRow(phase: "pm")
                     }
-                    FormGroup(title: "默认关卡") {
-                        FormRow(title: "计划卡没改过的那一场刷", help: "和 Discord 计划卡同一份关卡列表") {
+                    FormGroup {
+                        FormRow(title: "默认关卡", help: "计划卡没改过的那一场刷这一关；和 Discord 计划卡同一份关卡列表") {
                             stageMenu
                         }
                     }
@@ -46,7 +46,7 @@ struct SchedulePage: View {
                                 .help("看 cron 表达式和是否对齐")
                                 .popover(isPresented: $showCron, arrowEdge: .bottom) { cronPopover }
                         }
-                        FormRow(title: "只把 cron 时间对齐到配置", help: "不动暂停状态") {
+                        FormRow(title: "对齐 cron 时间", help: "只把 cron 时间对齐到配置，不动暂停状态") {
                             Button("对齐") { Task { await store.perform(["schedule", "sync"]) } }
                                 .buttonStyle(WMButtonStyle())
                                 .help("改时间只改 cron 的时间，不会恢复被暂停的任务")
@@ -129,7 +129,7 @@ struct SessionRow: View {
     private var window: String { phase == "am" ? "05:00–11:59" : "12:00–23:59" }
 
     var body: some View {
-        FormRow(title: title, sub: session.map { "每天 \($0.time)" }, help: "可选 \(window)（北京时间）") {
+        FormRow(title: title, help: "可选 \(window)（北京时间）") {
             if let session {
                 if RunLock.beijingClock(draft) != session.time {
                     Button("保存") { Task { await store.perform(["schedule", "set", phase, RunLock.beijingClock(draft)]) } }
