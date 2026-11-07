@@ -7,8 +7,10 @@
 //  所以两边谁后改就以谁为准。读到比自己认识的更高的 `schema_version` 时只读、不让改（不变量 #58）。
 //
 
+import AppKit
 import Foundation
 import Observation
+import UserNotifications
 
 // MARK: - JSON 值
 
@@ -187,6 +189,76 @@ struct ScheduleReport: Decodable, Sendable {
     }
 }
 
+// MARK: - 最近一场（last_run.json）
+
+/// `last_run.json` 给人看的说法。判成败只看 `status`，不读 `ok`（DEV_GUIDE §12.3）。
+enum LastRunText {
+    /// 还没出结果的状态。
+    static let ongoing: Set<String> = ["", "running", "dispatched", "pending", "queued"]
+
+    static func isCopilot(_ run: [String: JSONValue]) -> Bool {
+        (run["phase"]?.string ?? "").hasPrefix("copilot-")
+    }
+
+    static func kind(_ run: [String: JSONValue]) -> String {
+        switch run["phase"]?.string {
+        case "am": "早场"
+        case "pm": "晚场"
+        case _ where isCopilot(run): "抄作业"
+        default: "手动场"
+        }
+    }
+
+    /// 日常读 `plan.stage`，抄作业读顶层 `stage`。
+    static func stage(_ run: [String: JSONValue]) -> String {
+        (isCopilot(run) ? run["stage"]?.string : run["plan"]?.object?["stage"]?.string) ?? ""
+    }
+
+    /// 「早场 · TL-7」。
+    static func title(_ run: [String: JSONValue]) -> String {
+        let stage = stage(run)
+        return kind(run) + (stage.isEmpty ? "" : " · \(stage)")
+    }
+
+    static func statusWord(_ status: String) -> String {
+        switch status {
+        case "success": "成功"
+        case "failed": "失败"
+        case "skipped": "跳过"
+        case "running": "进行中"
+        default: status
+        }
+    }
+}
+
+/// 一场跑完的战报：App 开着的时候 `status` 变成终态才有，一场只报一次。
+struct RunReport: Identifiable, Equatable, Sendable {
+    let id: String
+    let status: String
+    let title: String
+    let finishedAt: Date?
+    /// 战报里值得一眼看到的几行。
+    let lines: [String]
+    let summary: String
+
+    var ok: Bool { status == "success" }
+
+    init(key: String, run: [String: JSONValue]) {
+        id = key
+        status = run["status"]?.string ?? ""
+        title = LastRunText.title(run)
+        finishedAt = (run["finished_at"] ?? run["started_at"])?.string.flatMap(RunLock.parseISO)
+        summary = run["summary"]?.string ?? ""
+        let all = summary.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty && !$0.contains("总体") }
+        // 成功看刷理智那行（关卡、次数、掉落）；不成功看出问题的那几行。
+        let picked = status == "success"
+            ? all.filter { $0.contains("刷理智") }
+            : all.filter { $0.contains("❌") || $0.contains("⚠") }
+        lines = Array((picked.isEmpty ? all : picked).prefix(3))
+    }
+}
+
 // MARK: - Store
 
 @MainActor @Observable final class RemoteStore {
@@ -218,6 +290,8 @@ struct ScheduleReport: Decodable, Sendable {
 
     /// 每切一次 HERMES_HOME 加一；共用列表（`RunData`）靠它重新加载。
     private(set) var homeGeneration = 0
+    /// 刚跑完的那一场；App 在前台时首页上方弹一下，在后台时发系统通知。
+    private(set) var runReport: RunReport?
 
     @ObservationIgnored private var sources: [DispatchSourceFileSystemObject] = []
     /// 正在监听的 HERMES_HOME；还没开始监听时是 nil。
@@ -228,6 +302,11 @@ struct ScheduleReport: Decodable, Sendable {
     @ObservationIgnored private var pollTask: Task<Void, Never>?
     @ObservationIgnored private var lockPoll: Task<Void, Never>?
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
+    @ObservationIgnored private var reportTimer: Task<Void, Never>?
+    /// 上一次读到的那一场（phase、起止时间、status）；nil 表示这个环境还没读过。
+    @ObservationIgnored private var seenRunKey: String?
+    /// 这之前就结束的场次不报。切环境时重置。
+    @ObservationIgnored private var watchingSince = Date()
 
     /// 成功的回执几秒后自己消失；失败的留到用户关掉、下一次操作或切页。
     /// 新回执会取消旧的计时，旧定时器不会清掉新回执（都在主线程上，取消先于检查）。
@@ -255,6 +334,7 @@ struct ScheduleReport: Decodable, Sendable {
         checkSchemas()
         lockHolder = RunLock.currentHolder()
         lastRun = Self.readJSON("last_run.json")
+        noticeFinishedRun()
         do {
             config = try await RemoteBridge.run(["config", "get"]).decode(ConfigSnapshot.self, snakeCase: false)
             defaults = try await RemoteBridge.run(["defaults", "show"]).decode(DefaultsSnapshot.self, snakeCase: false)
@@ -275,6 +355,45 @@ struct ScheduleReport: Decodable, Sendable {
         }
         upstreamStatus = await RemoteGate.refreshStatus() ?? upstreamStatus
         reloadedAt = Date()
+    }
+
+    // MARK: 战报
+
+    /// 状态从「还在跑」变成终态（或中间漏看了，直接读到一场新的终态）就报一次。
+    /// 打开 App、切环境后读到的第一份只记下来，不报。
+    private func noticeFinishedRun() {
+        let status = lastRun["status"]?.string ?? ""
+        let key = (["phase", "started_at", "finished_at"].map { lastRun[$0]?.string ?? "" } + [status])
+            .joined(separator: "|")
+        let previous = seenRunKey
+        seenRunKey = key
+        guard let previous, previous != key, !LastRunText.ongoing.contains(status) else { return }
+        let report = RunReport(key: key, run: lastRun)
+        guard let finished = report.finishedAt, finished >= watchingSince else { return }
+        if NSApplication.shared.isActive {
+            showReport(report)
+        } else {
+            Task { await RunNotifier.post(report) }
+        }
+    }
+
+    private func showReport(_ report: RunReport) {
+        reportTimer?.cancel()
+        reportTimer = nil
+        runReport = report
+        // 成功的半分钟后自己收起；没成功的留到用户关掉。
+        guard report.ok else { return }
+        reportTimer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            guard !Task.isCancelled else { return }
+            self?.runReport = nil
+        }
+    }
+
+    func dismissReport() {
+        reportTimer?.cancel()
+        reportTimer = nil
+        runReport = nil
     }
 
     func refreshUpstream(online: Bool) async {
@@ -413,6 +532,9 @@ struct ScheduleReport: Decodable, Sendable {
         lastRun = [:]
         lockHolder = nil
         loadError = nil
+        dismissReport()
+        seenRunKey = nil
+        watchingSince = Date()
         homeGeneration += 1
         startWatching()
         await reload()
@@ -433,6 +555,21 @@ struct ScheduleReport: Decodable, Sendable {
             guard !Task.isCancelled else { return }
             await self?.reload()
         }
+    }
+}
+
+/// App 在后台时的战报：系统通知。第一次要发时才请求授权。
+enum RunNotifier {
+    static func post(_ report: RunReport) async {
+        let center = UNUserNotificationCenter.current()
+        if await center.notificationSettings().authorizationStatus == .notDetermined {
+            _ = try? await center.requestAuthorization(options: [.alert, .sound])
+        }
+        let content = UNMutableNotificationContent()
+        content.title = "\(report.title) \(LastRunText.statusWord(report.status))"
+        content.body = report.lines.joined(separator: "\n")
+        content.sound = .default
+        try? await center.add(UNNotificationRequest(identifier: report.id, content: content, trigger: nil))
     }
 }
 

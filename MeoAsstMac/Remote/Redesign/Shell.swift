@@ -179,6 +179,16 @@ struct RedesignRoot: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
+        // 一场跑完的战报，哪一页都看得到。
+        .overlay(alignment: .top) {
+            if let report = store.runReport {
+                RunReportBanner(report: report) { store.dismissReport() }
+                    .padding(.top, 12)
+                    .padding(.horizontal, 28)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: store.runReport)
     }
 
     // MARK: 状态条
@@ -249,6 +259,52 @@ struct RunStateView: View {
             return (target, "\(name) \(session.time)")
         }
         return upcoming.min { $0.0 < $1.0 }?.1
+    }
+}
+
+/// 一场跑完的战报：状态、哪一场、几点结束，下面是战报里要紧的几行；悬停看全文。
+struct RunReportBanner: View {
+    let report: RunReport
+    let close: () -> Void
+
+    private var look: (icon: String, color: Color) {
+        switch report.status {
+        case "success": ("checkmark.circle.fill", WM.ok)
+        case "skipped": ("minus.circle.fill", WM.f2)
+        default: ("xmark.circle.fill", WM.danger)
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: look.icon).font(.system(size: 18)).foregroundStyle(look.color)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(report.title).fontWeight(.semibold)
+                    Text(LastRunText.statusWord(report.status)).foregroundStyle(look.color)
+                    if let finished = report.finishedAt {
+                        Text(RunLock.beijingClock(finished)).foregroundStyle(WM.f3).monospacedDigit()
+                    }
+                }
+                ForEach(report.lines, id: \.self) { line in
+                    Text(line).font(.system(size: 11.5)).foregroundStyle(WM.f2).lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
+            Button(action: close) {
+                Image(systemName: "xmark").font(.system(size: 11, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(WM.f3)
+            .help("关掉")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(maxWidth: 560, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(look.color.opacity(0.35), lineWidth: 1))
+        .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
+        .help(report.summary)
     }
 }
 
