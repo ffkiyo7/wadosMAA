@@ -10,7 +10,7 @@
 > **本文的线上快照会过期。** 每步开工第一件事是按 `PLAN_CLEARING.md` 全局护栏 9 对一遍现场；
 > 对不上就以现场为准并回报。本文写于 2026-09-08 深夜。
 
-> **状态（2026-09-09 结项）**：步骤 0~5 已全部交付并部署（commit `560da38`…`6df489a`），当日两个线上缺陷（手动通关重抄、抄完杀游戏导致代理指挥未解锁）已修并真机验证。四期到此结项；遗留缺口不再在本文推进，列在这里备查：突袭功能默认关闭（首次开放的 SideStory 可能本来就没有突袭）、`copilot_list` 挂起、EX 关理智无数据源、肉鸽未真机跑过、抄作业收尾停在结算页不回主界面（已验证无害）。
+> **状态（2026-09-09 结项）**：步骤 0~5 已全部交付并部署（commit `9d411b4`…`8dab72e`），当日两个线上缺陷（手动通关重抄、抄完杀游戏导致代理指挥未解锁）已修并真机验证。四期到此结项；遗留缺口不再在本文推进，列在这里备查：突袭功能默认关闭（首次开放的 SideStory 可能本来就没有突袭）、`copilot_list` 挂起、EX 关理智无数据源、肉鸽未真机跑过、抄作业收尾停在结算页不回主界面（已验证无害）。
 
 ## 进度
 
@@ -70,7 +70,7 @@
 
 ### A. 线上现状
 
-- **线上 = HEAD（`01c46f4`）**。工作区 `scripts/maa_action.py` / `scripts/maa_plan_card.py` / `tests/test_maa.py`
+- **线上 = HEAD（`f886477`）**。工作区 `scripts/maa_action.py` / `scripts/maa_plan_card.py` / `tests/test_maa.py`
   的改动（删第三下拉、后台自动定关、活动关标材料、`stage_source` 进白名单）**未提交、未部署**；
   线上计划卡仍是三个下拉。`python3 deploy.py --check` 干净；单测 332 项全绿（2.8s）。
 - `plan.json` 只有「按天」覆盖（`{date, stage, skip, source, updated_at}`），没有场次概念；
@@ -769,9 +769,9 @@ python3 -c "import json;print(json.load(open('$HOME/.hermes/state/maa/copilot/le
 
 1. **手动通关没有渠道进账本**（结构性）。「已通关」只认本地记账与 zone 全清，森空岛 `act54side_zone1` 是 10/11 没全清，
    整个活动这条判据都不会生效。→ 补 `copilot mark-cleared` / `copilot unmark`（见 2a），SKILL.md 与 DISCORD_GUIDE 同步。
-2. **种子没种上**：02:23「墟」复刻（`|AT`）先建了账，03:00 走「归档 + 新开」时 `ledger is not None`，种子一次没跑。→ `2434d42` 改按 `seeded` 标记补。
+2. **种子没种上**：02:23「墟」复刻（`|AT`）先建了账，03:00 走「归档 + 新开」时 `ledger is not None`，种子一次没跑。→ `b3e91d0` 改按 `seeded` 标记补。
 3. **30 分钟退避重排**：`unknown` 退避一到就重排。→ 同一 commit 加 `auto_copilot_max_attempts_per_day = 2`。
-4. **突袭**：05:26 `6df489a` 把 `copilot_raid_switch_task` 默认清空。
+4. **突袭**：05:26 `8dab72e` 把 `copilot_raid_switch_task` 默认清空。
 
 ### SR-8 三星但代理指挥未解锁（2026-09-09 08:02 早场）—— 抄完直接杀游戏，结算流程被掐断
 

@@ -67,12 +67,12 @@ S1–S6 已实现，两边都提交在 `remotectrl-supported-dev-1106` 上，**�
 
 | 步骤 | 提交 | 验到哪一步 |
 |---|---|---|
-| S1 fork 骨架 | fork `ddd084f` `2103f5f` `485c2d1` `0fe458d` `7e2d7d9` `86070dd` | Release 构建、签名（Apple Development，Team DY725KK25V，带 disable-library-validation）；在 devhome 上启动过：Core 从 maa-cli 的 `lib/` 加载（v6.21.4），资源按 maa-cli 的层加载 |
-| S2 maa-remote | maa-remote `f88712b` `17b73a0` `77e2191` `12c7cf8` `298aa52` `1e09eef` `f7a0406` `8f58db6` `dca86a3` `020ed4b` | 727 个单测在 py3、`/usr/bin/python3`、干净 HOME 下都过，ruff、pyright 干净；`upstream status`、`config get`、`schedule show`、`run choices`、`copilot stages` 在 devhome 上手跑过 |
-| S3 互斥和版本检查 | fork `3ad60b0` | 构建通过；启动检查在 devhome 上实跑：判定 stale，更新被「开发副本只检查」挡住。抢锁、挡定时场的那段要连游戏才走得到，**没实跑** |
-| S5 配置页 / 状态 / 同步 | fork `b8234bb` | 构建通过；启动后 App 在监听 devhome 的 `state/maa/` 和 `cron/`。界面**没点过** |
-| S6 一键长草 / 自动战斗 | maa-remote `020ed4b` + fork `99ecd88` | 构建通过；两条列表命令在 devhome 上能出结果。开一场、派一轮作业**没实跑** |
-| S4 外观 | fork `10ba690` | 构建通过；视觉效果**没看过** |
+| S1 fork 骨架 | fork `ab5efce` `9e949e6` `0a57ca9` `80e2bb8` `741f552` `83861e0` | Release 构建、签名（Apple Development，Team DY725KK25V，带 disable-library-validation）；在 devhome 上启动过：Core 从 maa-cli 的 `lib/` 加载（v6.21.4），资源按 maa-cli 的层加载 |
+| S2 maa-remote | maa-remote `b8389e2` `719f0d1` `2840393` `365361c` `bcafdb4` `fb7e6c1` `b2f11b6` `76e8e5c` `2440723` `5c6b9d5` | 727 个单测在 py3、`/usr/bin/python3`、干净 HOME 下都过，ruff、pyright 干净；`upstream status`、`config get`、`schedule show`、`run choices`、`copilot stages` 在 devhome 上手跑过 |
+| S3 互斥和版本检查 | fork `dcf4d79` | 构建通过；启动检查在 devhome 上实跑：判定 stale，更新被「开发副本只检查」挡住。抢锁、挡定时场的那段要连游戏才走得到，**没实跑** |
+| S5 配置页 / 状态 / 同步 | fork `07d2052` | 构建通过；启动后 App 在监听 devhome 的 `state/maa/` 和 `cron/`。界面**没点过** |
+| S6 一键长草 / 自动战斗 | maa-remote `5c6b9d5` + fork `9ca6239` | 构建通过；两条列表命令在 devhome 上能出结果。开一场、派一轮作业**没实跑** |
+| S4 外观 | fork `d9cb0d9` | 构建通过；视觉效果**没看过** |
 
 S0d 的进展：
 - GUI 进程调 `maa_action.py` 能拿到回执：已验，App 启动时就调了 `upstream status`；
@@ -87,14 +87,14 @@ S0d 的进展：
 
 | 页 | 提交 | 状态 |
 |---|---|---|
-| 主题、⚡ 确认框 | `057a959` | 构建通过 |
-| 今天（手动开一场｜定时场、游戏锁、版本；抄作业关卡；最近一场） | `87fc80b` | 构建通过 |
-| 自动抄作业（三栏，确认开打不绑回车、先弹确认） | `cd3f41d` | 构建通过 |
-| 日程与默认 | `b40d5ef` | 构建通过 |
-| 日常配置（日常 / 高级，整页保存，逐项 `config set`） | `63af079` | 构建通过 |
-| 工具与更多（肉鸽、生息演算、任务列表、手贴作业；实用工具） | `9b5634e` `1ec582f` | 构建通过 |
-| 设置（强调色、maa-remote 环境、连接与游戏） | `df80595` | 构建通过 |
-| 边栏、状态条、日志检查器 | `d775527` | 构建通过 |
+| 主题、⚡ 确认框 | `5175ac1` | 构建通过 |
+| 今天（手动开一场｜定时场、游戏锁、版本；抄作业关卡；最近一场） | `d3724b4` | 构建通过 |
+| 自动抄作业（三栏，确认开打不绑回车、先弹确认） | `12bcdb1` | 构建通过 |
+| 日程与默认 | `b32d7f8` | 构建通过 |
+| 日常配置（日常 / 高级，整页保存，逐项 `config set`） | `042d17e` | 构建通过 |
+| 工具与更多（肉鸽、生息演算、任务列表、手贴作业；实用工具） | `ac1a4ec` `6c68b8c` | 构建通过 |
+| 设置（强调色、maa-remote 环境、连接与游戏） | `381dc25` | 构建通过 |
+| 边栏、状态条、日志检查器 | `f6d4e8b` | 构建通过 |
 
 还没做 / 没核对：
 - 逐页截图已对照（截图在 `~/Developer/forks/wados-maa-build/redesign/shots/`）；⚡ 确认框、候选作业列表、编辑弹窗没截到

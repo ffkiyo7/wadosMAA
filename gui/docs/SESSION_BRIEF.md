@@ -2,19 +2,16 @@
 
 > 2026-11-06 写给新开的开发会话（opus，high）。当时新会话开在 `~/Developer/forks/MaaMacGui`，第一句话说「按 docs/SESSION_BRIEF.md 开工」即可。
 
-## 现在的位置（2026-11-07 起）
+## 现在的位置（2026-11-07 合仓后）
 
-工作区是 `~/Developer/wados-maa`（不是 git 仓库），新会话开在这里，先读它的 `AGENTS.md` 和 `HANDOFF.md`。
+前后端已合成一个仓库 `~/Developer/wados-maa`（远端 `github.com/ffkiyo7/wadosMAA`），说明以根目录 `AGENTS.md` 为准：
 
-| 目录 | 是什么 | 分支 | 主仓库 |
-|---|---|---|---|
-| `~/Developer/wados-maa/gui` | 本仓库（界面重设计）的 worktree | `claude/redesign-ui-60930c` | `~/Developer/forks/MaaMacGui`（`remotectrl-supported-dev-1106`） |
-| `~/Developer/wados-maa/maa-remote` | maa-remote 的 worktree（K2） | `remotectrl-supported-dev-1106` | `~/Developer/personal/maa-remote`（`main`） |
+- `gui/`：本 fork；`maa-remote/`：maa-remote。平时在 `dev` 分支提交，`main` = 线上已部署版本。
+- 合仓时改写过自有提交（去掉 Claude 署名），**旧文档里的提交号如果查不到，到旧仓库 `~/Developer/forks/MaaMacGui`、`~/Developer/personal/maa-remote` 查**。
+- 开发副本 `~/Developer/forks/maa-remote-devhome`：`scripts` 软链到 `~/Developer/wados-maa/maa-remote/scripts`。
+- Release 构建输出：`~/Developer/forks/wados-maa-build/<名字>`（`-derivedDataPath`），不在仓库里。
 
-- 开发副本 `~/Developer/forks/maa-remote-devhome`：`scripts` 是软链，指向 `~/Developer/wados-maa/maa-remote/scripts`。
-- Release 构建输出：`~/Developer/forks/wados-maa-build/redesign/dd`（`-derivedDataPath`）。
-
-下面「当前现场」「工作位置」是 2026-11-06 开工时的情况，路径以上表为准。
+下面「当前现场」「工作位置」是 2026-11-06 开工时的情况，只作历史记录。
 
 ## 背景
 
@@ -91,12 +88,7 @@ S1 有三项 P0，必须在第一次以去沙盒状态启动 App **之前**做�
   - 结束后关掉游戏。
 - **需要用户在系统里点的事**（授辅助功能权限、在钥匙串里允许签名等）：停下来请用户做。
 - **拿不准就停下来问**：可以一次问一批，每条给出选项和推荐。时间一律按北京时间说。
-- **提交规范**：两个仓库都按 maa-remote `AGENTS.md` 的规范来：
-  - 中文标题，写用户能看到的效果；
-  - type 只用 feat / fix / refactor / test / docs / ci / chore；
-  - 一个 commit 只做一件事；
-  - 末尾带 `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`，**不写会话链接**；
-  - 两边都不 push，还没有 origin。
+- **提交规范**：按根目录 `AGENTS.md`「Commit message」一节。
 - **测试**：
   - maa-remote 每次提交前，在 worktree 根目录跑 `python3 -m unittest discover -s tests`；
   - 动了类型或 except 时，再跑 `uvx ruff@0.17.3 check` 和 `uvx pyright@1.1.414`；

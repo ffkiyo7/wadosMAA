@@ -1239,7 +1239,7 @@ task_names = ["RaidConfirm", "ChangeToRaidDifficulty"]
 ## 7. 部署链路（`deploy.py`）
 
 ```bash
-python3 -m unittest discover -s tests -v   # 必须在仓库根目录跑（测试要 import 根目录的 deploy.py）
+python3 -m unittest discover -s tests -v   # 必须在 maa-remote/ 里跑（测试要 import 同目录的 deploy.py）
 python3 deploy.py                          # 幂等；输出 {"ok":true,"changed":[…],"backup":"…"}
 python3 deploy.py --check                  # 只读：脚本/技能/maa-cli 配置逐字节、adapter 补丁、gateway 解释器、venv、组件版本漂移
 ```
@@ -1302,7 +1302,7 @@ python3 deploy.py --check                  # 只读：脚本/技能/maa-cli 配�
      种子不同。比内容会让 `--check` 每跑完一场日常就永久变红，红久了就没人看了。
      它仍然照常部署、照常查存在。
    - 其余文件一律仍比内容，**尤其 `resource/tasks/tasks.json`**——没有任何运行时逻辑重写它，
-     它漂移就是真事故（`49da169` 的成果）。豁免名单要加项必须同时说明“谁在运行时重写它”。
+     它漂移就是真事故（`dd580d1` 的成果）。豁免名单要加项必须同时说明“谁在运行时重写它”。
 3. **状态的部署策略不同**（`deploy_state()`，`deploy.py`）：
    - `config.json`：**逐键合并**，仓库的键覆盖同名键，本地新增键保留。
      **例外是三个运行时缓存键**（`deploy.PRESERVED_RUNTIME_CACHE_KEYS`，不变量 #25）：
@@ -1456,7 +1456,7 @@ cron 表达式是 **UTC**（`config.yaml: timezone: Etc/UTC`），所以 Depot �
 
 ```bash
 # 1. 改代码
-# 2. 跑测试（必须在仓库根目录）
+# 2. 跑测试（必须在 maa-remote/ 里）
 python3 -m unittest discover -s tests -v
 # 2.5 静态检查（见下文「静态检查」，两条都必须 0 报错）
 uvx ruff@0.17.3 check && uvx pyright@1.1.414
@@ -1556,7 +1556,7 @@ env -u PYTHONDONTWRITEBYTECODE /usr/bin/python3 -m unittest discover -s tests
 被两个以上模块用到的桩 / fixture（`SR_INDEX` / `SR_LAYOUT` / `_nav_patch()` / `_offline_market()`、
 `needs_yaml` 等）放 `_helpers.py`；只有一个模块用的留在那个模块里（如 `test_daily.isolate_stage_index`、
 `test_farming.FarmingFixture`）。跑单个文件：`python3 -m unittest discover -s tests -p test_daily.py`
-（`deploy.py` 在仓库根，从 `tests/` 里直接 `-m unittest test_daily` 会 import 不到）。
+（`deploy.py` 在 `maa-remote/` 根，从 `tests/` 里直接 `-m unittest test_daily` 会 import 不到）。
 
 **脚本暂不拆**（2026-11-04 定）。`maa_action.py` / `maa_daily.py` / `maa_copilot_worker.py` 都上千行，
 但入口文件名是对外契约：cron（`~/.hermes/cron/jobs.json`）按文件名跑 `maa_plan_card.py` /
@@ -1588,7 +1588,7 @@ MAA_LIVE_TESTS=1 python3 -m unittest tests.test_copilot -k LiveContract -v
 
 ### 静态检查（ruff + pyright）
 
-只是开发工具：**运行脚本仍然是纯标准库**，部署时不带任何依赖。配置在仓库根的
+只是开发工具：**运行脚本仍然是纯标准库**，部署时不带任何依赖。配置在 `maa-remote/` 下的
 `pyproject.toml`（只有 `[tool.ruff]` / `[tool.pyright]`，没有 `[project]`），版本钉死，用 `uvx`
 现下现跑（第一次会从 PyPI 下载，pyright 还会顺带拉一份 Node 版本）：
 
@@ -1640,7 +1640,7 @@ uvx pyright@1.1.414          # 同一范围；pythonVersion = 3.11、basic 模�
 
 ### CI（GitHub Actions）
 
-`.github/workflows/tests.yml`：push 到 `playcover` 和任何 PR 时跑，`runs-on: macos-latest`（线上只跑 macOS，
+仓库根的 `.github/workflows/tests.yml`：push 到 `main` 和 PR 时、且动了 `maa-remote/**` 才跑，命令都在 `maa-remote/` 里执行，`runs-on: macos-latest`（线上只跑 macOS，
 ubuntu 可能冒出与生产无关的红）。两个 job：
 
 - **unittest**：矩阵 Python 3.11 / 3.12（`actions/setup-python`），每个版本跑两遍——
@@ -1920,7 +1920,7 @@ python3 -c "import json;print(json.load(open('$HOME/.hermes/state/agent-book/but
 
 ## 12. 外部消费者契约（Wado's MAA）
 
-Wado's MAA（`~/Developer/forks/MaaMacGui` 的 fork）**只通过下面这些东西**和 maa-remote 打交道。
+Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东西**和 maa-remote 打交道。
 这里列出的字段、路径、命令和格式改了，GUI 就会坏：要改，就同一天在 fork 里改，并在两边的提交说明里写明。
 
 ### 12.1 怎么调

@@ -1,7 +1,7 @@
 # S0b spike：更新源对照、版本信号与冲突处理
 
 > 2026-11-06 12:15（北京时间）。**只读调研**：只读了文件，跑过 `maa version`、`maa --help` 和各子命令的 `--help`、`brew info`、`git -C <MaaResource> log -1`、`python3 deploy.py --check`。没有跑任何 update / install / run。
-> 现场：maa-remote `dce5e97`（线上 `~/.hermes/scripts/` 与仓库一致，`deploy.py --check` 的 `mismatched` 为空）；MaaMacGui `b2c99a8`。
+> 现场：maa-remote `fbf3f19`（线上 `~/.hermes/scripts/` 与仓库一致，`deploy.py --check` 的 `mismatched` 为空）；MaaMacGui `b2c99a8`。
 > 本文只出方案，不含实现。
 
 ## 0. 结论
