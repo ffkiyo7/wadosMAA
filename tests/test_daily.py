@@ -1504,6 +1504,19 @@ class GameProbeTests(unittest.TestCase):
         self.assertEqual(len(running), 1)
         self.assertTrue(running[0].kwargs.get("new_run"))
 
+    def test_run_start_exposes_this_runs_log_path(self) -> None:
+        # GUI 运行中靠 last_run.log 跟 maa-cli 的阶段（DEV_GUIDE §12.3），
+        # 所以开跑那一笔就要带上**本场**的日志路径，不能等收尾。
+        result = self._execute("am", online=False)
+        running = next(
+            c.args[0] for c in result.merge.call_args_list
+            if c.args[0].get("status") == "running"
+        )
+        log = Path(str(running["log"]))
+        self.assertEqual(log.parent, maa_daily.RUNS_DIR)
+        self.assertTrue(log.name.endswith("-am.log"), log.name)
+        self.assertEqual(log.name.removesuffix(".log"), Path(str(running["snapshot"])).stem)
+
     def test_manual_run_records_who_picked_the_stage(self) -> None:
         # 2026-11-06：GUI 派的手动场快照里写成了 discord。
         for source, expected in (("gui", "gui"), ("discord", "discord"), (None, "discord")):

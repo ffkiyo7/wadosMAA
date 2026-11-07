@@ -837,7 +837,8 @@ def log_tail() -> tuple[bool, str]:
     summary = str(state.get("summary", "")).strip()
     # Existing state may have been produced by the pre-translation runner.
     # Rebuild it from the local log without ever exposing raw CLI lines.
-    if not summary.startswith("🌟 总体："):
+    # 运行中 `log` 已指向本场还在追加的日志（§12.3），拿半截日志拼不出总结，不读。
+    if not summary.startswith("🌟 总体：") and state.get("status") != "running":
         log_path = Path(str(state.get("log", "")))
         if log_path.is_file():
             from maa_daily import extract_summary

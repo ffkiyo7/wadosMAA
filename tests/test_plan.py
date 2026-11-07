@@ -276,6 +276,19 @@ class LogTailTests(unittest.TestCase):
         self.assertIn("📋 最近一次结果（2026-09-09 08:31:02）", message)
         self.assertIn("🌟 总体：✅ 成功", message)
 
+    def test_running_state_does_not_summarize_the_half_written_log(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "run.log"
+            log_path.write_text("StartUp Start\nFight Start\n", encoding="utf-8")
+            state = {"status": "running", "summary": "", "log": str(log_path)}
+            with patch.object(maa_action, "load_json", return_value=state), patch.object(
+                maa_daily, "extract_summary"
+            ) as extract:
+                ok, message = maa_action.log_tail()
+        self.assertTrue(ok)
+        extract.assert_not_called()
+        self.assertIn("暂无可解析的执行明细", message)
+
     def test_legacy_state_is_rebuilt_from_the_log_without_raw_cli(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             log_path = Path(raw) / "run.log"

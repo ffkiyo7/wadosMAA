@@ -1845,7 +1845,10 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 "finished_at": None,
                 "duration_seconds": None,
                 "return_code": None,
-                "log": None,
+                # 本场自己的日志路径不算「上一场的终态字段」：GUI 运行中靠它逐行跟
+                # maa-cli 的 `<Task> Start` 显示当前阶段（DEV_GUIDE §12.3）。文件此刻
+                # 可能还不存在，或仍是同名旧场的内容，等 maa run 开写才会被截断重写。
+                "log": str(log_path),
                 "screenshot": None,
                 "screenshot_error": None,
                 "startup_error": None,
