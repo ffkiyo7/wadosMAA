@@ -1,6 +1,20 @@
 # 开发会话简报：Wado's MAA（S1–S6）
 
-> 2026-11-06 写给新开的开发会话（opus，high）。新会话开在 `~/Developer/forks/MaaMacGui`，第一句话说「按 docs/SESSION_BRIEF.md 开工」即可。
+> 2026-11-06 写给新开的开发会话（opus，high）。当时新会话开在 `~/Developer/forks/MaaMacGui`，第一句话说「按 docs/SESSION_BRIEF.md 开工」即可。
+
+## 现在的位置（2026-11-07 起）
+
+工作区是 `~/Developer/wados-maa`（不是 git 仓库），新会话开在这里，先读它的 `AGENTS.md` 和 `HANDOFF.md`。
+
+| 目录 | 是什么 | 分支 | 主仓库 |
+|---|---|---|---|
+| `~/Developer/wados-maa/gui` | 本仓库（界面重设计）的 worktree | `claude/redesign-ui-60930c` | `~/Developer/forks/MaaMacGui`（`remotectrl-supported-dev-1106`） |
+| `~/Developer/wados-maa/maa-remote` | maa-remote 的 worktree（K2） | `remotectrl-supported-dev-1106` | `~/Developer/personal/maa-remote`（`main`） |
+
+- 开发副本 `~/Developer/forks/maa-remote-devhome`：`scripts` 是软链，指向 `~/Developer/wados-maa/maa-remote/scripts`。
+- Release 构建输出：`~/Developer/forks/wados-maa-build/redesign/dd`（`-derivedDataPath`）。
+
+下面「当前现场」「工作位置」是 2026-11-06 开工时的情况，路径以上表为准。
 
 ## 背景
 
@@ -39,17 +53,13 @@
 
 ### 工作位置
 
-- **fork**：就在 `~/Developer/forks/MaaMacGui` 的 `remotectrl-supported-dev-1106` 分支上改。
-- **maa-remote**（K2）：先建一个 worktree，maa-remote 的改动全部在那里做：
-
-  ```bash
-  git -C ~/Developer/personal/maa-remote worktree add ~/Developer/forks/maa-remote-dev -b remotectrl-supported-dev-1106 main
-  ```
+- **fork**：S1–S6 在 `~/Developer/forks/MaaMacGui` 的 `remotectrl-supported-dev-1106` 分支上改；界面重设计在 worktree `~/Developer/wados-maa/gui`（分支 `claude/redesign-ui-60930c`）上改。
+- **maa-remote**（K2）：改动全部在 worktree `~/Developer/wados-maa/maa-remote`（分支 `remotectrl-supported-dev-1106`）里做，已经建好。
 
   **不许碰** `~/Developer/personal/maa-remote` 的工作区和 main。
 - **开发期状态副本**（K1）：
   - 把 `~/.hermes/state/maa/` 和 `~/.hermes/state/agent-book/` 复制到 `~/Developer/forks/maa-remote-devhome/state/` 下；
-  - GUI 和它调用的脚本一律带 `HERMES_HOME=~/Developer/forks/maa-remote-devhome`，脚本从 `maa-remote-dev` worktree 里取；
+  - GUI 和它调用的脚本一律带 `HERMES_HOME=~/Developer/forks/maa-remote-devhome`；副本的 `scripts` 软链到 `~/Developer/wados-maa/maa-remote/scripts`；
   - **不要复制 `~/.hermes/.env`**：副本里没有 `DISCORD_BOT_TOKEN`，开发期就不会真的发 Discord，这是故意的。发 Discord 的路径用单测覆盖。
 
 ### 顺序

@@ -81,6 +81,8 @@ S0d 的进展：
 
 ### 界面重设计（分支 `claude/redesign-ui-60930c`，2026-11-06 17:30 北京时间）
 
+代码在 worktree `~/Developer/wados-maa/gui`，maa-remote 那边在 `~/Developer/wados-maa/maa-remote`；Release 构建输出在 `~/Developer/forks/wados-maa-build/redesign/dd`。
+
 按定稿原型（https://claude.ai/artifact/S3SiwmWqxS7i8SGKTHNbRK）重写界面，代码在 `MeoAsstMac/Remote/Redesign/`，`ContentView` 换成 `RedesignRoot`。功能和底层调用不变。S7 上线后再合并。
 
 | 页 | 提交 | 状态 |
@@ -119,7 +121,7 @@ S0d 的进展：
 
 - maa-remote：合进 main 并部署，`SCRIPT_NAMES` 新增 `maa_upstream.py`、`maa_schedule.py`、`maa_settings.py`；清掉线上残留的 `roguelike.json` 和 `hermes:btn:maa-roguelike:*`。
 - 线上 `config.json` 可以加 `upstream_proxy`（例如 `http://127.0.0.1:7890`），GUI 从 Finder 起时就有代理。
-- GUI 设置 →「maa-remote」把 HERMES_HOME 改成 `~/.hermes`。开发副本里的 `scripts` 是指向 `maa-remote-dev/scripts` 的软链，切走后就不用了。
+- GUI 设置 →「maa-remote」把 HERMES_HOME 改成 `~/.hermes`。开发副本里的 `scripts` 是指向 `~/Developer/wados-maa/maa-remote/scripts` 的软链，切走后就不用了。
 - 恢复 cron 前，在 GUI「场次」页确认四条任务的时间都对齐（`in_sync`）。
 
 ---
