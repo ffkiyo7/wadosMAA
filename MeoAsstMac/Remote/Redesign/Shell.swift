@@ -235,6 +235,13 @@ struct RunStateView: View {
                 } else {
                     Circle().fill(WM.ok).frame(width: 8, height: 8)
                     Text("空闲").fontWeight(.semibold)
+                    if let success = lastSuccess(now: context.date) {
+                        HStack(spacing: 3) {
+                            Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(WM.ok)
+                            Text(success.text).foregroundStyle(WM.f2).monospacedDigit()
+                        }
+                        .help(success.tip)
+                    }
                     if let next = nextSession(now: context.date) {
                         Text("下一场 \(next)").foregroundStyle(WM.f2).lineLimit(1)
                     }
@@ -248,6 +255,27 @@ struct RunStateView: View {
     private var busyText: String? {
         if viewModel.status != .idle { return "本 App 的上游任务" }
         return store.lockHolder?.text
+    }
+
+    /// 上次成功：今天只写时刻，昨天写「昨天 22:16」，更早只写日期。判成败只看 `status`。
+    private func lastSuccess(now: Date) -> (text: String, tip: String)? {
+        let run = store.lastRun
+        guard run["status"]?.string == "success",
+            let finished = run["finished_at"]?.string.flatMap(RunLock.parseISO)
+        else { return nil }
+        let clock = RunLock.beijingClock(finished)
+        let calendar = Beijing.calendar
+        let text =
+            if calendar.isDate(finished, inSameDayAs: now) {
+                clock
+            } else if let yesterday = calendar.date(byAdding: .day, value: -1, to: now),
+                calendar.isDate(finished, inSameDayAs: yesterday)
+            {
+                "昨天 \(clock)"
+            } else {
+                Beijing.monthDay(finished)
+            }
+        return (text, "上次成功：\(LastRunText.title(run))，\(Beijing.monthDay(finished)) \(clock)")
     }
 
     private func nextSession(now: Date) -> String? {
