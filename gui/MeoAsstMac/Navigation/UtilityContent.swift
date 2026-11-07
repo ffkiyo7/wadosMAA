@@ -1,0 +1,142 @@
+//
+//  UtilityContent.swift
+//  MAA
+//
+//  Created by hguandl on 19/4/2023.
+//
+
+import SwiftUI
+
+struct UtilityContent: View {
+    @EnvironmentObject private var viewModel: MAAViewModel
+    @Binding var selection: UtilityEntry?
+
+    var body: some View {
+        List(UtilityEntry.allCases, selection: $selection) { entry in
+            if entry != .video {
+                entry.label
+            }
+        }
+        .toolbar(content: listToolbar)
+    }
+
+    // MARK: - Toolbar
+
+    @ToolbarContentBuilder private func listToolbar() -> some ToolbarContent {
+        ToolbarItemGroup {
+            switch viewModel.status {
+            case .pending:
+                Button(action: {}) {
+                    ProgressView().controlSize(.small)
+                }
+                .disabled(true)
+            case .busy:
+                Button(action: stop) {
+                    Label("停止", systemImage: "stop.fill")
+                }
+                .help("停止")
+            case .idle:
+                switch selection {
+                case .recruit, .depot, .oper:
+                    Button(action: start) {
+                        Label("开始", systemImage: "play.fill")
+                    }
+                    .help("开始")
+                default:
+                    Button(action: {}) {
+                        Label("停止", systemImage: "stop.fill")
+                    }
+                    .disabled(true)
+                }
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private func stop() {
+        Task {
+            try await viewModel.stop()
+        }
+    }
+
+    private func start() {
+        Task {
+            switch selection {
+            case .recruit:
+                try await viewModel.recognizeRecruit()
+            case .depot:
+                try await viewModel.recognizeDepot()
+            case .oper:
+                try await viewModel.recognizeOperBox()
+            default:
+                break
+            }
+        }
+    }
+}
+
+struct UtilityDetailContent_Previews: PreviewProvider {
+    static var previews: some View {
+        NavigationView {
+            UtilityContent(selection: .constant(.recruit))
+        }
+    }
+}
+
+// MARK: - Utility Entry
+
+enum UtilityEntry: Int, CaseIterable, Codable, Identifiable {
+    var id: Self { self }
+    case recruit
+    case depot
+    case oper
+    case video
+    case gacha
+    case minigame
+    case maatools
+}
+
+extension UtilityEntry: CustomStringConvertible {
+    var description: String {
+        switch self {
+        case .recruit:
+            return String(localized: "公招词条")
+        case .depot:
+            return String(localized: "仓库材料")
+        case .oper:
+            return String(localized: "干员列表")
+        case .video:
+            return String(localized: "视频作业")
+        case .gacha:
+            return String(localized: "干员寻访")
+        case .minigame:
+            return String(localized: "小游戏")
+        case .maatools:
+            return String(localized: "分辨率指南")
+        }
+    }
+
+    var iconImage: String {
+        switch self {
+        case .recruit:
+            return "person.text.rectangle"
+        case .depot:
+            return "house"
+        case .oper:
+            return "person.fill.checkmark"
+        case .video:
+            return "video"
+        case .gacha:
+            return "person.fill.viewfinder"
+        case .minigame:
+            return "gamecontroller.fill"
+        case .maatools:
+            return "macwindow"
+        }
+    }
+
+    var label: some View {
+        Label(description, systemImage: iconImage)
+    }
+}

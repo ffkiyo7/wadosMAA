@@ -1,0 +1,329 @@
+//
+//  RoguelikeSettingsView.swift
+//  MeoAsstMac
+//
+//  Created by hguandl on 9/10/2022.
+//
+
+import SwiftUI
+
+struct RoguelikeSettingsView: View {
+    @Binding var config: RoguelikeConfiguration
+
+    @Environment(\.defaultMinListRowHeight) private var rowHeight
+
+    var body: some View {
+        ScrollView {
+            Form {
+                generalSettings()
+                Divider()
+                goldSettings()
+                Divider()
+                squadSettings()
+                Divider()
+                strategySettings()
+            }
+            .animation(.default, value: config)
+            .padding()
+        }
+    }
+
+    @ViewBuilder private func generalSettings() -> some View {
+        Picker("主题", selection: $config.theme) {
+            ForEach(RoguelikeConfiguration.Theme.allCases, id: \.self) {
+                Text($0.description).tag($0)
+            }
+        }
+
+        Picker("难度", selection: $config.difficulty) {
+            ForEach(config.theme.difficulties) {
+                Text($0.description).tag($0)
+            }
+        }
+
+        TextField("最多探索次数", value: $config.starts_count, format: .number)
+    }
+
+    @ViewBuilder private func goldSettings() -> some View {
+        HStack {
+            Toggle("投资源石锭", isOn: $config.investment_enabled)
+                .disabled(config.mode == .investment)
+            if config.mode == .investment {
+                Toggle("储备源石锭达到上限时停止", isOn: $config.stop_when_investment_full)
+            }
+        }
+        if config.mode == .investment {
+            TextField("最多投资数量", value: $config.investments_count, format: .number)
+        }
+    }
+
+    @ViewBuilder private func squadSettings() -> some View {
+        Picker("开局分队", selection: $config.squad) {
+            ForEach(config.theme.squads, id: \.self) { squad in
+                Text(squad).tag(squad)
+            }
+        }
+
+        Picker("开局职业组", selection: $config.roles) {
+            ForEach(config.theme.roles, id: \.self) { role in
+                Text(role).tag(role)
+            }
+        }
+
+        TextField("开局干员（单个）", text: $config.core_char)
+
+        // 开局干员不借助战（K11）。
+
+    }
+
+    @ViewBuilder private func startCollectibles() -> some View {
+        LazyVGrid(columns: .init(repeating: .init(.flexible()), count: 4), alignment: .leading) {
+            Toggle("热水壶", isOn: $config.collectible_mode_start_list.hot_water)
+            Toggle("盾", isOn: $config.collectible_mode_start_list.shield)
+            Toggle("源石锭", isOn: $config.collectible_mode_start_list.ingot)
+            if config.theme != .JieGarden {
+                Toggle("希望", isOn: $config.collectible_mode_start_list.hope)
+            }
+            Toggle("随机奖励", isOn: $config.collectible_mode_start_list.random)
+            if config.theme == .Mizuki {
+                Toggle("钥匙", isOn: $config.collectible_mode_start_list.key)
+                Toggle("骰子", isOn: $config.collectible_mode_start_list.dice)
+            }
+            if config.theme == .Sarkaz {
+                Toggle("构想", isOn: $config.collectible_mode_start_list.ideas)
+            }
+            if config.theme == .JieGarden {
+                Toggle("票券", isOn: $config.collectible_mode_start_list.ticket)
+            }
+        }
+    }
+
+    @ViewBuilder private func strategySettings() -> some View {
+        Picker("策略", selection: $config.mode) {
+            ForEach(config.theme.modes, id: \.self) {
+                Text($0.description(theme: config.theme)).tag($0)
+            }
+        }
+
+        if config.mode == .collectible {
+            Picker("烧水分队", selection: $config.collectible_mode_squad) {
+                ForEach(config.theme.squads, id: \.self) {
+                    Text($0).tag($0)
+                }
+            }
+
+            LabeledContent("烧水奖励", value: "").padding(.top, 1)
+            startCollectibles().padding(.top, -rowHeight)
+
+            Divider()
+        }
+
+        if config.mode == .exp {
+            HStack {
+                Toggle("满级后自动停止", isOn: $config.stop_at_max_level)
+                if config.theme != .Phantom {
+                    Toggle("在第五层BOSS前暂停", isOn: $config.stop_at_final_boss)
+                }
+            }
+        }
+
+        if config.mode == .investment, config.theme != .BlackFlow {
+            Toggle("投资后进二层", isOn: $config.investment_with_more_score)
+        }
+
+        if config.mode == .collectible {
+            Toggle("刷开局启用购物", isOn: $config.collectible_mode_shopping)
+            if config.supportsStartWithEliteTwo {
+                HStack {
+                    Toggle("凹开局干员精二直升", isOn: $config.start_with_elite_two)
+                        .disabled(config.use_support)
+                    if config.start_with_elite_two {
+                        Toggle("只凹直升不凹其他", isOn: $config.only_start_with_elite_two)
+                    }
+                }
+            }
+        }
+
+        if config.theme == .Mizuki {
+            Toggle("刷新商店（指路鳞）", isOn: $config.refresh_trader_with_dice)
+        }
+
+        if config.theme == .Sami {
+            HStack {
+                Toggle("使用密文板", isOn: $config.use_foldartal)
+                Toggle("检测获取的坍缩范式", isOn: $config.check_collapsal_paradigms)
+            }
+            if config.mode == .collectible {
+                TextField("一层远见密文板", text: $config.first_floor_foldartal)
+                if config.squad == "生活至上分队" {
+                    TextField("分队开局密文板", text: $config.semicolonString(for: \.start_foldartal_list))
+                }
+            }
+            if config.mode == .clpPds {
+                TextField("待刷坍缩范式", text: $config.semicolonString(for: \.expected_collapsal_paradigms))
+            }
+        }
+
+        if config.mode == .squad {
+            HStack {
+                Toggle("月度小队自动切换", isOn: $config.monthly_squad_auto_iterate)
+                if config.monthly_squad_auto_iterate {
+                    Toggle("月度小队通讯", isOn: $config.monthly_squad_check_comms)
+                }
+            }
+        }
+
+        if config.mode == .exploration {
+            Toggle("深入调查自动切换", isOn: $config.deep_exploration_auto_iterate)
+        }
+
+        if config.mode == .findPlaytime {
+            Picker("目标常乐节点", selection: $config.jieFindPlaytimeTarget) {
+                ForEach(RoguelikeConfiguration.JiePlaytimeTarget.allCases, id: \.self) {
+                    Text($0.description).tag($0)
+                }
+            }
+        }
+
+        if config.theme == .BlackFlow, config.mode == .babyAnimal {
+            Picker("目标襁褓动物", selection: $config.blackflowCultivationTarget) {
+                ForEach(RoguelikeConfiguration.BlackflowCultivation.allCases, id: \.self) {
+                    Text($0.description).tag($0)
+                }
+            }
+        }
+    }
+}
+
+#Preview {
+    struct Preview: View {
+        @State var config = RoguelikeConfiguration()
+        var body: some View {
+            RoguelikeSettingsView(config: $config)
+        }
+    }
+    return Preview()
+}
+
+// MARK: - Constants
+
+extension RoguelikeConfiguration.Mode {
+    func description(theme: RoguelikeConfiguration.Theme) -> String {
+        switch (self, theme) {
+        case (.exp, .BlackFlow):
+            String(localized: "刷等级，快速飞三层")
+        case (.investment, .BlackFlow):
+            String(localized: "刷源石锭，投资完成后自动退出")
+        case (.exp, _):
+            String(localized: "刷等级，尽可能稳定地打更多层数")
+        case (.investment, _):
+            String(localized: "刷源石锭，投资完成后自动退出")
+        case (.collectible, _):
+            String(localized: "刷开局，刷取热水壶或精二干员开局")
+        case (.clpPds, _):
+            String(localized: "刷坍缩范式，遇到非稀有坍缩范式后重开")
+        case (.squad, _):
+            String(localized: "刷月度小队，尽可能稳定地打更多层数")
+        case (.exploration, _):
+            String(localized: "刷深入调查，尽可能稳定地打更多层数")
+        case (.findPlaytime, _):
+            String(localized: "刷常乐节点，第一层进洞，找不到需要的节点就重开")
+        case (.babyAnimal, _):
+            String(localized: "刷襁褓动物")
+        }
+    }
+}
+
+extension RoguelikeConfiguration.Theme: CustomStringConvertible {
+    var description: String {
+        switch self {
+        case .Phantom:
+            return String(localized: "傀影与猩红血钻")
+        case .Mizuki:
+            return String(localized: "水月与深蓝之树")
+        case .Sami:
+            return String(localized: "探索者的银凇止境")
+        case .Sarkaz:
+            return String(localized: "萨卡兹的无终奇语")
+        case .JieGarden:
+            return String(localized: "岁的界园志异")
+        case .BlackFlow:
+            return String(localized: "沉沦者的黑流树海")
+        }
+    }
+
+    var difficulties: [RoguelikeConfiguration.Difficulty] {
+        switch self {
+        case .Phantom:
+            return RoguelikeConfiguration.Difficulty.upto(maximum: 15)
+        case .Mizuki:
+            return RoguelikeConfiguration.Difficulty.upto(maximum: 18)
+        case .Sami:
+            return RoguelikeConfiguration.Difficulty.upto(maximum: 15)
+        case .Sarkaz:
+            return RoguelikeConfiguration.Difficulty.upto(maximum: 18)
+        case .JieGarden:
+            return RoguelikeConfiguration.Difficulty.upto(maximum: 18)
+        case .BlackFlow:
+            return RoguelikeConfiguration.Difficulty.upto(maximum: 15)
+        }
+    }
+
+    var squads: [String] {
+        switch self {
+        case .Phantom:
+            [
+                "指挥分队", "集群分队", "后勤分队", "矛头分队",
+                "突击战术分队", "堡垒战术分队", "远程战术分队", "破坏战术分队",
+                "研究分队", "高规格分队",
+            ]
+        case .Mizuki:
+            [
+                "心胜于物分队", "物尽其用分队", "以人为本分队",
+                "指挥分队", "集群分队", "后勤分队", "矛头分队",
+                "突击战术分队", "堡垒战术分队", "远程战术分队", "破坏战术分队",
+                "研究分队", "高规格分队",
+            ]
+        case .Sami:
+            [
+                "指挥分队", "集群分队", "后勤分队", "矛头分队",
+                "突击战术分队", "堡垒战术分队", "远程战术分队", "破坏战术分队",
+                "高规格分队", "特训分队",
+                "科学主义分队", "生活至上分队", "永恒狩猎分队",
+            ]
+        case .Sarkaz:
+            [
+                "魂灵护送分队", "博闻广记分队", "蓝图测绘分队", "专业人士分队",
+                "指挥分队", "集群分队", "后勤分队", "矛头分队",
+                "突击战术分队", "堡垒战术分队", "远程战术分队", "破坏战术分队",
+                "高规格分队", "因地制宜分队",
+                "点刺成锭分队", "拟态学者分队", "异想天开分队",
+            ]
+        case .JieGarden:
+            [
+                "指挥分队", "特勤分队", "后勤分队",
+                "突击战术分队", "堡垒战术分队", "远程战术分队", "破坏战术分队",
+                "高规格分队", "高台突破分队", "地面突破分队",
+                "游客分队", "司岁台分队", "天师府分队",
+                "花团锦簇分队", "棋行险着分队", "岁影回音分队",
+                "知学分队", "商贾分队",
+            ]
+        case .BlackFlow:
+            [
+                "特勤分队", "矛头分队", "高台突破分队", "地面突破分队",
+                "本源研修分队", "文明开化分队", "开拓者分队", "多边贸易分队",
+                "地质调查分队", "指挥分队", "后勤分队",
+                "突击战术分队", "堡垒战术分队", "远程战术分队", "破坏战术分队",
+            ]
+        }
+    }
+
+    var roles: [String] {
+        switch self {
+        case .JieGarden, .BlackFlow:
+            ["先手必胜", "稳扎稳打", "取长补短", "灵活部署", "坚不可摧", "随心所欲"]
+        default:
+            ["先手必胜", "稳扎稳打", "取长补短", "随心所欲"]
+        }
+    }
+}

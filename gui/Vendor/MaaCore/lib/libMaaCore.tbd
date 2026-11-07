@@ -1,0 +1,10 @@
+--- !tapi-tbd
+tbd-version:     4
+targets:         [ x86_64-macos, arm64-macos ]
+install-name:    '@rpath/libMaaCore.dylib'
+current-version: 0
+compatibility-version: 0
+exports:
+  - targets:         [ x86_64-macos, arm64-macos ]
+    symbols:         [ _AsstAppendTask, _AsstAsyncClick, _AsstAsyncConnect, _AsstAsyncScreencap, _AsstBackToHome, _AsstConnect, _AsstConnected, _AsstCreate, _AsstCreateEx, _AsstDestroy, _AsstGetImage, _AsstGetImageBgr, _AsstGetItemName, _AsstGetMapLevelKey, _AsstGetNullSize, _AsstGetTasksList, _AsstGetUUID, _AsstGetVersion, _AsstLoadResource, _AsstLog, _AsstRunning, _AsstSetConnectionExtras, _AsstSetInstanceOption, _AsstSetStaticOption, _AsstSetTaskParams, _AsstSetUserDir, _AsstStart, _AsstStop ]
+...
