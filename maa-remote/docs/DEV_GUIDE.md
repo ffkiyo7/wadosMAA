@@ -36,7 +36,7 @@
 |---|---|
 | `open -a <emulator_app>` 开机，等 `sys.boot_completed`（180s） | `launch_game()`：`open -a <playcover_app_path>`（容器里那个 `.app`，**不用** `open -b`：游戏在跑时 -10670）；`wait_for_game()` 轮询 MaaTools `SIZE`（`game_launch_timeout`，120s） |
 | `pm path` 确认装了国服 | `verify_game_installed()`：可执行文件存在 + `App Settings/<bundle>.plist` 里 `maaTools = true` 且端口一致 |
-| `settle_android_runtime()` 等 `app_process` 安静 | `settle_game_window()`：窗口不在 `game_display_name` 那块虚拟屏上就用 `winmove` 挪过去（PlayCover 每次都把窗口开在当前活动的屏上）；还不在屏上就 `open -a` 激活一次，再查；查不出不阻断 |
+| `settle_android_runtime()` 等 `app_process` 安静 | `settle_game_window()`：窗口不在 `game_display_name` 那块虚拟屏上就用 `winmove` 挪过去（PlayCover 每次都把窗口开在当前活动的屏上）；还截不到就逐级升级：激活 → 切到访达再激活 →（`allow_restart` 时）重启游戏；查不出不阻断 |
 | `emulator_is_online()`：`pgrep` 或 `adb getprop` | `game_is_online()`：只看 `pgrep -f <可执行文件完整路径>`（MaaTools 在游戏进程里，进程不在端口必然不在）。预算 `game_probe_timeout` |
 | `adb exec-out screencap -p` | `capture_geometry()`：MaaTools `SCRN`（RGBA，Retina 3840×2160 降采样到 1920 宽）；回 0 字节时退到 `screencapture -l<窗口号>`（要录屏权限，图里带标题栏，`top` 记它的高度） |
 | `adb shell input tap x y` | `tap()`：1920×1080 游戏坐标按 `SIZE` 换算，MaaTools `TUCH` Began + Ended |
@@ -108,13 +108,41 @@ winmove 要调用方有**辅助功能**权限，线上是 Hermes gateway 那个 
 那场却全部完成；按同样时序真机复现两次也都正常。能确定的只有「从 Q24G2 的台前挪走」这一步
 有风险，所以上面的窗口恢复让游戏直接开在 MAA-Game，绕开这一步。
 
+**2026-11-08 早场事故**（全程 `ScreencapFailed`，后备关补跑同样失败）。这次显示器没接，
+主屏是 BetterDisplay 的无名屏。08:00:56 游戏冷启动，窗口按窗口恢复开在 MAA-Game 台前；
+08:01:02.753 游戏被激活一次，0.2 s 后台前调度把它收成 **143×124 @ (1936, 493)** 的缩略图，
+收进 **MAA-Game 自己的**侧边栏。此后游戏一直是前台（`UserInteractiveFocal`），所以每次
+`open -a` 都什么也没发生，摆窗 8 次全失败。同时重开闸门被 MaaCore 那句 `AllTasksCompleted`
+骗过，一趟都没重开。
+
+当晚真机 spike（显示器开着）的结论：激活一个**不在前台**的游戏，1 秒内就能把它请回台前，
+`open -a`、AX 设前台、关掉挡路的窗口都行；AX 的 `kAXRaiseAction` 加 `kAXMainAttribute`
+**无效**；「显示桌面」只把窗口推到屏边，不是这个机制；重启游戏约 36 s，会开回 MAA-Game。
+「前台却被收进侧边栏」的状态没能复现。详见 `docs/PLAN_SHELVED_WINDOW.md`。
+
+于是 `settle_game_window()` 截不到时逐级升级，救回来就停：
+
+1. 激活（`launch_game()`）；
+2. 切走再切回：`front_finder()` 用 `winmove --front <访达 pid>` 把访达设成前台，再激活游戏。
+   不用 `open -b com.apple.finder`，因为访达没窗口时它会新开一个，可能正好开在 MAA-Game 上。
+   这一级是从 spike 推断的，没有实测；
+3. 重启游戏（`allow_restart=True` 才做）：`close_game()` → `launch_game()` → `wait_for_game()`。
+   只在一个键都没点过的时候放行：开跑前，以及 `run_maa_resilient()` 重开前。
+
+`trail` 参数收集每一步做了什么、窗口变成什么样（`摆窗：<步骤> → <尺寸 @ 位置 状态>（耗时）`），
+只写进运行日志：开跑前的那份经 `run_maa_resilient(log_preamble=…)` 写在日志开头。
+
 三道防线：
 
-1. 开跑前 `settle_game_window()`（含挪屏）；
+1. 开跑前 `settle_game_window(allow_restart=True)`（含挪屏）；
 2. `run_maa()` 每 5 秒看一次日志，`ScreencapFailed` 变多就再 `settle_game_window()`
-   （`SCREENCAP_SETTLE_INTERVAL` = 30s 节流）；
+   （`SCREENCAP_SETTLE_INTERVAL` = 30s 节流；跑到一半**不**重启）；
 3. `run_maa_resilient()` 认出连接阶段就失败（`CONNECT_FAILURE_MARKERS` 含 `ScreencapFailed`、
-   一条任务链都没 Completed）才重开，重开前先摆回窗口、`wait_for_game()`。
+   一条任务链都没 Completed）才重开，重开前先 `settle_game_window(allow_restart=True)`、
+   `wait_for_game()`。`AllTasksCompleted` 本来也算「跑过」；但如果整份日志只有
+   `never_saw_the_game()` 白名单里的行（截图失败、任务起止、收尾汇总、`SCREENCAP_SETTLE_NOTE`），
+   说明一帧画面都没拿到，这句话就不算跑过。放弃重开时说明里带 `CONNECT_GAVE_UP`，
+   `execute()` 据此跳过补跑（熔断补跑、后备关补跑都跳），只记一句 `SCREEN_LOST_SKIP_NOTE`。
 
 **没用 MacSCK**：MaaCore 的 `config = "MacSCK"`（ScreenCaptureKit 截图）在 maa-cli 里会撞
 `CGS_REQUIRE_INIT` 断言（进程没初始化 CoreGraphics 会话就调 SCK），要 DYLD 注入一个先调

@@ -140,6 +140,30 @@ CONNECT_FAILURE_MARKERS = (
     "Connect failed",
     "ScreencapFailed",
 )
+# PlayCover 下截图从头到尾一帧都没拿到时，MaaCore 照样把每条任务链跑成 Error 并打印
+# `AllTasksCompleted`（2026-11-08 早场）。日志里**只有**这些行时，那句收尾话不算「有任务
+# 跑完」——一帧画面都没有，不可能点过任何东西。出现任何一行别的输出就照旧不重开。
+NO_FRAME_LINE_RES = tuple(
+    re.compile(pattern)
+    for pattern in (
+        r"Updating hot update files\.\.\.",
+        r"Hot update completed successfully",
+        r"Detected connection with PlayTools",
+        r"Using platform diff resource: \S+",
+        r"Game is already running!",
+        r"\w+ (Start|Error)",
+        r"AllTasksCompleted",
+        r"Summary",
+        r"-+",
+        r"\[[^\]]+\] \d{2}:\d{2}:\d{2} - \d{2}:\d{2}:\d{2} \([^)]*\) Error",
+        r"Error: Some error occurred during running task!",
+    )
+)
+# 跑到一半截图失败、摆窗后写进日志的那行说明的开头（也是 NO_FRAME 白名单里唯一的自家行）。
+SCREENCAP_SETTLE_NOTE = "截图失败，已尝试把游戏窗口摆回台前。"
+# `run_maa_resilient()` 放弃重开时说明里的固定词，调用方据此判断「游戏画面一直拿不到」。
+CONNECT_GAVE_UP = "仍未连上"
+SCREEN_LOST_SKIP_NOTE = "游戏画面一直拿不到，补跑跳过。"
 # 这几个返回码是本脚本自己写上去的，不是「没连上」——重开一趟只会重复同一件事。
 SELF_ASSIGNED_CODES = (124, PROXY_BREAK_CODE, 130)
 # 进度消息的编辑节流，同时也是熔断的采样间隔——扫一遍全部日志行不便宜，
@@ -773,19 +797,33 @@ def fight_wiped_out(lines: list[str]) -> tuple[int, int]:
     return 0, 0
 
 
+def never_saw_the_game(lines: list[str]) -> bool:
+    """整份日志只有截图失败、任务起止和收尾汇总（`NO_FRAME_LINE_RES`），没有一行别的。"""
+    for raw in lines:
+        line = raw.strip()
+        if not line or line in CONNECT_FAILURE_MARKERS or line.startswith(SCREENCAP_SETTLE_NOTE):
+            continue
+        if not any(pattern.fullmatch(line) for pattern in NO_FRAME_LINE_RES):
+            return False
+    return True
+
+
 def connect_failed(lines: list[str], return_code: int) -> str:
     """连接阶段就死了（一个键都没点过）时返回命中的标记，否则空串。
 
     三个条件缺一不可：非零且不是我们自己写的返回码、日志里有连接失败标记、没有
     任何一条任务链跑到 Completed。第三条是安全闸门——只要有任务真跑过，就不能拿
-    「重开一趟」当补救，那会重复已经做完的事。
+    「重开一趟」当补救，那会重复已经做完的事。`AllTasksCompleted` 也算跑过，除非
+    整份日志一帧画面都没拿到（`never_saw_the_game()`）。
     """
     if return_code == 0 or return_code in SELF_ASSIGNED_CODES:
         return ""
     task_keys = tuple(key for key, *_ in TASK_STEPS)
     for line in lines:
-        if "AllTasksCompleted" in line or any(f"{key} Completed" in line for key in task_keys):
+        if any(f"{key} Completed" in line for key in task_keys):
             return ""
+    if any("AllTasksCompleted" in line for line in lines) and not never_saw_the_game(lines):
+        return ""
     for line in lines:
         for marker in CONNECT_FAILURE_MARKERS:
             if marker in line:
@@ -1210,13 +1248,17 @@ def run_maa(
                     failures = sum("ScreencapFailed" in line for line in live)
                     if failures > screencap_failures and now - last_settle >= SCREENCAP_SETTLE_INTERVAL:
                         last_settle = now
+                        # 跑到一半不重启游戏：MaaCore 还连着、任务可能已经点过。
+                        trail: list[str] = []
                         try:
-                            warning = maa_playcover.settle_game_window(config)
+                            warning = maa_playcover.settle_game_window(config, trail=trail)
                         except Exception as exc:  # noqa: BLE001 — (c) 救场是尽力而为，不能拖垮主循环
                             warning = f"摆回游戏窗口失败：{exc}"
-                        note = f"截图失败，已尝试把游戏窗口摆回台前。{warning}".strip()
+                        note = f"{SCREENCAP_SETTLE_NOTE}{warning}".strip()
                         stderr_lines.append(note)
                         with log_lock:
+                            for step in trail:
+                                log_handle.write(step + "\n")
                             log_handle.write(note + "\n")
                     screencap_failures = failures
                     content = progress_content(prefix + live, plan=plan)
@@ -1284,14 +1326,20 @@ def run_maa_resilient(
     *,
     timeout: int | None = None,
     carry_lines: list[str] | None = None,
+    log_preamble: list[str] | None = None,
 ) -> tuple[int, list[str], list[str], int]:
     """跑 maa run；在连接阶段就崩掉的那种失败上重开。末位返回重试次数。
 
     只重试 `connect_failed()` 认定的那一类：MaaTools 没连上或截图拿不到，没有任何
-    任务跑到 Completed、一批理智都没花。每趟重开前先把游戏窗口摆回 MAA-Game 台前、
-    等 MaaTools 就绪。所有重试共用同一个超时预算，绝不额外撑长 Hermes 那一小时；
-    日志追加进同一个文件，不覆盖上一趟的现场。
+    任务跑到 Completed、一批理智都没花。每趟重开前先把游戏窗口摆回 MAA-Game 台前
+    （激活救不回来就重启游戏——这时一个键都没点过）、等 MaaTools 就绪。所有重试共用
+    同一个超时预算，绝不额外撑长 Hermes 那一小时；日志追加进同一个文件，不覆盖上一趟
+    的现场。`log_preamble` 先写进日志开头（开跑前的摆窗留痕）。
+    放弃重开时的说明里一定带 `CONNECT_GAVE_UP`，调用方据此跳过补跑。
     """
+    if log_preamble:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("".join(line + "\n" for line in log_preamble), encoding="utf-8")
     budget = int(config.get("maa_run_timeout", 3000) if timeout is None else timeout)
     limit = max(0, int(config.get("connect_retry_limit", 2)))
     delay = max(0, int(config.get("connect_retry_delay", 8)))
@@ -1310,7 +1358,7 @@ def run_maa_resilient(
             plan,
             timeout=remaining,
             carry_lines=list(carry_lines or []) + stdout_all + stderr_all,
-            append=retries > 0,
+            append=retries > 0 or bool(log_preamble),
         )
         stdout_all += out
         stderr_all += err
@@ -1319,7 +1367,7 @@ def run_maa_resilient(
             return code, stdout_all, stderr_all, retries
         spent = int(time.monotonic() - started)
         if retries >= limit or budget - spent - delay < MIN_RUN_TIMEOUT_SECONDS:
-            note = f"游戏连接失败（{marker}），重试 {retries} 次仍未连上。"
+            note = f"游戏连接失败（{marker}），重试 {retries} 次{CONNECT_GAVE_UP}。"
             stderr_all.append(note)
             _append_log(log_path, note)
             return code, stdout_all, stderr_all, retries
@@ -1331,11 +1379,14 @@ def run_maa_resilient(
         stderr_all.append(note)
         _append_log(log_path, note)
         time.sleep(delay)
+        trail: list[str] = []
         try:
-            warning = maa_playcover.settle_game_window(config)
+            warning = maa_playcover.settle_game_window(config, allow_restart=True, trail=trail)
             maa_playcover.wait_for_game(config)
         except Exception as exc:  # noqa: BLE001 — (c) 重开前准备尽力而为，下一趟 maa run 自己会再报连接失败
             warning = f"重开前准备游戏失败：{exc}"
+        for step in trail:
+            _append_log(log_path, step)
         if warning:
             stderr_all.append(warning)
             _append_log(log_path, warning)
@@ -1968,8 +2019,12 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             task_path = Path(str(config.get("maa_config_dir", MAA_CONFIG_DIR))) / "tasks" / "daily.toml"
             atomic_write_text(task_path, render_daily_toml(plan, config))
             # 最后一道门：游戏窗口必须在 MAA-Game 虚拟屏的台前，否则 MaaTools 截图为空、
-            # 整场空跑。摆不回来只记一条警告，不阻断（maa run 自己会报连接失败并重开）。
-            settle_warning = maa_playcover.settle_game_window(config)
+            # 整场空跑。激活救不回来就重启游戏（还一个键都没点过）；摆不回来只记一条警告，
+            # 不阻断（maa run 自己会报连接失败并重开）。每一步写进日志开头。
+            settle_trail: list[str] = []
+            settle_warning = maa_playcover.settle_game_window(
+                config, allow_restart=True, trail=settle_trail
+            )
             if settle_warning:
                 stderr_lines.append(settle_warning)
             prior_errors = list(stderr_lines)
@@ -1981,11 +2036,17 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 progress_message_id,
                 plan,
                 carry_lines=prior_errors,
+                log_preamble=settle_trail,
             )
             stderr_lines = prior_errors + run_errors
+            # 重开到底还是拿不到游戏画面：补跑只是换个关卡 / 换条链，救不了截图，跳过。
+            screen_lost = any(CONNECT_GAVE_UP in line for line in run_errors)
             # 125 也可能是 maa 自己的退出码，所以还要确认日志里真有代理失误，
             # 免得凭一个数字就多跑一趟。
-            if return_code == PROXY_BREAK_CODE and fight_wiped_out(stdout_lines + stderr_lines)[0]:
+            if screen_lost:
+                if return_code == PROXY_BREAK_CODE or fight_failed_dry(stdout_lines + stderr_lines):
+                    stderr_lines.append(SCREEN_LOST_SKIP_NOTE)
+            elif return_code == PROXY_BREAK_CODE and fight_wiped_out(stdout_lines + stderr_lines)[0]:
                 # 熔断掐掉的是整条 maa run，基建/公招/商店/奖励也一起没了。补跑一趟
                 # 去掉 Fight 的链条把它们捞回来——StartUp 会顺手把卡在结算页的游戏
                 # 带回主界面。预算从总超时里扣，绝不额外撑长 Hermes 那一小时。

@@ -456,14 +456,24 @@ class SettleTests(unittest.TestCase):
         )
         screens.start()
         self.addCleanup(screens.stop)
+        # 「切走再切回」那一级真跑起来会把访达设成前台，这里一律桩掉。
+        front = patch.object(maa_playcover, "front_finder", return_value="")
+        self.front = front.start()
+        self.addCleanup(front.stop)
+        close = patch.object(maa_playcover, "close_game", return_value=[])
+        self.close = close.start()
+        self.addCleanup(close.stop)
+        wait_game = patch.object(maa_playcover, "wait_for_game")
+        self.wait_game = wait_game.start()
+        self.addCleanup(wait_game.stop)
 
-    def _settle(self, windows):
+    def _settle(self, windows, **kwargs):
         if isinstance(windows, list):
             finder = patch.object(maa_playcover, "game_window", side_effect=windows)
         else:
             finder = patch.object(maa_playcover, "game_window", return_value=windows)
         with finder, patch.object(maa_playcover, "launch_game") as launch:
-            return maa_playcover.settle_game_window({}), launch
+            return maa_playcover.settle_game_window({}, **kwargs), launch
 
     def test_a_window_on_the_wrong_display_is_moved_and_rechecked(self) -> None:
         self.mover.return_value = (True, "")
@@ -511,11 +521,70 @@ class SettleTests(unittest.TestCase):
 
     def test_a_window_that_stays_shelved_says_so_with_geometry(self) -> None:
         warning, launch = self._settle(SHELVED)
-        launch.assert_called_once()
+        # 激活一次、切走再激活一次；没放行重启就到此为止。
+        self.assertEqual(launch.call_count, 2)
+        self.front.assert_called_once()
+        self.close.assert_not_called()
         self.mover.assert_not_called()
         self.assertIn("侧边栏", warning)
         self.assertIn("144×149 @ (15, 770)", warning)
         self.assertIn("MAA-Game (1920, 0)", warning)
+
+    def test_a_frontmost_shelved_game_is_switched_away_and_back(self) -> None:
+        # 2026-11-08 早场：游戏本来就是前台，激活什么也不会发生；先切到访达再激活。
+        shelved_on_game_screen = _win(True, x=1936, y=493, width=143, height=124)
+        trail: list[str] = []
+        warning, launch = self._settle(
+            [shelved_on_game_screen, shelved_on_game_screen, _win(True)], trail=trail
+        )
+        self.assertEqual(warning, "")
+        self.assertEqual(launch.call_count, 2)
+        self.front.assert_called_once()
+        self.close.assert_not_called()
+        self.assertEqual(len(trail), 3)
+        self.assertIn("开始 → 143×124 @ (1936, 493) 缩略图", trail[0])
+        self.assertIn("激活 → 143×124", trail[1])
+        self.assertIn("切到访达再激活 → 1478×859 @ (2141, 110) 在屏", trail[2])
+
+    def test_a_failed_switch_is_reported_but_activation_still_runs(self) -> None:
+        self.front.return_value = "切到访达失败：Hermes 的 Python 没有「辅助功能」权限。"
+        trail: list[str] = []
+        warning, launch = self._settle([SHELVED, SHELVED, _win(True)], trail=trail)
+        self.assertIn("辅助功能", warning)
+        self.assertEqual(launch.call_count, 2)
+        self.assertIn("再激活（没切走）", trail[-1])
+
+    def test_restart_is_the_last_resort_and_only_when_allowed(self) -> None:
+        trail: list[str] = []
+        warning, launch = self._settle(
+            [SHELVED, SHELVED, SHELVED, _win(True)], allow_restart=True, trail=trail
+        )
+        self.close.assert_called_once()
+        self.wait_game.assert_called_once()
+        self.assertEqual(launch.call_count, 3)
+        self.assertIn("已重启游戏", warning)
+        self.assertNotIn("后台截图可能失败", warning)
+        self.assertIn("重启游戏 → 1478×859", trail[-1])
+
+    def test_a_restart_that_does_not_help_still_warns(self) -> None:
+        self.close.return_value = ["仍有明日方舟进程存活"]
+        warning, _launch = self._settle(SHELVED, allow_restart=True)
+        self.close.assert_called_once()
+        self.assertIn("没关干净", warning)
+        self.assertIn("侧边栏", warning)
+
+    def test_a_restart_that_times_out_never_raises(self) -> None:
+        self.wait_game.side_effect = RuntimeError("等 MaaTools 120s 超时")
+        trail: list[str] = []
+        warning, _launch = self._settle(SHELVED, allow_restart=True, trail=trail)
+        self.assertIn("照常开跑", warning)
+        self.assertIn("出错 RuntimeError", trail[-1])
+
+    def test_a_usable_window_needs_no_trail_beyond_the_first_look(self) -> None:
+        trail: list[str] = []
+        self._settle(_win(True), trail=trail)
+        self.assertEqual(len(trail), 1)
+        self.front.assert_not_called()
 
     def test_a_window_that_stays_away_warns_but_never_raises(self) -> None:
         warning, _launch = self._settle(_win(False))
@@ -531,6 +600,35 @@ class SettleTests(unittest.TestCase):
             warning, _launch = self._settle(_win(False))
         self.assertIn("不在屏上", warning)
         self.assertIn("读不到（RuntimeError）", warning)
+
+
+class FrontFinderTests(unittest.TestCase):
+    def _front(self, results, *, deployed: bool = True):
+        with tempfile.TemporaryDirectory() as raw:
+            winmove = Path(raw) / "winmove"
+            if deployed:
+                winmove.write_bytes(b"")
+            with patch.object(maa_playcover, "WINMOVE", winmove), patch.object(
+                maa_playcover.subprocess, "run", side_effect=results
+            ) as run:
+                return maa_playcover.front_finder(), run
+
+    def test_finder_is_made_frontmost_through_winmove(self) -> None:
+        warning, run = self._front([_completed(0, "929\n"), _completed(0, "front")])
+        self.assertEqual(warning, "")
+        self.assertEqual(run.call_args_list[0].args[0], ["pgrep", "-x", "Finder"])
+        self.assertEqual(run.call_args_list[1].args[0][1:], ["--front", "929"])
+
+    def test_missing_permission_or_helper_is_reported_not_raised(self) -> None:
+        warning, _run = self._front([_completed(0, "929\n"), _completed(3, "not trusted")])
+        self.assertIn("辅助功能", warning)
+        warning, run = self._front([], deployed=False)
+        self.assertIn("winmove 没部署", warning)
+        run.assert_not_called()
+        warning, _run = self._front([_completed(1, "")])
+        self.assertIn("找不到访达", warning)
+        warning, _run = self._front(OSError("boom"))
+        self.assertIn("OSError", warning)
 
 
 class MoveToDisplayTests(unittest.TestCase):

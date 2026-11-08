@@ -607,23 +607,81 @@ def _wait_usable_window(config: Config, seconds: float) -> dict[str, Any] | None
             return window
 
 
-def settle_game_window(config: Config) -> str:
+def _window_brief(window: dict[str, Any] | None) -> str:
+    """留痕用的短描述：尺寸、位置、状态，不带屏幕列表。"""
+    if not window:
+        return "没找到窗口"
+    state = "缩略图" if window_shelved(window) else ("在屏" if window.get("onscreen") else "不在屏")
+    return f"{window.get('width')}×{window.get('height')} @ ({window.get('x')}, {window.get('y')}) {state}"
+
+
+def front_finder() -> str:
+    """把访达设为前台（`winmove --front`），返回告警文本，空串 = 成功。永不抛异常。
+
+    给 `settle_game_window()` 第 2 级「切走再切回」用。不用 `open -b com.apple.finder`：
+    访达没窗口时它会新开一个，可能正好开在 MAA-Game 上把游戏挤走。
+    """
+    if not WINMOVE.is_file():
+        return "winmove 没部署，没法先切走。"
+    try:
+        found = subprocess.run(
+            ["pgrep", "-x", "Finder"], capture_output=True, text=True, check=False, timeout=5
+        )
+        pids = [int(p) for p in found.stdout.split() if p.isdigit()]
+        if not pids:
+            return "找不到访达进程，没法先切走。"
+        result = subprocess.run(
+            [str(WINMOVE), "--front", str(pids[0])],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return f"切到访达失败（{type(exc).__name__}）。"
+    if result.returncode == 3:
+        return "切到访达失败：Hermes 的 Python 没有「辅助功能」权限。"
+    if result.returncode != 0:
+        return f"切到访达失败：{(result.stdout or result.stderr).strip()[:120]}"
+    return ""
+
+
+def settle_game_window(
+    config: Config, *, allow_restart: bool = False, trail: list[str] | None = None
+) -> str:
     """确认游戏窗口在虚拟屏上、在屏上（没被最小化 / 隐藏 / 被台前调度收进侧边栏）。
 
     返回告警文本，空串 = 一切正常。窗口不在屏上时 MaaTools 的 `SCRN` 回 0 字节，
-    MaaCore 只会刷 `ScreencapFailed`。
+    MaaCore 只会刷 `ScreencapFailed`。`trail` 非 None 时，每一步做了什么、窗口变成
+    什么样都追加进去（排障用，只进运行日志，不进 Discord）。
 
-    1. 窗口不在 `game_display_name` 那块虚拟屏上（PlayCover 每次都开在当前活动的屏上）
-       → `move_to_game_display()` 挪过去，主屏上你干什么都不会再把它挤下台；
-       侧边栏缩略图不挪（AX 挪缩略图的效果没验证过），直接走第 2 步；
-    2. 还是截不到（不在屏 / 是侧边栏缩略图）→ 激活一次游戏：台前调度会把它请回台前，
-       最小化的窗口也会还原——代价是抢一下焦点，只在真的截不到时才做。激活后窗口多半
-       回到**当前活动的那块屏**（你正在用的主屏），你一点别的窗口它就又被收进侧边栏
-       （2026-11-05 晚场连续 7 次都这样），所以一回到屏上就**马上**再挪一次虚拟屏。
+    0. 窗口不在 `game_display_name` 那块虚拟屏上（PlayCover 每次都开在当前活动的屏上）
+       → `move_to_game_display()` 挪过去；侧边栏缩略图不挪，直接往下走。
+    还是截不到（不在屏 / 是侧边栏缩略图）就逐级升级，前一级救回来就停：
+
+    1. **激活**（`launch_game()` = `open -a`）：台前调度把它请回台前，最小化的窗口也会
+       还原。游戏不在前台时 1 秒内就回来（2026-11-08 spike）。
+    2. **切走再切回**：游戏**已经是前台**还被收进侧边栏时（2026-11-08 早场），再激活
+       什么也不会发生。先 `front_finder()`，再激活游戏——spike 证实游戏不在前台时任何
+       激活都能把它请回来。这一级是推断，那种状态没能真机复现。
+    3. **重启游戏**（只在 `allow_restart` 时）：`close_game()` → `launch_game()` →
+       `wait_for_game()`，窗口恢复让它开回 MAA-Game（spike 实测约 36 秒）。只能在
+       一个键都没点过的时候用：开跑前、连接失败重开前。
+
+    每一级之后窗口一回到屏上就**马上**再挪一次虚拟屏：激活后它多半回到当前活动的那块屏，
+    一点别的窗口就又被收走（2026-11-05 晚场连续 7 次都这样）。AX `kAXRaiseAction`
+    实测请不回缩略图，不用。
 
     查不出来**不阻断**，交给 MaaCore 自己的截图报错，比在这儿猜更准。
     """
     warnings: list[str] = []
+    started = time.monotonic()
+
+    def note(step: str, window: dict[str, Any] | None) -> None:
+        if trail is not None:
+            trail.append(
+                f"摆窗：{step} → {_window_brief(window)}（{time.monotonic() - started:.1f}s）"
+            )
 
     def move(window: dict[str, Any]) -> dict[str, Any]:
         moved, warning = move_to_game_display(config, window)
@@ -632,30 +690,64 @@ def settle_game_window(config: Config) -> str:
         if not moved:
             return window
         time.sleep(1)
-        return game_window(config) or window
+        window = game_window(config) or window
+        note("挪去虚拟屏", window)
+        return window
 
-    try:
-        window = game_window(config)
-        if window and not window_shelved(window):
-            window = move(window)
-        if window_usable(window):
-            return " ".join(warnings)
+    def activate_and_wait() -> dict[str, Any] | None:
         launch_game(config)
         window = _wait_usable_window(config, SETTLE_ACTIVATE_WAIT)
         if window is not None and window_usable(window):
             window = move(window)
+        return window
+
+    window: dict[str, Any] | None = None
+    try:
+        window = game_window(config)
+        note("开始", window)
+        if window and not window_shelved(window):
+            window = move(window)
         if window_usable(window):
             return " ".join(warnings)
-        reason = (
-            "游戏窗口被台前调度收进了侧边栏"
-            if window and window_shelved(window)
-            else "游戏窗口不在屏上（可能被最小化或隐藏了）"
-        )
-        warnings.append(f"{reason}，后台截图可能失败。[{describe_window(window)}]")
-        return " ".join(warnings)
+
+        window = activate_and_wait()
+        note("激活", window)
+        if window_usable(window):
+            return " ".join(warnings)
+
+        front_warning = front_finder()
+        if front_warning:
+            warnings.append(front_warning)
+        time.sleep(1)
+        window = activate_and_wait()
+        note("切到访达再激活" if not front_warning else "再激活（没切走）", window)
+        if window_usable(window):
+            return " ".join(warnings)
+
+        if allow_restart:
+            cleanup = close_game(config)
+            if cleanup:
+                warnings.append("重启游戏时没关干净：" + "；".join(cleanup))
+            launch_game(config)
+            wait_for_game(config)
+            window = game_window(config)
+            if window and not window_shelved(window):
+                window = move(window)
+            note("重启游戏", window)
+            if window_usable(window):
+                warnings.append("游戏窗口被台前调度收走、激活救不回来，已重启游戏。")
+                return " ".join(warnings)
     except Exception as exc:  # noqa: BLE001 — (c) 只是体检，不阻断
+        note(f"出错 {type(exc).__name__}", window)
         warnings.append(f"没能确认游戏窗口状态（{type(exc).__name__}），照常开跑。")
         return " ".join(warnings)
+    reason = (
+        "游戏窗口被台前调度收进了侧边栏"
+        if window and window_shelved(window)
+        else "游戏窗口不在屏上（可能被最小化或隐藏了）"
+    )
+    warnings.append(f"{reason}，后台截图可能失败。[{describe_window(window)}]")
+    return " ".join(warnings)
 
 
 def _rgba_png(width: int, height: int, data: bytes, step: int) -> bytes:

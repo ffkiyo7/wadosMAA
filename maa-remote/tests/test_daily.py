@@ -470,7 +470,55 @@ CONNECT_CRASH_LOG = [
 ]
 
 
+# 2026-11-08 早场（节选，行文一字不改）：游戏窗口被台前调度收进 MAA-Game 的侧边栏，
+# 一帧画面都没拿到，MaaCore 还是把每条链跑成 Error 并打印 AllTasksCompleted。
+NO_FRAME_LOG = [
+    "Updating hot update files...",
+    "Hot update completed successfully",
+    "Detected connection with PlayTools",
+    "Using platform diff resource: iOS",
+    "Game is already running!",
+    "StartUp Start",
+    "ScreencapFailed",
+    "ScreencapFailed",
+    "截图失败，已尝试把游戏窗口摆回台前。游戏窗口被台前调度收进了侧边栏，后台截图可能失败。"
+    "[窗口 143×124 @ (1936, 493)，侧边栏缩略图；屏：(无名) (0, 0)、MAA-Game (1920, 0)]",
+    "ScreencapFailed",
+    "StartUp Error",
+    "Fight Start",
+    "ScreencapFailed",
+    "Fight Error",
+    "Custom Start",
+    "ScreencapFailed",
+    "Custom Error",
+    "AllTasksCompleted",
+    "Summary",
+    "----------------------------------------",
+    "[启动国服] 08:01:11 - 08:02:28 (1m 17s) Error",
+    "----------------------------------------",
+    "[刷理智] 08:02:29 - 08:02:34 (5s) Error",
+    "----------------------------------------",
+    "[返回主界面] 08:04:06 - 08:04:21 (15s) Error",
+    "Error: Some error occurred during running task!",
+]
+
+
 class ConnectFailureTests(unittest.TestCase):
+    def test_a_run_that_never_got_a_frame_is_retried_despite_all_tasks_completed(self) -> None:
+        self.assertTrue(maa_daily.never_saw_the_game(NO_FRAME_LOG))
+        self.assertEqual(maa_daily.connect_failed(NO_FRAME_LOG, 1), "ScreencapFailed")
+
+    def test_one_line_of_real_output_keeps_all_tasks_completed_as_a_gate(self) -> None:
+        # 一旦拿到过画面（哪怕只认出一个按钮），就可能点过东西，不能重开。
+        for extra in ("Fight TO-9 1 times, drops:", "FastestWayToScreencap RawByNc 108", "Connected"):
+            with self.subTest(extra=extra):
+                lines = NO_FRAME_LOG[:12] + [extra] + NO_FRAME_LOG[12:]
+                self.assertFalse(maa_daily.never_saw_the_game(lines))
+                self.assertEqual(maa_daily.connect_failed(lines, 1), "")
+
+    def test_a_completed_task_still_blocks_a_no_frame_lookalike(self) -> None:
+        self.assertEqual(maa_daily.connect_failed(NO_FRAME_LOG + ["Award Completed"], 1), "")
+
     def test_the_2026_08_08_morning_crash_is_recognised(self) -> None:
         self.assertEqual(
             maa_daily.connect_failed(CONNECT_CRASH_LOG, 1), "TouchModeNotAvailable"
@@ -579,6 +627,28 @@ class ConnectRetryTests(unittest.TestCase):
         # 重开之前先把游戏窗口摆回台前、等 MaaTools 就绪。
         self.settle.assert_called_once()
         self.wait.assert_called_once()
+
+    def test_a_no_frame_run_is_retried_with_a_restart_allowed(self) -> None:
+        # 2026-11-08 早场一趟都没重开；现在重开前的摆窗允许重启游戏（一个键都没点过）。
+        code, _out, _err, retries = self._resilient(
+            [(1, NO_FRAME_LOG, []), (0, ["Custom Completed"], [])], {}
+        )
+        self.assertEqual((code, retries), (0, 1))
+        self.assertTrue(self.settle.call_args.kwargs["allow_restart"])
+
+    def test_the_settle_trail_opens_the_log_and_is_not_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "run.log"
+            with patch.object(
+                maa_daily, "run_maa", return_value=(0, ["Custom Completed"], [])
+            ) as runner:
+                maa_daily.run_maa_resilient(
+                    {"maa_run_timeout": 3000}, log_path, "token", "1", "2",
+                    maa_common.normalize_plan({"stage": "TO-9"}),
+                    log_preamble=["摆窗：开始 → 1478×859 @ (2141, 110) 在屏（0.0s）"],
+                )
+            self.assertTrue(log_path.read_text(encoding="utf-8").startswith("摆窗：开始"))
+            self.assertTrue(runner.call_args.kwargs["append"])
 
     def test_a_healthy_run_is_never_retried(self) -> None:
         code, _out, err, retries = self._resilient([(0, ["Custom Completed"], [])], {})
