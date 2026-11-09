@@ -492,7 +492,7 @@ LOCK_HOLDER_LABELS = {
     "daily": "日常",
     "copilot": "抄作业",
     "depot": "仓库对表",
-    "update": "上游更新",
+    "update": "游戏资源更新",
     "gui": "Wado's MAA",
 }
 

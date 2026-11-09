@@ -429,6 +429,11 @@ struct NoticeLine: View {
             Image(systemName: ok ? "checkmark.circle" : "xmark.octagon")
                 .help(ok ? "成功" : "失败")
             Text(text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            if !ok {
+                Button("复制诊断信息") { Diagnostics.copy() }
+                    .buttonStyle(.plain).underline().foregroundStyle(WM.f3)
+                    .help("排查问题时把它发给维护的人")
+            }
             if let close {
                 Button(action: close) { Image(systemName: "xmark") }
                     .buttonStyle(.plain).help("关闭提示")

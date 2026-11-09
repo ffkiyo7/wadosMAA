@@ -2,8 +2,9 @@
 //  CopilotPage.swift
 //  Wado's MAA
 //
-//  自动抄作业（K13），一页三栏：关卡列表｜候选作业（单选，有缺口的标红不可选）｜将要派发 + 确认开打。
-//  「确认开打」不绑回车，点了还要过一次确认框。上游的手贴作业在「工具与更多」。
+//  自动抄作业（K13），一页三栏：关卡列表｜候选作业（单选，练度不够的标红不可选）｜准备开打 + 开打。
+//  「开打」不绑回车，点了还要过一次确认框。上游的手贴作业在「工具与更多」。
+//  开打后的进度看顶部状态条和日志（`RunProgress`），这里不再手动刷新。
 //
 
 import SwiftUI
@@ -125,7 +126,7 @@ struct CopilotPage: View {
                     ProgressView().controlSize(.small)
                     Text("搜作业中…").foregroundStyle(WM.f2)
                 }
-                .help("prts 搜作业要 5～20 秒")
+                .help("从作业站找作业要 5～20 秒")
                 .frame(maxWidth: .infinity, alignment: .leading).padding(14).wmCard()
             } else {
                 Text("左边选一关").foregroundStyle(WM.f2)
@@ -149,7 +150,7 @@ struct CopilotPage: View {
                     Text("#\(candidate.id) \(candidate.title ?? "")" + (best ? " · 推荐" : ""))
                         .fontWeight(.semibold).lineLimit(1)
                         .foregroundStyle(candidate.perfect ? Color.primary : WM.f3)
-                    Text(gaps.isEmpty ? detail(candidate) : "不满足：\(gaps.joined(separator: "、"))")
+                    Text(gaps.isEmpty ? detail(candidate) : "练度不够：\(gaps.joined(separator: "、"))")
                         .font(.system(size: 11.5))
                         .foregroundStyle(gaps.isEmpty ? WM.f2 : WM.danger)
                         .lineLimit(1)
@@ -168,7 +169,7 @@ struct CopilotPage: View {
         }
         .buttonStyle(.plain)
         .disabled(!candidate.perfect || dispatchedToken != nil)
-        .help(candidate.perfect ? "完全满足练度，可以选" : "有缺口，不能选（不变量 #15 / #18）")
+        .help(candidate.perfect ? "练度够，可以选" : "练度不够，不能选")
     }
 
     private func detail(_ candidate: CopilotCandidate) -> String {
@@ -190,7 +191,7 @@ struct CopilotPage: View {
         let pick = preview?.candidates.first { $0.id == chosen }
         let blocker = preview?.blocker ?? ""
         return VStack(alignment: .leading, spacing: 2) {
-            FieldLabel(text: "将要派发")
+            FieldLabel(text: "准备开打")
             Text(preview?.stage ?? selected ?? "—").font(.system(size: 26, weight: .bold)).tracking(-0.5)
             Text(pick.map { "#\($0.id) \($0.title ?? "")" } ?? "还没选作业")
                 .font(.system(size: 11.5)).foregroundStyle(WM.f2).lineLimit(2)
@@ -207,24 +208,22 @@ struct CopilotPage: View {
             .font(.system(size: 12)).monospacedDigit()
             .padding(.vertical, 14)
             if !blocker.isEmpty {
-                Text("现在不能派发：\(blocker)").font(.system(size: 11.5)).foregroundStyle(WM.game).padding(.bottom, 8)
+                Text("现在不能开打：\(blocker)").font(.system(size: 11.5)).foregroundStyle(WM.game).padding(.bottom, 8)
             }
             if let token = dispatchedToken {
-                HStack {
-                    Button("刷新进度") { Task { await run(["copilot", "status", token]) } }
-                        .buttonStyle(WMButtonStyle()).help("问 maa-remote 这一轮到哪了")
-                    Button("取消本轮") { Task { await run(["copilot", "cancel", token]) } }
-                        .buttonStyle(WMButtonStyle(kind: .danger)).help("取消这一轮派发")
-                }
-                .padding(.bottom, 8)
+                Button("取消这次抄作业") { Task { await run(["copilot", "cancel", token]) } }
+                    .buttonStyle(WMButtonStyle(kind: .danger))
+                    .padding(.bottom, 8)
             }
             // 不绑回车：自动选中后按一下回车就会派发，等于跳过了「确认开打」（K13）。
-            GameButton(
-                title: "确认开打", help: "会连接游戏，先确认再派发。不吃药、不借助战、不忽略练度", big: true, fullWidth: true
-            ) {
+            GameButton(title: "开打", help: "先确认再开打", big: true, fullWidth: true) {
                 GameConfirm(
                     title: "开打 \(preview?.stage ?? "")？",
-                    rows: [("作业", pick.map { "#\($0.id) \($0.title ?? "")" } ?? "—"), ("理智", preview?.sanityCost.map(String.init) ?? "—")],
+                    rows: [
+                        ("作业", pick.map { "#\($0.id) \($0.title ?? "")" } ?? "—"),
+                        ("理智", preview?.sanityCost.map(String.init) ?? "—"),
+                        ("规矩", "不吃理智药、不借助战，练度不够不打"),
+                    ],
                     ok: "开打"
                 ) { Task { await go() } }
             }

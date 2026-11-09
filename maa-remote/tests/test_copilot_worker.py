@@ -1597,7 +1597,7 @@ class CopilotCardTests(unittest.TestCase):
         result = self._send_card([], {stale: {}}, {"message_id": "555"})
         self.assertTrue(result.ok)
         self.assertNotIn(stale, result.registry)
-        self.assertIn("没有上游写了导航定义的关", result.message)
+        self.assertIn("没有支持自动前往的关", result.message)
 
     def test_the_card_prefix_survives_both_sweeps(self) -> None:
         """它既不进 07:50 的 `hermes:btn:maa:` 清扫，也不被搜索 TTL 清扫误删。"""

@@ -328,8 +328,8 @@ def manual_run_blackout_reason(
     hit = session_within(config, minutes, at or now_beijing())
     if hit:
         return (
-            f"距{session_label(config, hit[0])} 不足 {minutes} 分钟，定时场优先，"
-            "请在日常结束后再手动跑。"
+            f"{session_label(config, hit[0])} 就要开始了（不到 {minutes} 分钟），"
+            "等它结束后再手动开始。"
         )
     return None
 
@@ -648,8 +648,8 @@ def run_start(stage: str, token: str) -> tuple[bool, str]:
     )
     return (
         True,
-        f"▶️ 已派发手动场，刷 {plan_stage_label(state)}（不带掉落上限，打到理智不足为止）"
-        f"{_skipped_sessions_note()}；开跑消息稍后出现在频道{warning}。",
+        f"▶️ 手动日常开始了，刷 {plan_stage_label(state)}（不带掉落上限，打到理智不足为止）"
+        f"{_skipped_sessions_note()}；进度稍后发到频道{warning}。",
     )
 
 
@@ -661,14 +661,14 @@ def _local_run_switches(raw: str) -> dict[str, bool]:
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"环节开关不是合法的 JSON：{exc.msg}") from exc
+        raise ValueError(f"要做的事格式不对：{exc.msg}") from exc
     if not isinstance(value, dict) or set(value) - set(LOCAL_RUN_SWITCHES):
-        raise ValueError(f"环节开关只接受 {' / '.join(LOCAL_RUN_SWITCHES)}")
+        raise ValueError(f"要做的事只接受 {' / '.join(LOCAL_RUN_SWITCHES)}")
     if any(not isinstance(item, bool) for item in value.values()):
-        raise ValueError("环节开关只能是 true / false")
+        raise ValueError("要做的事只能是开或关")
     switches = {key: bool(value.get(key, True)) for key in LOCAL_RUN_SWITCHES}
     if not any(switches[key] for key in maa_common.DEFAULT_TASKS):
-        raise ValueError("五个环节全关了，这一场什么都不做")
+        raise ValueError("要做的事全关了，这次什么都不做")
     return switches
 
 
@@ -763,11 +763,11 @@ def run_local(stage: str, raw_switches: str, *flags: str) -> tuple[bool, str, di
     if not switches["annihilation"] and tasks["fight"]:
         skipped.append("剿灭")
     tail = f"，跳过{'、'.join(skipped)}" if skipped else ""
-    forced = "（已确认在定时场前强行开跑）" if state["forced"] else ""
+    forced = "（日常就要开始了，已确认仍然开始）" if state["forced"] else ""
     return (
         True,
-        f"▶️ 已派发手动场，刷 {plan_stage_label(state)}{tail}{forced}；"
-        f"开跑消息稍后出现在 Discord{warning}。",
+        f"▶️ 手动日常开始了，刷 {plan_stage_label(state)}{tail}{forced}；"
+        f"进度稍后发到 Discord{warning}。",
         {"token": token, "stage": stage, "tasks": tasks, "annihilation": switches["annihilation"]},
     )
 
@@ -915,8 +915,8 @@ def _copilot_blackout_reason(config: Config, at: datetime | None = None) -> str 
     hit = session_within(config, minutes, at or now_beijing())
     if hit:
         return (
-            f"距{session_label(config, hit[0])} 不足 {minutes} 分钟，"
-            "为避免互斥抢占，请在日常结束后再抄作业。"
+            f"{session_label(config, hit[0])} 就要开始了（不到 {minutes} 分钟），"
+            "等日常结束后再抄作业。"
         )
     return None
 
@@ -944,8 +944,8 @@ def min_lead_reason(config: Config, at: datetime | None = None) -> str | None:
     hit = session_within(config, minutes, at or now_beijing())
     if hit:
         return (
-            f"距{session_label(config, hit[0])} 不足 {minutes} 分钟，本轮到此收尾，"
-            "剩下的关留给下一轮。"
+            f"{session_label(config, hit[0])} 就要开始了（不到 {minutes} 分钟），"
+            "这次抄作业到此为止，剩下的关下次再打。"
         )
     return None
 
@@ -954,7 +954,7 @@ def depot_window_reason(at: datetime | None = None) -> str | None:
     moment = at or now_beijing()
     minutes = moment.hour * 60 + moment.minute
     if DEPOT_WINDOW_START_MINUTES <= minutes < DEPOT_WINDOW_END_MINUTES:
-        return "处于 Depot 对表窗口（北京时间 04:20–05:00），不与它抢 run.lock。"
+        return "04:20–05:00 要识别仓库，这段时间不抄作业。"
     return None
 
 
@@ -983,7 +983,7 @@ def dispatch_blocker(
         if reason:
             return reason
     if is_run_locked():
-        return "另一场 MAA 正在运行（run.lock 被占）"
+        return f"{lock_holder_text(run_lock_holder()) or '另一个任务'}正在用游戏，等它结束"
     online, detail = maa_playcover.game_is_online(config)
     if online:
         return f"明日方舟正在运行：{detail}"
@@ -1195,7 +1195,7 @@ def start_copilot_search(stage: str, *more: str) -> tuple[bool, str, str | None]
             close_fds=True,
         )
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        detail = f"搜索进程派发失败：{type(exc).__name__}: {exc}"
+        detail = f"没能开始找作业，请稍后再试（{type(exc).__name__}: {exc}）"
         _mark_search_dispatch_failed(token, detail)
         return False, detail, None
     if len(targets) == 1:
@@ -1390,7 +1390,7 @@ def copilot_card() -> tuple[bool, str]:
         },
     )
     if not options:
-        return True, f"🤖 抄作业卡已发；当前没有上游写了导航定义的关可抄{warning}。"
+        return True, f"🤖 抄作业卡已发；当前没有支持自动前往的关可抄{warning}。"
     return True, f"🤖 抄作业卡已发，共 {len(options)} 关可选{warning}。"
 
 
@@ -1448,16 +1448,16 @@ def _schedule_write(
         changed_config = maa_common.update_config({"session_schedule": updated}, action_source())
     label = maa_common.session_label(changed_config, phase)
     try:
-        notes = maa_schedule.sync_phase(
+        # 对齐细节（cron 改了什么）不进给人看的回执，开发者区里 `schedule show` 能看。
+        maa_schedule.sync_phase(
             changed_config, phase, _hermes_bin(changed_config), toggle=enabled is not None
         )
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
         report = maa_schedule.schedule_report(changed_config)
-        return False, f"{label}已写进配置，但 cron 没同步上：{exc}。修好后点「同步 cron」。", report
+        return False, f"{label}已保存，但到点自动开始没跟着改好，请稍后再改一次（{exc}）。", report
     report = maa_schedule.schedule_report(changed_config)
     state = "开" if updated[phase]["enabled"] else "关"
-    synced = f"cron：{'；'.join(notes)}" if notes else "cron 本来就是这个时间"
-    return True, f"{label}（{state}）已保存；{synced}。", report
+    return True, f"{label}已保存，到点自动开始：{state}。", report
 
 
 def schedule_set(phase: str, value: str) -> tuple[bool, str, dict[str, Any]]:
@@ -1476,7 +1476,7 @@ def schedule_sync() -> tuple[bool, str, dict[str, Any]]:
     for phase in PLAN_PHASES:
         notes.extend(maa_schedule.sync_phase(config, phase, hermes))
     report = maa_schedule.schedule_report(config)
-    return True, ("cron 已同步：" + "；".join(notes)) if notes else "cron 和配置一致。", report
+    return True, ("时间已对齐：" + "；".join(notes)) if notes else "时间本来就一致。", report
 
 
 # ---------------------------------------------------------------------------
@@ -1497,7 +1497,7 @@ def upstream_update() -> tuple[bool, str, dict[str, Any]]:
     if not reason:
         holder = run_lock_holder()
         if holder is not None or is_run_locked():
-            reason = f"{lock_holder_text(holder) or '另一场'}正在用 maa-cli，等它跑完再更新"
+            reason = f"{lock_holder_text(holder) or '另一个任务'}正在用游戏，等它结束再更新"
     if reason:
         return False, f"⛔ 没有开始更新：{reason}", {"started": False, "blocked": reason}
     worker = SCRIPTS_DIR / "maa_upstream.py"
@@ -1511,7 +1511,7 @@ def upstream_update() -> tuple[bool, str, dict[str, Any]]:
         start_new_session=True,
         close_fds=True,
     )
-    return True, "⏳ 已开始上游更新（maa-cli → MaaCore → MaaResource），期间不能开跑。", {"started": True}
+    return True, "⏳ 开始更新游戏资源，要几分钟，期间不能开始日常。", {"started": True}
 
 
 # ---------------------------------------------------------------------------
@@ -1615,7 +1615,7 @@ def copilot_preview(stage: str) -> tuple[bool, str, dict[str, Any]]:
         head = f"{code} 搜到 {len(candidates)} 份作业，没有完全满足练度的，不能开打。"
     else:
         head = f"{code} 搜到 {len(candidates)} 份作业，{len(perfect)} 份完全满足，已选中最优的一份。"
-    return True, head + (f"\n现在不能派发：{blocker}" if blocker else ""), data
+    return True, head + (f"\n现在不能开打：{blocker}" if blocker else ""), data
 
 
 def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]:
@@ -1625,7 +1625,7 @@ def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]
     发「已排程」卡（Discord 上能「取消本轮」）→ `queued` → `dispatch_batch()`。
     """
     if not maa_copilot.SEARCH_TOKEN_RE.fullmatch(token or ""):
-        return False, "预览 token 不对。", {}
+        return False, "这次预览已失效，请重新选一次关卡。", {}
     preview = load_json(_preview_path(token), {})
     if not isinstance(preview, dict) or preview.get("status") != "previewed":
         return False, "这次预览已失效（用过了或过期），请重新预览。", {}
@@ -1648,7 +1648,7 @@ def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]
     config = load_config()
     blocker = dispatch_blocker(config, "", now)
     if blocker:
-        return False, f"{blocker}；请日常 / 对表结束后再点。", {"blocked": blocker}
+        return False, f"现在不能开打：{blocker}。", {"blocked": blocker}
     if not (SCRIPTS_DIR / "maa_copilot_worker.py").is_file():
         return False, "maa_copilot_worker.py 尚未部署。", {}
     code = str(preview["stage"])
@@ -1686,7 +1686,7 @@ def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]
     dispatch_batch(search)
     return (
         True,
-        f"▶️ 已派发 {code}（作业 {candidate['id']}），Discord 上有「已排程」卡，可以取消本轮。",
+        f"▶️ 开打 {code}（作业 {candidate['id']}）；Discord 上有「已排程」卡，可以在那里取消。",
         {"token": search, "stage": code, "candidate_id": candidate["id"]},
     )
 
@@ -1741,7 +1741,7 @@ def _defaults_snapshot() -> dict[str, Any]:
 
 def defaults_show() -> tuple[bool, str, dict[str, Any]]:
     data = _defaults_snapshot()
-    return True, f"持久默认：刷 {data['stage'] or '上次的本'}。", data
+    return True, f"默认：刷 {data['stage'] or '上次的本'}。", data
 
 
 def defaults_set(field: str, *values: str) -> tuple[bool, str, dict[str, Any]]:
@@ -1780,10 +1780,10 @@ def defaults_set(field: str, *values: str) -> tuple[bool, str, dict[str, Any]]:
         written.pop("skip", None)
         written.update({"source": action_source(), "updated_at": now.isoformat()})
         atomic_write_json(DEFAULTS_PATH, written)
-    return True, f"{what}；今天没被覆盖的场次从下一场起生效。", _defaults_snapshot()
+    return True, f"{what}；今天没单独改过的日常从下一次起生效。", _defaults_snapshot()
 
 
-TASK_NAMES = {"fight": "清理智", "infrast": "基建", "recruit": "公招", "mall": "信用商店", "award": "领奖"}
+TASK_NAMES = {"fight": "刷理智", "infrast": "基建", "recruit": "公招", "mall": "信用商店", "award": "领奖"}
 
 
 def copilot_auto(value: str) -> tuple[bool, str]:
@@ -1886,7 +1886,7 @@ def copilot_status(token: str) -> tuple[bool, str]:
         when = str(state.get("scheduled_at") or "") or "条件满足后立刻开跑"
         return True, f"⏳ 已排程 {len(entries)} 项，预计 {when}。"
     if status == "queued":
-        return True, "⏳ 已派发，正在抢锁与开机。"
+        return True, "⏳ 已经排上，正在启动游戏。"
     if status == "executing":
         return True, f"▶️ 正在执行本轮 {len(entries)} 项。"
     if status == "executed":

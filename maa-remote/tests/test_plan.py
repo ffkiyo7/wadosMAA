@@ -437,7 +437,7 @@ class ManualRunCardTests(unittest.TestCase):
         for hour, minute in ((7, 31), (21, 45), (7, 59)):
             ok, message = self._send_card(now=datetime(2026, 9, 9, hour, minute, tzinfo=BEIJING))
             self.assertFalse(ok, (hour, minute))
-            self.assertIn("定时场优先", message)
+            self.assertIn("就要开始了", message)
         self.assertFalse(self.manual.exists())
         self.assertEqual(self.posted, [])
         ok, _ = self._send_card(now=datetime(2026, 9, 9, 7, 29, tzinfo=BEIJING))
@@ -542,7 +542,7 @@ class ManualRunCardTests(unittest.TestCase):
         self.assertIn("已经在跑", message)
         ok, message = self._start("CE-6", token, now=datetime(2026, 9, 9, 7, 31, tzinfo=BEIJING))
         self.assertFalse(ok)
-        self.assertIn("定时场优先", message)
+        self.assertIn("就要开始了", message)
         self.assertEqual(self._state()["status"], "pending")
         self.assertEqual(self.popen, [])
 
@@ -772,7 +772,7 @@ class ManualRunCardTests(unittest.TestCase):
         ok, message, _ = self._local("1-7", self.ALL_ON, "--force", now=near)
         self.assertTrue(ok, message)
         self.assertTrue(self._state()["forced"])
-        self.assertIn("强行开跑", message)
+        self.assertIn("已确认仍然开始", message)
         ok, _, data = self._local("1-7", self.ALL_ON, "--force", locked=True)
         self.assertFalse(ok)
         self.assertEqual(data["blocked"], "locked")

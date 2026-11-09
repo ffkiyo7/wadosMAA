@@ -301,7 +301,7 @@ class ScheduleCommandTests(unittest.TestCase):
         with patch.object(maa_schedule, "run_hermes", boom):
             receipt = self.run_main("schedule", "disable", "am")
         self.assertFalse(receipt["ok"])
-        self.assertIn("同步 cron", receipt["message"])
+        self.assertIn("稍后再改一次", receipt["message"])
         config = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.assertFalse(config["session_schedule"]["am"]["enabled"])
 
@@ -452,7 +452,7 @@ class LockHolderTests(unittest.TestCase):
         self.assertEqual(maa_common.lock_holder_text(None), "")
         self.assertEqual(
             maa_common.lock_holder_text({"holder": "update", "since": "2026-11-06T07:50:00+08:00"}),
-            "上游更新（自 07:50）",
+            "游戏资源更新（自 07:50）",
         )
 
 

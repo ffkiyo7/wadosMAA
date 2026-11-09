@@ -37,12 +37,12 @@ enum WMPage: String, CaseIterable, Identifiable, Hashable {
 
     var tip: String {
         switch self {
-        case .today: "手动开一场、今天的定时场和状态"
-        case .copilot: "选关、挑作业、确认开打"
-        case .schedule: "早晚场时间、默认关卡和每场环节"
-        case .config: "maa-remote 的日常配置，整页保存"
-        case .tools: "上游任务（肉鸽、生息演算、任务列表、手贴作业）和实用工具"
-        case .settings: "外观、maa-remote、连接与游戏"
+        case .today: "手动日常、今天的早晚场和状态"
+        case .copilot: "选关、挑作业、开打"
+        case .schedule: "早晚场时间、默认关卡和要做的事"
+        case .config: "日常怎么刷，整页保存"
+        case .tools: "肉鸽、生息演算、手贴作业和实用工具"
+        case .settings: "外观、连接与游戏"
         }
     }
 }
@@ -226,6 +226,7 @@ struct RunStateView: View {
                         Text(stage.label).fontWeight(.medium).lineLimit(1)
                     }
                     ProgressView().progressViewStyle(.linear).frame(width: 140).tint(WM.game)
+                    // copy-guard: legacy（本 App 自己跑的上游任务，随「GUI 退成纯前端」整段删掉）
                     if viewModel.status == .busy {
                         Button {
                             Task { try? await viewModel.stop() }
@@ -235,6 +236,7 @@ struct RunStateView: View {
                         .buttonStyle(WMButtonStyle(kind: .danger))
                         .help("停止本 App 里正在跑的上游任务")
                     }
+                    // copy-guard: end
                 } else {
                     Circle().fill(WM.ok).frame(width: 8, height: 8)
                     Text("空闲").fontWeight(.semibold)
@@ -246,7 +248,7 @@ struct RunStateView: View {
                         .help(success.tip)
                     }
                     if let next = nextSession(now: context.date) {
-                        Text("下一场 \(next)").foregroundStyle(WM.f2).lineLimit(1)
+                        Text("下次 \(next)").foregroundStyle(WM.f2).lineLimit(1)
                     }
                 }
             }
@@ -256,7 +258,9 @@ struct RunStateView: View {
     }
 
     private var busyText: String? {
+        // copy-guard: legacy（同上）
         if viewModel.status != .idle { return "本 App 的上游任务" }
+        // copy-guard: end
         return store.lockHolder?.text
     }
 
@@ -290,7 +294,7 @@ struct RunStateView: View {
 
     private func nextSession(now: Date) -> String? {
         guard let sessions = store.schedule?.sessions else { return nil }
-        let upcoming = [("am", "早场"), ("pm", "晚场")].compactMap { key, name -> (Date, String)? in
+        let upcoming = [("am", "早场日常"), ("pm", "晚场日常")].compactMap { key, name -> (Date, String)? in
             guard let session = sessions[key], session.enabled, let date = Beijing.today(at: session.time, now: now)
             else { return nil }
             let target = date > now ? date : Beijing.calendar.date(byAdding: .day, value: 1, to: date)!

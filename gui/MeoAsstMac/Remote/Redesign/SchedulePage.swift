@@ -2,7 +2,8 @@
 //  SchedulePage.swift
 //  Wado's MAA
 //
-//  日程与默认：定时场（时间 + 开关）、默认关卡、每场环节；cron 收在底部。每项改了就写（走 maa_action）。
+//  日程与默认：早场 / 晚场（时间 + 到点自动开始）、默认关卡、每次要做的事。每项改了就写（走 maa_action）。
+//  cron 原文和「对齐」在设置页的开发者区（`DeveloperSection`）。
 //
 
 import SwiftUI
@@ -10,7 +11,6 @@ import SwiftUI
 struct SchedulePage: View {
     @Environment(RemoteStore.self) private var store
     @Environment(RunData.self) private var data
-    @State private var showCron = false
 
     static let taskNames: [(String, String)] = [
         ("fight", "刷理智"), ("infrast", "基建"), ("recruit", "公招"), ("mall", "信用商店"), ("award", "领奖"),
@@ -22,34 +22,22 @@ struct SchedulePage: View {
                 PageHeader(title: "日程与默认", caption: store.config?.meta["session_schedule"]?.text)
                 RemoteNotices()
                 VStack(alignment: .leading, spacing: 0) {
-                    FormGroup(title: "定时场") {
+                    FormGroup(title: "每天") {
                         SessionRow(phase: "am")
                         SessionRow(phase: "pm")
                     }
                     FormGroup {
-                        FormRow(title: "默认关卡", help: "计划卡没改过的那一场刷这一关；和 Discord 计划卡同一份关卡列表") {
+                        FormRow(title: "默认关卡", help: "当天没单独改过时刷这一关") {
                             stageMenu
                         }
                     }
-                    FormGroup(title: "每一场的环节") {
+                    FormGroup(title: "每次要做的事") {
                         ForEach(Self.taskNames, id: \.0) { key, label in
                             FormRow(title: label) {
                                 Toggle(label, isOn: taskBinding(key))
                                     .toggleStyle(.switch).labelsHidden()
-                                    .help("计划卡没改过时，这一场\(label)")
+                                    .help("当天没单独改过时，\(label)")
                             }
-                        }
-                    }
-                    FormGroup {
-                        FormRow(title: "cron 表达式", help: "Hermes 里四条任务的时间") {
-                            Button("查看…") { showCron = true }.buttonStyle(WMButtonStyle())
-                                .help("看 cron 表达式和是否对齐")
-                                .popover(isPresented: $showCron, arrowEdge: .bottom) { cronPopover }
-                        }
-                        FormRow(title: "对齐 cron 时间", help: "只把 cron 时间对齐到配置，不动暂停状态") {
-                            Button("对齐") { Task { await store.perform(["schedule", "sync"]) } }
-                                .buttonStyle(WMButtonStyle())
-                                .help("改时间只改 cron 的时间，不会恢复被暂停的任务")
                         }
                     }
                 }
@@ -83,42 +71,9 @@ struct SchedulePage: View {
             get: { store.defaults?.tasks?[key] ?? true },
             set: { value in Task { await store.perform(["defaults", "set", "task", key, value ? "on" : "off"]) } })
     }
-
-    private var cronPopover: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let schedule = store.schedule {
-                Text("时区 \(schedule.timezone)").foregroundStyle(WM.f2)
-                ForEach(["am", "pm"], id: \.self) { phase in
-                    if let session = schedule.sessions[phase] {
-                        ForEach(session.cron.keys.sorted(), id: \.self) { script in
-                            if let job = session.cron[script] {
-                                HStack {
-                                    Text((phase == "am" ? "早场 " : "晚场 ") + (script == "maa_plan_card.py" ? "计划卡" : "日常"))
-                                    Spacer(minLength: 20)
-                                    Text(cronText(job)).font(.system(size: 12, design: .monospaced))
-                                        .foregroundStyle(job.inSync ? WM.f2 : WM.game)
-                                }
-                            }
-                        }
-                    }
-                }
-                Text(schedule.jobsPath).font(.system(size: 11)).foregroundStyle(WM.f3).textSelection(.enabled)
-            } else {
-                Text(store.scheduleError ?? "读不到场次").foregroundStyle(WM.danger)
-            }
-        }
-        .padding(14)
-        .frame(minWidth: 360)
-    }
-
-    private func cronText(_ job: ScheduleReport.CronJob) -> String {
-        if job.id.isEmpty { return "找不到任务" }
-        let state = job.enabled ? "运行中" : "已暂停"
-        return job.expr == job.expectedExpr ? "\(job.expr)（\(state)）" : "\(job.expr) → \(job.expectedExpr)（\(state)）"
-    }
 }
 
-/// 一场：时间（改了出「保存」）+ 开关。
+/// 早场或晚场：时间（改了出「保存」）+ 到点自动开始。
 struct SessionRow: View {
     @Environment(RemoteStore.self) private var store
     let phase: String
@@ -134,20 +89,20 @@ struct SessionRow: View {
                 if RunLock.beijingClock(draft) != session.time {
                     Button("保存") { Task { await store.perform(["schedule", "set", phase, RunLock.beijingClock(draft)]) } }
                         .buttonStyle(WMButtonStyle(kind: .accent))
-                        .help("写入场次并同步 cron 时间")
                 }
-                DatePicker("开跑时间", selection: $draft, displayedComponents: .hourAndMinute)
+                DatePicker("开始时间", selection: $draft, displayedComponents: .hourAndMinute)
                     .labelsHidden()
                     .environment(\.timeZone, RunLock.beijing)
-                    .help("开跑时间（北京时间）")
+                    .help("开始时间（北京时间）")
                 Toggle(
-                    title,
+                    "到点自动开始",
                     isOn: Binding(
                         get: { session.enabled },
                         set: { value in Task { await store.perform(["schedule", value ? "enable" : "disable", phase]) } })
                 )
-                .toggleStyle(.switch).labelsHidden()
-                .help("开关这一场（pause / resume cron）")
+                .toggleStyle(.switch)
+                .font(.system(size: 12))
+                .foregroundStyle(WM.f2)
             } else {
                 Text("读不到").foregroundStyle(WM.f3)
             }

@@ -327,16 +327,14 @@ def hard_block(config: Config) -> str:
 def update_gate(config: Config, at: datetime | None = None) -> str:
     """GUI / 终端触发更新前的闸门；07:50 计划卡那一趟不走这里。空串 = 放行。"""
     if not is_live_home():
-        return (
-            f"开发副本（HERMES_HOME={HERMES_HOME}）只检查不更新：maa-cli 的目录全机共用，"
-            "副本的 run.lock 挡不住线上"
-        )
+        # 开发副本只检查不更新：maa-cli 的目录全机共用，副本的 run.lock 挡不住线上。
+        return "开发副本只检查、不更新游戏资源：这台电脑只有一份游戏资源，正式环境也在用"
     minutes = max(
         0, int(config.get("manual_run_blackout_minutes", DEFAULT_BLACKOUT_MINUTES))
     )
     hit = session_within(config, minutes, at or now_beijing()) if minutes else None
     if hit:
-        return f"距{session_label(config, hit[0])} 不足 {minutes} 分钟，定时场优先，先别更新"
+        return f"{session_label(config, hit[0])} 就要开始了（不到 {minutes} 分钟），先别更新"
     return ""
 
 

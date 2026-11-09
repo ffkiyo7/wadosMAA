@@ -16,7 +16,7 @@ struct ConfigPage: View {
     @State private var saving = false
 
     private var groups: [String] {
-        let all = (store.config?.groups ?? []).filter { $0 != "场次" }
+        let all = (store.config?.groups ?? []).filter { $0 != "场次" }  // copy-guard: ignore（maa_settings 的分组键）
         return tab == "daily" ? all.filter { $0 == "日常" } : all.filter { $0 != "日常" }
     }
 
@@ -85,7 +85,7 @@ struct ConfigPage: View {
             Button("保存") { Task { await save() } }
                 .buttonStyle(WMButtonStyle(kind: .accent)).disabled(!dirty || saving || store.readOnly)
                 .keyboardShortcut("s", modifiers: .command)
-                .help("写入 maa-remote，同步到 Discord ⌘S")
+                .help("保存，同步到 Discord ⌘S")
         }
         .padding(.horizontal, 28)
         .padding(.vertical, 12)
@@ -97,7 +97,7 @@ struct ConfigPage: View {
         var parts: [String] = []
         if let help = field.help, !help.isEmpty { parts.append(help) }
         if let min = field.min, let max = field.max { parts.append("范围 \(fmt(min))–\(fmt(max))") }
-        parts.append(store.config?.meta[field.key]?.text ?? "默认值：\(field.default?.displayText ?? "—")")
+        parts.append(store.config?.meta[field.key]?.text ?? "默认：\(field.default?.displayText ?? "—")")
         return parts.joined(separator: "\n")
     }
 
@@ -194,7 +194,7 @@ struct JSONFieldEditor: View {
             TextEditor(text: $text)
                 .font(.system(size: 12, design: .monospaced))
                 .frame(minWidth: 420, minHeight: 240)
-                .help(field.kind == "str_list" ? "一行一项" : "JSON，按 maa-remote 的格式填")
+                .help(field.kind == "str_list" ? "一行一项" : "照原来的格式改")
             if let error { Text(error).font(.system(size: 12)).foregroundStyle(WM.danger) }
             HStack {
                 Spacer()
@@ -220,7 +220,7 @@ struct JSONFieldEditor: View {
             parsed = JSONValue.parse(text)
         }
         guard let parsed else {
-            error = "不是合法的 JSON"
+            error = "格式不对，检查一下括号、引号和逗号"
             return
         }
         apply(parsed)

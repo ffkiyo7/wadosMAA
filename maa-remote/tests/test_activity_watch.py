@@ -87,7 +87,7 @@ class CopilotDispatchGateTests(unittest.TestCase):
             ({"scheduled_at": (self.at + timedelta(minutes=30)).isoformat()}, "等理智恢复"),
             ({"blackout": "距 08:00 日常场次不足 25 分钟"}, "08:00"),
             ({"depot": "处于 Depot 对表窗口"}, "Depot"),
-            ({"locked": True}, "run.lock"),
+            ({"locked": True}, "正在用游戏"),
             ({"online": (True, "游戏进程在跑")}, "明日方舟正在运行"),
         ]
         for kwargs, expected in cases:

@@ -89,7 +89,7 @@ struct RunStageParser: Sendable {
     /// 任务名 → 阶段。nil = 这一类不显示；不认识的原样显示。
     private func stage(for task: String) -> RunStage? {
         switch task {
-        case "StartUp": return RunStage(label: "开始唤醒", doing: "正在开始唤醒")
+        case "StartUp": return RunStage(label: "启动游戏", doing: "正在启动游戏")
         case "Fight":
             if copilot { return RunStage(label: "前往关卡", doing: "正在前往关卡") }
             if annihilationPlanned && fightStarts == 0 { return RunStage(label: "剿灭", doing: "正在打剿灭") }

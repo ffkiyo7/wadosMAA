@@ -19,20 +19,30 @@ struct LockHolder: Decodable, Sendable, Equatable {
     let pid: Int?
     let since: String?
 
-    static let labels = [
-        "daily": "日常", "copilot": "抄作业", "depot": "仓库对表", "update": "上游更新", "gui": "Wado's MAA",
-    ]
+    /// 给人看的名字：「早场日常」「抄作业 SR-8」「更新游戏资源」。
+    /// `daily` 的 detail 是 `maa_daily.PHASE_LABELS`（早 / 晚 / 手动），`gui` 的 detail 是本 App 的功能名。
+    var name: String {
+        let detail = String((detail ?? "").prefix(30))
+        switch holder {
+        case "daily":
+            switch detail {
+            case "早": return "早场日常"
+            case "晚": return "晚场日常"
+            case "手动": return "手动日常"
+            default: return "日常"
+            }
+        case "copilot": return detail.isEmpty ? "抄作业" : "抄作业 \(detail)"
+        case "depot": return "识别仓库"
+        case "update": return "更新游戏资源"
+        case "gui": return detail.isEmpty ? "Wado's MAA" : detail
+        default: return "另一个任务"
+        }
+    }
 
-    /// 「日常·早场（自 08:00）」，和 `maa_common.lock_holder_text()` 一个说法。
+    /// 「早场日常（08:00 开始）」。
     var text: String {
-        var label = Self.labels[holder] ?? (holder.isEmpty ? "另一个任务" : String(holder.prefix(20)))
-        if let detail, !detail.isEmpty {
-            label += "·\(detail.prefix(30))"
-        }
-        if let since, let date = RunLock.parseISO(since) {
-            label += "（自 \(RunLock.beijingClock(date))）"
-        }
-        return label
+        guard let since, let date = RunLock.parseISO(since) else { return name }
+        return "\(name)（\(RunLock.beijingClock(date)) 开始）"
     }
 }
 
@@ -51,7 +61,8 @@ struct LockHolder: Decodable, Sendable, Equatable {
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         let fd = open(url.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
         guard fd >= 0 else {
-            return LockHolder(holder: "", detail: "打不开 \(url.path)", pid: nil, since: nil)
+            Diagnostics.record("打不开 \(url.path)")
+            return LockHolder(holder: "", detail: nil, pid: nil, since: nil)
         }
         guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
             close(fd)

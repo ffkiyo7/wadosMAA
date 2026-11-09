@@ -140,6 +140,7 @@ struct SessionGate: Sendable {
         }
     }
 
+    // copy-guard: legacy（MaaCore 版本检查，随「GUI 退成纯前端」删掉）
     /// 进程里的 Core 已经不是盘上那份：上游功能整体停用，等重启。
     static func coreMismatch(_ status: UpstreamStatus?) -> String? {
         if CorePreflight.coreReplacedOnDisk {
@@ -152,6 +153,7 @@ struct SessionGate: Sendable {
         }
         return nil
     }
+    // copy-guard: end
 
     /// 上游功能开跑前调：通过就持有 `run.lock` 并返回要提醒的话；不通过抛 `RemoteGateError`。
     static func prepareUpstreamRun(detail: String, at now: Date = Date()) async throws -> [String] {
@@ -162,15 +164,16 @@ struct SessionGate: Sendable {
         if let slot = sessions.upcoming(within: sessions.blackoutMinutes, at: now) {
             if let warned = blackoutWarnedAt, now.timeIntervalSince(warned) <= confirmWindow {
                 blackoutWarnedAt = nil
-                warnings.append("已确认在\(slot.label)前强行开跑")
+                warnings.append("\(slot.label) 就要开始了，已确认仍然开始")
             } else {
                 blackoutWarnedAt = now
                 throw RemoteGateError.refused(
-                    "距\(slot.label) 不足 \(sessions.blackoutMinutes) 分钟，定时场优先。"
-                        + "确实要跑，\(Int(confirmWindow)) 秒内再点一次开始。")
+                    "\(slot.label) 就要开始了（不到 \(sessions.blackoutMinutes) 分钟）。"
+                        + "确实要现在开始，\(Int(confirmWindow)) 秒内再点一次。")
             }
         }
 
+        // copy-guard: legacy（上游状态检查，随「GUI 退成纯前端」删掉）
         if let status = await refreshStatus() {
             if status.running { throw RemoteGateError.refused("上游更新正在跑，等它跑完再开") }
             if status.verdict == "blocked" {
@@ -187,6 +190,7 @@ struct SessionGate: Sendable {
         if let holder = RunLock.shared.acquire(detail: detail) {
             throw RemoteGateError.refused("\(holder.text)正在用游戏，等它跑完再开")
         }
+        // copy-guard: end
         return warnings
     }
 
@@ -197,6 +201,7 @@ struct SessionGate: Sendable {
 
     // MARK: - 启动检查
 
+    // copy-guard: legacy（启动时的上游更新，随「GUI 退成纯前端」删掉）
     /// App 启动时（加载资源之前）：查上游；不新鲜且闸门放行就先更新，更新完再继续（spike §6(b)）。
     /// 返回 `(级别, 话)`，由调用方写进日志。
     static func startupCheck(log: (String, Bool) -> Void) async {
@@ -235,6 +240,7 @@ struct SessionGate: Sendable {
         }
         if let reason = coreMismatch(final) { log(reason, true) }
     }
+    // copy-guard: end
 
     /// 每 2 秒轮询一次，直到更新不再跑（上限 20 分钟）。
     static func waitForUpdate(limit: TimeInterval = 20 * 60) async -> UpstreamStatus? {

@@ -2,8 +2,8 @@
 //  TodayPage.swift
 //  Wado's MAA
 //
-//  首页「今天」：左边是要操作的「手动开一场」（原一键长草的「这一次」，K12），右边是只读状态；
-//  下面是自动抄作业的关卡和最近一场。开始走 `run local`，和 Discord「现在跑」同一条路。
+//  首页「今天」：左边是要操作的「手动日常」（原一键长草的「这一次」，K12），右边是只读状态；
+//  下面是自动抄作业的关卡和最近一次。开始走 `run local`，和 Discord「现在跑」同一条路。
 //
 
 import SwiftUI
@@ -44,7 +44,7 @@ struct RemoteNotices: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let problem = store.schemaProblem {
-                Label(problem, systemImage: "lock.fill").foregroundStyle(WM.game).font(.system(size: 12))
+                Label(problem, systemImage: "eye").foregroundStyle(WM.game).font(.system(size: 12))
             }
             if let error = store.loadError {
                 NoticeLine(ok: false, text: error)
@@ -57,7 +57,7 @@ struct RemoteNotices: View {
     }
 }
 
-// MARK: - 手动开一场
+// MARK: - 手动日常
 
 struct ManualRunCard: View {
     @Environment(RemoteStore.self) private var store
@@ -69,6 +69,7 @@ struct ManualRunCard: View {
     @State private var switches: [String: Bool] = [:]
     @State private var running = false
     @State private var result: (ok: Bool, text: String)?
+    /// 早场 / 晚场就要开始时 `run local` 被挡下的原因；非 nil 时弹「仍然开始」。
     @State private var forceReason: String?
 
     private var defaultStage: String { store.defaults?.stage ?? "" }
@@ -84,14 +85,14 @@ struct ManualRunCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("手动开一场").font(.system(size: 15, weight: .bold))
+            Text("手动日常").font(.system(size: 15, weight: .bold))
             if let choices = data.choices {
                 VStack(alignment: .leading, spacing: 8) {
                     FieldLabel(text: "关卡")
                     stageChips(choices)
                 }
                 VStack(alignment: .leading, spacing: 8) {
-                    FieldLabel(text: "环节")
+                    FieldLabel(text: "要做的事")
                     LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3), spacing: 8) {
                         ForEach(choices.switches, id: \.self) { key in
                             partTile(key, name: choices.taskNames[key] ?? key)
@@ -113,14 +114,25 @@ struct ManualRunCard: View {
         .wmCard()
         .autoDismiss(result) { result = nil }
         .alert(
-            "定时场优先",
+            blackoutTitle,
             isPresented: Binding(get: { forceReason != nil }, set: { if !$0 { forceReason = nil } })
         ) {
-            Button("仍要开跑", role: .destructive) { Task { await start(force: true) } }
+            Button("仍然开始", role: .destructive) { Task { await start(force: true) } }
             Button("取消", role: .cancel) {}
         } message: {
-            Text(forceReason ?? "")
+            Text("现在开始，\(blackoutSlot?.phase == "pm" ? "晚场" : "早场")可能会因为游戏被占用而跳过。")
         }
+    }
+
+    /// 快到的那一场（和 maa-remote 的「早晚场优先」同一个算法）。
+    private var blackoutSlot: SessionGate.Slot? {
+        let gate = SessionGate.load()
+        return gate.upcoming(within: gate.blackoutMinutes)
+    }
+
+    private var blackoutTitle: String {
+        guard let slot = blackoutSlot else { return "日常就要开始了" }
+        return "\(slot.label) 就要开始了"
     }
 
     // 关卡胶囊：默认、上次，再补几关；完整列表在「全部关卡…」。
@@ -147,7 +159,6 @@ struct ManualRunCard: View {
             .menuStyle(.button)
             .buttonStyle(ChipStyle(selected: false))
             .fixedSize()
-            .help("和 Discord 计划卡同一份关卡列表")
         }
     }
 
@@ -189,7 +200,7 @@ struct ManualRunCard: View {
                 Spacer(minLength: 0)
                 if on != defaultOn(key) {
                     Text("已改").font(.system(size: 10.5)).foregroundStyle(WM.f3)
-                        .help("和持久默认值不同，只对这一场生效")
+                        .help("和默认不同，只对这次生效")
                 }
             }
             .padding(.horizontal, 10)
@@ -199,7 +210,7 @@ struct ManualRunCard: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(on ? "这一场做「\(name)」，点一下跳过" : "这一场跳过「\(name)」，点一下加回")
+        .help(on ? "这次做「\(name)」，点一下跳过" : "这次跳过「\(name)」，点一下加回")
     }
 
     private func goRow(_ choices: RunChoices) -> some View {
@@ -209,13 +220,14 @@ struct ManualRunCard: View {
         return VStack(alignment: .leading, spacing: 10) {
             Rectangle().fill(WM.line).frame(height: 1)
             HStack(spacing: 12) {
-                GameButton(
-                    title: "开始这一场", help: "会连接游戏，先确认再开始。不碎石、只吃临期药、不借助战；进度和战报照常发到 Discord",
-                    big: true
-                ) {
+                GameButton(title: "开始日常", help: "先确认再开始", big: true) {
                     GameConfirm(
-                        title: "开始这一场？",
-                        rows: [("关卡", stageText), ("环节", names.isEmpty ? "无" : names.joined(separator: "、"))],
+                        title: "开始手动日常？",
+                        rows: [
+                            ("关卡", stageText),
+                            ("要做的事", names.isEmpty ? "无" : names.joined(separator: "、")),
+                            ("规矩", "不碎石、不借助战，只吃快过期的理智药"),
+                        ],
                         ok: "开始"
                     ) { Task { await start(force: false) } }
                 }
@@ -228,13 +240,13 @@ struct ManualRunCard: View {
                     }
                     .buttonStyle(WMLinkStyle())
                     .font(.system(size: 11.5))
-                    .help("关卡和环节回到「日程与默认」里的设置")
+                    .help("关卡和要做的事回到「日程与默认」里的设置")
                 }
                 Spacer(minLength: 0)
             }
             // 以锁文件为准（`RemoteStore` 每 2 秒看一眼），`choices.busy` 是加载那一刻的快照，会过期。
             if let holder = store.lockHolder {
-                Label("\(holder.text)正在用游戏", systemImage: "lock").font(.system(size: 12)).foregroundStyle(WM.game)
+                Label("游戏正在用于\(holder.text)", systemImage: "hourglass").font(.system(size: 12)).foregroundStyle(WM.game)
             } else if !choices.blackout.isEmpty {
                 Label(choices.blackout, systemImage: "clock.badge.exclamationmark")
                     .font(.system(size: 12)).foregroundStyle(WM.game)
@@ -257,8 +269,8 @@ struct ManualRunCard: View {
             let receipt = try await RemoteBridge.run(args)
             result = (receipt.ok, receipt.message)
             if !receipt.ok, receipt.dictionary["blocked"] as? String == "blackout" {
-                forceReason = (receipt.dictionary["reason"] as? String ?? receipt.message)
-                    + "\n确认后会跳过这条限制强行开跑（锁冲突仍然不能强行）。"
+                result = nil
+                forceReason = receipt.dictionary["reason"] as? String ?? receipt.message
             }
         } catch {
             result = (false, error.localizedDescription)
@@ -343,7 +355,6 @@ struct StatusStack: View {
     var body: some View {
         VStack(spacing: 12) {
             sessionsCard
-            lockCard
             versionCard
         }
     }
@@ -357,7 +368,7 @@ struct StatusStack: View {
     private var sessionsCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                key("calendar", "今天的定时场")
+                key("calendar", "今天的日常")
                 Spacer()
                 Button("日程 ›") { go(.schedule) }.buttonStyle(WMLinkStyle()).help("打开「日程与默认」")
             }
@@ -393,96 +404,82 @@ struct StatusStack: View {
     private func sessionState(_ phase: String, _ session: ScheduleReport.Session?, now: Date)
         -> (icon: String, color: Color, text: String, tip: String)
     {
-        guard let session else { return ("circle.dashed", WM.f3, "读不到", "读不到场次") }
-        if !session.enabled { return ("pause.circle", WM.f3, "已关", "这一场关着") }
+        guard let session else { return ("circle.dashed", WM.f3, "读不到", "暂时读不到时间") }
+        if !session.enabled { return ("pause.circle", WM.f3, "已关", "到点不自动开始") }
         let lastPhase = store.lastRun["phase"]?.string
         let started = store.lastRun["started_at"]?.string.flatMap(RunLock.parseISO)
         if lastPhase == phase, let started, Beijing.calendar.isDate(started, inSameDayAs: now) {
             let status = store.lastRun["status"]?.string ?? ""
             let finished = store.lastRun["finished_at"]?.string.flatMap(RunLock.parseISO)
             let clock = finished.map(RunLock.beijingClock) ?? RunLock.beijingClock(started)
+            let summary = store.lastRun["summary"]?.displayText ?? ""
+            let word = LastRunText.statusWord(status)
             switch status {
-            case "success": return ("checkmark.circle", WM.ok, "\(clock) 完成", "成功")
-            case "running": return ("play.circle", WM.game, "进行中", "正在跑")
-            default: return ("exclamationmark.circle", WM.danger, "\(clock) \(status)", "上一场状态：\(status)")
+            case "success": return ("checkmark.circle", WM.ok, "\(clock) \(word)", summary)
+            case "skipped": return ("minus.circle", WM.f3, word, summary)
+            case _ where LastRunText.ongoing.contains(status): return ("play.circle", WM.game, word, "正在进行")
+            default: return ("exclamationmark.circle", WM.danger, "\(clock) \(word)", summary)
             }
         }
         if let date = Beijing.today(at: session.time, now: now), date > now {
             return ("circle.dashed", WM.f2, Beijing.until(date, from: now), "还没开始")
         }
-        return ("minus.circle", WM.f3, "今天没跑", "今天这一场没有记录")
+        return ("minus.circle", WM.f3, "今天没跑", "今天没有记录")
     }
 
-    private var lockCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            key("lock", "游戏锁")
-            Text(store.lockHolder == nil ? "空闲" : "使用中")
-                .font(.system(size: 24, weight: .bold)).monospacedDigit()
-            if let holder = store.lockHolder {
-                Text(holder.text).font(.system(size: 11.5)).foregroundStyle(WM.f2)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .wmCard()
-    }
-
+    /// 游戏资源：今天更新过没有；版本号放在悬停提示里。
     private var versionCard: some View {
         let status = store.upstream
         let verdict = verdictShort(status)
-        return VStack(alignment: .leading, spacing: 6) {
+        let needsUpdate = status.map { !$0.fresh || $0.online?.maaResourceOutdated == true } ?? false
+        return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                key("arrow.down.circle", "版本")
+                key("arrow.down.circle", "游戏资源")
                 Spacer()
                 Text(verdict.text).font(.system(size: 11.5)).foregroundStyle(verdict.color)
-                    .help(status?.blockReason ?? status?.updateBlocked ?? "上游状态（离线检查）")
             }
-            Text(CorePreflight.loadedVersion ?? status?.versions.maaCore ?? "—")
-                .font(.system(size: 24, weight: .bold)).monospacedDigit()
-                .help("MaaCore（本进程）；盘上：\(status?.versions.maaCore ?? "未知")")
-            Text("maa-cli \(status?.versions.maaCli ?? "未知")").font(.system(size: 11.5)).foregroundStyle(WM.f2)
-            GameButton(title: "更新资源", help: updateHelp(status)) {
-                GameConfirm(title: "更新资源？", rows: [("内容", "maa-cli / MaaCore / MaaResource"), ("占用", "游戏锁，几分钟")], ok: "更新") {
-                    Task {
-                        await store.perform(["upstream", "update"])
-                        _ = await RemoteGate.waitForUpdate()
-                        await store.reload()
+            .help(versionHelp(status))
+            if needsUpdate, status?.running != true {
+                GameButton(title: "现在更新", help: updateHelp(status)) {
+                    GameConfirm(title: "更新游戏资源？", rows: [("用时", "大约 3 分钟，期间不能开始日常")], ok: "更新") {
+                        Task {
+                            await store.perform(["upstream", "update"])
+                            _ = await RemoteGate.waitForUpdate()
+                            await store.reload()
+                        }
                     }
                 }
+                .disabled(!(status?.updateBlocked ?? "x").isEmpty || store.busy)
             }
-            .disabled(!(status?.updateBlocked ?? "x").isEmpty || store.busy)
-            .padding(.top, 4)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .wmCard()
+    }
+
+    private func versionHelp(_ status: UpstreamStatus?) -> String {
+        let version = CorePreflight.loadedVersion ?? status?.versions.maaCore ?? "未知"
+        return "版本 \(version)"
     }
 
     private func updateHelp(_ status: UpstreamStatus?) -> String {
         if let blocked = status?.updateBlocked, !blocked.isEmpty { return "现在不能更新：\(blocked)" }
-        return "会占用游戏锁"
+        return "先确认再更新"
     }
 
     private func verdictShort(_ status: UpstreamStatus?) -> (text: String, color: Color) {
         guard let status else { return ("没查到", WM.f3) }
+        if status.running { return ("正在更新", WM.game) }
+        if status.verdict == "blocked" { return ("有问题，暂时不能开始日常", WM.danger) }
         if status.online?.maaResourceOutdated == true || status.online?.maaCliOutdated == true {
-            return ("有更新", accent.color)
+            return ("有新版本", accent.color)
         }
-        switch status.verdict {
-        case "ok":
-            guard let last = status.lastSuccessAt.flatMap(RunLock.parseISO) else { return ("已是今天的", WM.ok) }
-            return ("最后更新 \(Beijing.monthDay(last))", WM.ok)
-        case "stale": return ("今天还没更新", accent.color)
-        case "blocked": return ("被挡住", WM.danger)
-        case "running": return ("更新中", WM.game)
-        default: return (status.verdict, WM.f2)
-        }
+        return status.fresh ? ("今天已更新", WM.ok) : ("今天还没更新", accent.color)
     }
 }
 
-// MARK: - 自动抄作业 / 最近几场
+// MARK: - 自动抄作业 / 最近一次
 
 struct CopilotPreviewSection: View {
     let go: (WMPage) -> Void
@@ -550,19 +547,24 @@ enum CopilotText {
         return text.drop { !$0.isLetter && !$0.isNumber && $0 != "（" }.trimmingCharacters(in: .whitespaces)
     }
 
-    static func state(_ row: CopilotStageRow) -> String {
-        if row.nav == false { return "导航不过去" }
-        return status(row).isEmpty ? (row.status ?? "") : status(row)
+    /// 进不去的关（maa-remote 的 no_nav / not_indexed）统一一个说法，不透出原因原文。
+    static func unsupported(_ row: CopilotStageRow) -> Bool {
+        row.nav == false || row.status == "no_nav" || row.status == "not_indexed"
     }
 
-    /// maa-remote 给的原因（导航不过去等）；没有就不占一行。
+    static func state(_ row: CopilotStageRow) -> String {
+        if unsupported(row) { return "暂不支持自动前往" }
+        return status(row).isEmpty ? "" : status(row)
+    }
+
+    /// maa-remote 给的原因；进不去的关、没有原因时不占一行。
     static func reason(_ row: CopilotStageRow) -> String? {
-        guard let reason = row.reason, !reason.isEmpty else { return nil }
+        guard !unsupported(row), let reason = row.reason, !reason.isEmpty else { return nil }
         return reason
     }
 
     static func detail(_ row: CopilotStageRow) -> String {
-        if row.nav == false { return row.reason ?? "导航不过去" }
+        if unsupported(row) { return "暂不支持自动前往" }
         return reason(row) ?? (row.status == "cleared" ? "已通" : "可以去搜作业")
     }
 }
@@ -572,7 +574,7 @@ struct RecentRunsSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            SectionTitle(title: "最近几场")
+            SectionTitle(title: "最近一次")
             VStack(spacing: 0) {
                 if store.lastRun["status"] == nil {
                     Text("还没有记录").foregroundStyle(WM.f2)
@@ -612,7 +614,10 @@ struct RecentRunsSection: View {
             }
             Text(LastRunText.statusWord(status))
                 .font(.system(size: 12))
-                .foregroundStyle(status == "success" ? WM.ok : status == "running" ? WM.game : WM.danger)
+                .foregroundStyle(
+                    status == "success" ? WM.ok
+                        : status == "skipped" ? WM.f3
+                        : LastRunText.ongoing.contains(status) ? WM.game : WM.danger)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

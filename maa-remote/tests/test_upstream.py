@@ -249,7 +249,7 @@ class StatusTests(UpstreamTestCase):
         with patch.object(maa_upstream, "HERMES_HOME", self.root / "devhome"):
             self.assertIn("开发副本", maa_upstream.update_gate({}, self.now))
         with patch.object(maa_upstream, "HERMES_HOME", maa_upstream.LIVE_HERMES_HOME):
-            self.assertIn("不足 30 分钟", maa_upstream.update_gate({}, self.now))
+            self.assertIn("不到 30 分钟", maa_upstream.update_gate({}, self.now))
             self.assertEqual(maa_upstream.update_gate({}, self.now.replace(hour=14)), "")
 
 

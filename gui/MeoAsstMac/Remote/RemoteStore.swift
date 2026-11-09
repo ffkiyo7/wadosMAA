@@ -202,10 +202,10 @@ enum LastRunText {
 
     static func kind(_ run: [String: JSONValue]) -> String {
         switch run["phase"]?.string {
-        case "am": "早场"
-        case "pm": "晚场"
+        case "am": "早场日常"
+        case "pm": "晚场日常"
         case _ where isCopilot(run): "抄作业"
-        default: "手动场"
+        default: "手动日常"
         }
     }
 
@@ -214,19 +214,20 @@ enum LastRunText {
         (isCopilot(run) ? run["stage"]?.string : run["plan"]?.object?["stage"]?.string) ?? ""
     }
 
-    /// 「早场 · TL-7」。
+    /// 「早场日常 · TL-7」。
     static func title(_ run: [String: JSONValue]) -> String {
         let stage = stage(run)
         return kind(run) + (stage.isEmpty ? "" : " · \(stage)")
     }
 
+    /// 原始状态不直接上界面：认不出的终态一律算「没完成」。
     static func statusWord(_ status: String) -> String {
         switch status {
-        case "success": "成功"
-        case "failed": "失败"
-        case "skipped": "跳过"
-        case "running": "进行中"
-        default: status
+        case "success": "完成"
+        case "skipped": "已跳过"
+        case "canceled", "cancelled": "已取消"
+        case _ where ongoing.contains(status): "进行中"
+        default: "没完成"
         }
     }
 }
@@ -405,7 +406,7 @@ struct RunReport: Identifiable, Equatable, Sendable {
         if let status = await RemoteGate.refreshStatus(online: online) {
             upstreamStatus = status
         } else {
-            post(false, RemoteGate.lastStatusError ?? "查不到上游状态")
+            post(false, "查不到游戏资源的状态，请稍后再试。")
         }
     }
 
@@ -414,12 +415,16 @@ struct RunReport: Identifiable, Equatable, Sendable {
         for name in Self.checkedFiles {
             let object = Self.readJSON(name)
             if case let .number(version)? = object["schema_version"], Int(version) > Self.knownSchemaVersion {
-                problems.append("\(name) 是 v\(Int(version))")
+                problems.append("\(name) v\(Int(version))")
             }
         }
-        schemaProblem = problems.isEmpty
+        let problem: String? = problems.isEmpty
             ? nil
-            : "\(problems.joined(separator: "、"))，这个 App 只认 v\(Self.knownSchemaVersion)：只能看，不能改。先更新 Wado's MAA。"
+            : "这些设置是新版 Wado's MAA 存的，当前版本只能查看。请更新 App。"
+        if problem != nil, schemaProblem == nil {
+            Diagnostics.record("newer state files (app knows v\(Self.knownSchemaVersion)): \(problems.joined(separator: ", "))")
+        }
+        schemaProblem = problem
     }
 
     static func readJSON(_ name: String) -> [String: JSONValue] {

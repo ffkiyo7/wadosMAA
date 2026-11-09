@@ -197,7 +197,8 @@ struct AppearanceSettingsView: View {
     }
 }
 
-/// maa-remote 在哪（S7 切线上时在这里改）。
+// copy-guard: developer
+/// maa-remote 在哪（S7 切线上时在这里改）。只在 ⌘, 的旧设置窗口里，给维护的人用。
 struct RemoteSettingsView: View {
     @AppStorage(RemoteConfig.hermesHomeKey) private var hermesHome = ""
     @AppStorage(RemoteConfig.pythonKey) private var python = ""
@@ -217,3 +218,4 @@ struct RemoteSettingsView: View {
         .formStyle(.grouped)
     }
 }
+// copy-guard: end

@@ -6,6 +6,7 @@
 //  stdout 是一行回执 `{"ok", "message", "data"?}`。
 //
 
+import AppKit
 import Foundation
 
 struct RemoteReceipt: Sendable {
@@ -16,11 +17,16 @@ struct RemoteReceipt: Sendable {
 
     /// `snakeCase` 会把**字典的键**也一起改写（`recruit_times` → `recruitTimes`），
     /// 所以含「键是配置名 / 文件名」的字典的形状要传 false，自己写 CodingKeys。
+    /// 读不懂时抛 `RemoteBridgeError.badReceipt`：界面上只说一句人话，细节进诊断信息。
     func decode<T: Decodable>(_ type: T.Type, snakeCase: Bool = true) throws -> T {
-        guard let data else { throw RemoteBridgeError.badReceipt("回执里没有 data") }
+        guard let data else { throw RemoteBridgeError.recorded(.badReceipt("no data: \(message)")) }
         let decoder = JSONDecoder()
         if snakeCase { decoder.keyDecodingStrategy = .convertFromSnakeCase }
-        return try decoder.decode(T.self, from: data)
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            throw RemoteBridgeError.recorded(.badReceipt("\(T.self): \(error)"))
+        }
     }
 
     /// `data` 当成字典读（配置页这种键不固定的场合）。
@@ -38,17 +44,32 @@ enum RemoteBridgeError: LocalizedError {
     case timedOut([String])
     case badReceipt(String)
 
+    /// 界面上的一句人话；技术细节在 `diagnostic`，用「复制诊断信息」拿。
     var errorDescription: String? {
         switch self {
-        case let .notDeployed(path):
-            return "找不到 maa-remote 的脚本：\(path)"
-        case let .launchFailed(detail):
-            return "起不来 maa_action.py：\(detail)"
-        case let .timedOut(args):
-            return "maa_action.py \(args.joined(separator: " ")) 超时"
-        case let .badReceipt(detail):
-            return "maa_action.py 的回执读不懂：\(detail)"
+        case .notDeployed: return "后台还没装好，暂时用不了。"
+        case .launchFailed: return "后台启动不了，请稍后再试。"
+        case .timedOut: return "后台太久没有响应，请稍后再试。"
+        case .badReceipt: return "后台没有响应，请稍后再试。"
         }
+    }
+
+    // copy-guard: developer
+    var diagnostic: String {
+        switch self {
+        case let .notDeployed(path): return "maa_action.py not found: \(path)"
+        case let .launchFailed(detail): return "cannot launch maa_action.py: \(detail)"
+        case let .timedOut(args): return "maa_action.py \(args.joined(separator: " ")) timed out"
+        case let .badReceipt(detail): return "unreadable maa_action.py receipt: \(detail)"
+        }
+    }
+    // copy-guard: end
+
+    /// 记进诊断信息再抛出去。
+    static func recorded(_ error: RemoteBridgeError) -> RemoteBridgeError {
+        let text = error.diagnostic
+        Task { @MainActor in Diagnostics.record(text) }
+        return error
     }
 }
 
@@ -57,14 +78,23 @@ enum RemoteBridge {
     static func run(_ args: [String], timeout: TimeInterval = 30) async throws -> RemoteReceipt {
         let script = RemoteConfig.actionScript.path
         guard FileManager.default.fileExists(atPath: script) else {
-            throw RemoteBridgeError.notDeployed(script)
+            throw RemoteBridgeError.recorded(.notDeployed(script))
         }
         let python = RemoteConfig.python
         let env = RemoteConfig.environment()
         let cwd = RemoteConfig.hermesHome
-        return try await Task.detached(priority: .userInitiated) {
-            try runBlocking(python: python, script: script, args: args, env: env, cwd: cwd, timeout: timeout)
-        }.value
+        do {
+            let receipt = try await Task.detached(priority: .userInitiated) {
+                try runBlocking(python: python, script: script, args: args, env: env, cwd: cwd, timeout: timeout)
+            }.value
+            if !receipt.ok {
+                await Diagnostics.record("\(args.joined(separator: " ")) → \(receipt.message)")
+            }
+            return receipt
+        } catch let error as RemoteBridgeError {
+            await Diagnostics.record(error.diagnostic)
+            throw error
+        }
     }
 
     private final class Box: @unchecked Sendable {
@@ -125,12 +155,42 @@ enum RemoteBridge {
         else {
             let tail = String(decoding: stderr, as: UTF8.self)
                 .split(separator: "\n").suffix(3).joined(separator: " ")
-            throw RemoteBridgeError.badReceipt(tail.isEmpty ? "退出码 \(status)" : tail)
+            throw RemoteBridgeError.badReceipt(tail.isEmpty ? "exit \(status)" : tail)
         }
         var data: Data?
         if let payload = object["data"], !(payload is NSNull) {
             data = try? JSONSerialization.data(withJSONObject: payload)
         }
         return RemoteReceipt(ok: ok, message: object["message"] as? String ?? "", data: data)
+    }
+}
+
+/// 「复制诊断信息」：最近几条技术细节（后台报错、读不懂的结果），界面上不显示，排障时贴出来用。
+@MainActor enum Diagnostics {
+    private static var entries: [String] = []
+    static let limit = 40
+
+    static func record(_ text: String) {
+        let stamp = Date().formatted(date: .numeric, time: .standard)
+        entries.append("\(stamp) \(text)")
+        if entries.count > limit { entries.removeFirst(entries.count - limit) }
+    }
+
+    // copy-guard: developer
+    static var report: String {
+        let info = Bundle.main.infoDictionary ?? [:]
+        let version = "\(info["CFBundleShortVersionString"] ?? "?") (\(info["CFBundleVersion"] ?? "?"))"
+        let head = [
+            "Wado's MAA \(version)",
+            "HERMES_HOME: \(RemoteConfig.hermesHome.path)",
+            "python: \(RemoteConfig.python)",
+        ]
+        return (head + ["", "recent:"] + (entries.isEmpty ? ["(none)"] : entries)).joined(separator: "\n")
+    }
+    // copy-guard: end
+
+    static func copy() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report, forType: .string)
     }
 }
