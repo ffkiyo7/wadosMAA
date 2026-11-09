@@ -373,7 +373,7 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
   copilot/previews/<token>.json GUI 预览（30 分钟）
   copilot/card.json   上一张抄作业卡的 message_id（不能放进 searches/）
   copilot/auto_pause.json  暂停自动作业开关；copilot/gamedata.json 游戏数据缓存
-  run.lock        flock 独占锁（执行）；持有者标记 {holder: daily|copilot|depot|update|gui, detail, pid, since}（K15，§12.2）
+  run.lock        flock 独占锁（执行）；持有者标记 {holder: daily|copilot|depot|update, detail, pid, since}（K15，§12.2）
   last_run.lock   flock（保护 last_run.json 的跨进程 read-modify-write）
   stage_manager.json 台前调度原状态 {enabled: true, saved_at}：只在「原本开着、被跑场临时关掉」期间存在，还原后删（#62）
   am/ pm/         空目录，只给 cron 传场次
@@ -755,9 +755,9 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 实现细节：`run local` 不发选关卡，关卡白名单 → 开关校验（`fight/infrast/recruit/mall/award/annihilation`，只认真布尔，五项全关拒绝）→ 锁 → 拒绝窗（`--force` 只跳过这一条，锁冲突永远不能强行）→ 预检 → 收掉 Discord 上没选的选关卡（`superseded`）→ 写 `manual_run.json`（`dispatched` + `tasks` / `annihilation` / `source` / `forced`）→ `Popen maa_daily.py now <token>`；`maa_daily.apply_local_switches()` 只把开关叠到这一场，不进 `plan.json`（M4）。`copilot preview` 要 5～20 秒、不走 Discord 的 20 秒路径（#6）：持 `copilot_search.lock`、森空岛刷新失败直接报错、绕过 12h 缓存搜全部候选，返回每份是否完全满足（`maa_copilot.is_perfect()`，与 `pick_perfect_candidate()` 同一判据）、缺什么，自动选中第一份完全满足的，存 `copilot/previews/<token>.json`（30 分钟，不在 `searches/` 下）。`copilot go` 被挡什么都不写，否则发「已排程」卡 → 写 `searches/<新 token>.json` 为 `queued` → `dispatch_batch()`；同一次预览只能派一次。
 
 ### 12.2 锁
-- **路径**：`$HERMES_HOME/state/maa/run.lock`，用 `flock(LOCK_EX | LOCK_NB)`。GUI 在动游戏、动 maa-cli 之前也要抢它，空闲时放掉。
+- **路径**：`$HERMES_HOME/state/maa/run.lock`，用 `flock(LOCK_EX | LOCK_NB)`。GUI 只读它看谁在用游戏，自己不抢（2026-11-09 起 GUI 是纯前端，动游戏都走 maa-remote 的命令）。
 - **持有者标记**（K15）：拿到锁后，把锁文件内容整个换成一行 JSON：`{"holder": 种类, "detail": 补充, "pid": 进程号, "since": ISO 时间}`。放锁前清空。
-  - 种类：`daily` / `copilot` / `depot` / `update` / `gui`；GUI 写 `gui`。
+  - 种类：`daily` / `copilot` / `depot` / `update`。`gui` 是旧版 GUI 在进程内跑上游功能时写的，现在没有来源；`LOCK_HOLDER_LABELS` 里留着只为兼容。
   - 标记只在锁**确实被占着**时可信（`maa_common.run_lock_holder()`）。
 - 日常发现持有者是 `update` 时会等它跑完（K17）。是别的持有者就按锁冲突上报（#23），消息里写明是谁。
 

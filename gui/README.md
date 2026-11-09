@@ -1,30 +1,9 @@
-# MAA Mac GUI
+# Wado's MAA（GUI）
 
-MAA 的意思是 MAA Assistant Arknights
+maa-remote 的 macOS 前端：今天的早晚场、手动日常、自动抄作业、日常配置和日程。
+所有动游戏、动 maa-cli 的事都交给 `HERMES_HOME/scripts/maa_action.py`，本 App 不链接 MaaCore。
 
-一款明日方舟游戏小助手
+- 源码：`MeoAsstMac/Remote/`，入口 `MeoAsstMac/MeoAsstMacApp.swift`。
+- 构建、接口、切环境：见仓库根目录 `AGENTS.md`。
 
-本 Repo 为 MAA 的 Mac GUI 仓库，是 MAA 主仓库的 submodule。 更多关于 MAA 的信息请参考 [MAA Assistant Arknights 主仓库](https://github.com/MaaAssistantArknights/MaaAssistantArknights)。
-
-## 开发
-
-### clone 代码
-1. clone [主仓库](https://github.com/MaaAssistantArknights/MaaAssistantArknights)
-2. 初始化 submodule `git submodule update --init --recursive`
-
-### Build MAA Core
-> 为方便使用，现已将编译过程写成一键脚本。在版本迭代过程中，脚本可能无法及时更新。这时请以 workflow 定义中与 macOS 相关的内容为准
-
-1. 安装依赖 `brew install ninja`
-2. 运行位于主仓库的脚本 `MAA_DEBUG=1 ./tools/build_macos_universal.zsh`
-
-🎉 打开 Xcode 可以尝试 build 了
-
-### Q&A
-
-1. 无法获取签名怎么办？
-    - 开发时可以在本地更换为个人开发者签名， 但是提交代码时请不要提交这部分修改
-2. 各种依赖下载失败/超时？
-    - 科学上网
-3. 本地测试环境的 Mirror 酱 CDK 和正式版不同？
-    - 此功能涉及到钥匙串访问。由于签名问题，测试环境和正式版无法通用。
+起家于 [MaaMacGui](https://github.com/MaaAssistantArknights/MaaMacGui)（AGPL-3.0）的 fork，2026-11-09 起上游功能已全部删掉，不再合并上游。

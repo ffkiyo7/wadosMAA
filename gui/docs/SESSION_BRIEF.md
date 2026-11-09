@@ -11,6 +11,8 @@
 - 开发副本 `~/Developer/forks/maa-remote-devhome`：`scripts` 软链到 `~/Developer/wados-maa/maa-remote/scripts`。
 - Release 构建输出：`~/Developer/forks/wados-maa-build/<名字>`（`-derivedDataPath`），不在仓库里。
 
+- **2026-11-09 起 GUI 是纯 maa-remote 前端**（`docs/REVIEW_2026-11-09.md` §1.4、§4 P1-6）：上游的 Core、ViewModel、任务配置、旧导航、⌘, 设置窗口、工具页都删了；不再链接 MaaCore（没有弱链接、rpath、头文件），entitlements 里也没有 `disable-library-validation`；不再合并上游 MaaMacGui。所以下文 K 决策里「用 maa-cli 那份 MaaCore」「肉鸽用上游的」以及 `coreMismatch`（maa-cli 换了 Core 就要重启 App）都已作废：现在 maa-cli 更新后不用重启 App，启动时也不自动更新，首页「游戏资源」卡片提示、用户点了才更新。肉鸽、生息演算、手贴作业、实用工具暂时没有，以后由 maa-remote 加命令。
+
 下面「当前现场」「工作位置」是 2026-11-06 开工时的情况，只作历史记录。
 
 ## 背景
@@ -22,9 +24,9 @@
 - **一键长草**：走 maa-remote 的日常执行路径，GUI 里能临时调关卡和环节。
 - **自动抄作业**：放在自动战斗页，流程是「选关 → 预览候选 → 自动选中 → 点『确认开打』」。
 - **配置**：全部配置项都能在 GUI 里调，并和 Discord 同步。状态只有一份，就是 maa-remote 的状态文件。
-- **更新源**：钉在 maa-cli。fork 用弱链接 + rpath 直接用 maa-cli 那份 MaaCore（`~/Library/Application Support/com.loong.maa/lib`）。
+- **更新源**：钉在 maa-cli。~~fork 用弱链接 + rpath 直接用 maa-cli 那份 MaaCore~~（2026-11-09 起不再链接 MaaCore）。
 - **降级开关**：一个都不提供。不碎石、只吃临期药、不借助战、不忽略练度。
-- **肉鸽**：用上游的。maa-remote 自己的肉鸽整套删掉。
+- **肉鸽**：~~用上游的~~（2026-11-09 随上游代码删掉，暂时没有）。maa-remote 自己的肉鸽整套删掉。
 - **外观**：Liquid Glass 外壳，背景图可自定义，最低支持 macOS 26。
 - **签名**：用 `Apple Development: ffkiyo7@gmail.com`，免费账号，不做公证。
 
@@ -69,7 +71,7 @@ S1 有三项 P0，必须在第一次以去沙盒状态启动 App **之前**做�
 - Core 的用户目录改成 `~/Library/Application Support/io.github.ffkiyo7.MaaRemoteGui/`；
 - 删掉 Sparkle 依赖，以及 `Info.plist` 里的 `SUFeedURL` / `SUPublicEDKey`。
 
-验收一律用 **Release** 构建，Debug 测不出库验证问题。entitlements 要加 `disable-library-validation`。
+验收一律用 **Release** 构建，Debug 测不出库验证问题。~~entitlements 要加 `disable-library-validation`~~（2026-11-09 起不链接 MaaCore，已去掉）。
 
 ## 硬约束
 
