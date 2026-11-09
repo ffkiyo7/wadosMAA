@@ -51,40 +51,65 @@ struct WindowBackground: View {
     @AppStorage(AppearanceKeys.blur) private var blur = 0.0
 
     private var path: String {
-        let preferred = colorScheme == .dark ? darkPath : lightPath
-        return preferred.isEmpty ? (colorScheme == .dark ? lightPath : darkPath) : preferred
+        Self.pick(light: lightPath, dark: darkPath, isDark: colorScheme == .dark)
     }
 
+    private static func pick(light: String, dark: String, isDark: Bool) -> String {
+        let preferred = isDark ? dark : light
+        return preferred.isEmpty ? (isDark ? light : dark) : preferred
+    }
+
+    /// 在 `area` 里放得下、背景图又不露边的最大窗口尺寸。
+    /// 「填满」「拉伸」永远不露边，没设图、或者算出来比 `minSize` 还小（怎么都会露边）时，返回 nil。
+    static func snugSize(in area: NSSize, minSize: NSSize, isDark: Bool) -> NSSize? {
+        let defaults = UserDefaults.standard
+        let path = pick(
+            light: defaults.string(forKey: AppearanceKeys.lightImage) ?? "",
+            dark: defaults.string(forKey: AppearanceKeys.darkImage) ?? "",
+            isDark: isDark)
+        let fill = BackgroundFill(rawValue: defaults.string(forKey: AppearanceKeys.fill) ?? "") ?? .fill
+        guard !path.isEmpty, let image = NSImage(contentsOfFile: path),
+            image.size.width > 0, image.size.height > 0
+        else { return nil }
+        let size: NSSize
+        switch fill {
+        case .fill, .stretch:
+            return nil
+        case .fit:
+            let scale = min(area.width / image.size.width, area.height / image.size.height)
+            size = NSSize(width: (image.size.width * scale).rounded(.down), height: (image.size.height * scale).rounded(.down))
+        case .center:
+            size = NSSize(width: min(image.size.width, area.width), height: min(image.size.height, area.height))
+        }
+        guard size.width >= minSize.width, size.height >= minSize.height else { return nil }
+        return size
+    }
+
+    // 不用 GeometryReader 量尺寸：它给的 size 扣掉了工具栏那条安全区，图会比窗口矮一截，底下露出桌面。
+    // 最底下始终垫一层窗口底色，「完整显示」「原尺寸居中」留出的空白也不会透明。
     var body: some View {
-        GeometryReader { proxy in
+        ZStack {
+            Color(nsColor: .windowBackgroundColor)
             if let image = NSImage(contentsOfFile: path) {
-                ZStack {
-                    imageView(image, size: proxy.size)
-                        .blur(radius: blur, opaque: true)
-                    Rectangle()
-                        .fill(colorScheme == .dark ? Color.black : Color.white)
-                        .opacity(dim)
-                }
-                .frame(width: proxy.size.width, height: proxy.size.height)
-                .clipped()
-            } else {
-                Color(nsColor: .windowBackgroundColor)
+                Color.clear
+                    .overlay { imageView(image) }
+                    .clipped()
+                    .blur(radius: blur, opaque: true)
+                Rectangle()
+                    .fill(colorScheme == .dark ? Color.black : Color.white)
+                    .opacity(dim)
             }
         }
         .ignoresSafeArea()
     }
 
-    @ViewBuilder private func imageView(_ image: NSImage, size: CGSize) -> some View {
+    @ViewBuilder private func imageView(_ image: NSImage) -> some View {
         let base = Image(nsImage: image)
         switch fill {
-        case .fill:
-            base.resizable().aspectRatio(contentMode: .fill).frame(width: size.width, height: size.height)
-        case .fit:
-            base.resizable().aspectRatio(contentMode: .fit).frame(width: size.width, height: size.height)
-        case .stretch:
-            base.resizable().frame(width: size.width, height: size.height)
-        case .center:
-            base.frame(width: size.width, height: size.height)
+        case .fill: base.resizable().scaledToFill()
+        case .fit: base.resizable().scaledToFit()
+        case .stretch: base.resizable()
+        case .center: base
         }
     }
 
