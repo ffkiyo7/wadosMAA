@@ -2,8 +2,8 @@
 //  Theme.swift
 //  Wado's MAA
 //
-//  重设计（定稿原型 E）：深色、金色强调色。颜色、卡片、按钮和「会连游戏」的确认框都在这里。
-//  会连游戏的操作统一用 ⚡ + 确认框，标记色固定珊瑚色，不随强调色变。
+//  重设计（定稿原型 E）：深色、金色强调色。颜色、卡片、按钮都在这里。
+//  会连游戏的操作统一用 ⚡ + 系统确认框（`GameConfirm`），标记色固定珊瑚色，不随强调色变。
 //
 
 import SwiftUI
@@ -184,12 +184,20 @@ struct WMLinkStyle: ButtonStyle {
 
 // MARK: - 会连游戏的确认
 
+/// 会连游戏的操作统一用这一种确认：系统的确认框（`RedesignRoot` 里的 `.confirmationDialog`）。
+/// 早场 / 晚场就要开始时 `warning` 写那一句「可能会被跳过」，确认键换成「仍然开始」。
 struct GameConfirm: Identifiable {
     let id = UUID()
     let title: String
     var rows: [(String, String)] = []
+    var warning: String?
     let ok: String
     let action: () -> Void
+
+    /// 确认框正文：一行一项，最后是警告。
+    var message: String {
+        (rows.map { "\($0.0)：\($0.1)" } + [warning].compactMap { $0 }).joined(separator: "\n")
+    }
 }
 
 /// 带 ⚡ 的按钮：点了先弹确认框，确认后才执行。
@@ -211,54 +219,6 @@ struct GameButton: View {
         }
         .buttonStyle(WMButtonStyle(kind: big ? .big : .accent))
         .help(help)
-    }
-}
-
-/// 确认框本体。确认键不绑回车（「确认开打」等不能被回车误触）；Esc 取消。
-struct GameConfirmSheet: View {
-    let confirm: GameConfirm
-    let close: () -> Void
-
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.55).ignoresSafeArea()
-                .onTapGesture(perform: close)
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 8) {
-                    Image(systemName: "bolt.fill").foregroundStyle(WM.game)
-                        .help("会连接游戏")
-                    Text(confirm.title).font(.system(size: 16, weight: .bold))
-                }
-                if !confirm.rows.isEmpty {
-                    Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
-                        ForEach(confirm.rows.indices, id: \.self) { index in
-                            GridRow {
-                                Text(confirm.rows[index].0).foregroundStyle(WM.f3)
-                                Text(confirm.rows[index].1).textSelection(.enabled)
-                            }
-                        }
-                    }
-                    .font(.system(size: 12.5))
-                }
-                HStack(spacing: 8) {
-                    Spacer()
-                    Button("取消", action: close)
-                        .buttonStyle(WMButtonStyle())
-                        .keyboardShortcut(.cancelAction)
-                    Button(confirm.ok) {
-                        close()
-                        confirm.action()
-                    }
-                    .buttonStyle(WMButtonStyle(kind: .accent))
-                }
-                .padding(.top, 4)
-            }
-            .padding(20)
-            .frame(width: 360)
-            .background(Color(hex: 0x232328), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(WM.line2, lineWidth: 0.5))
-            .shadow(color: .black.opacity(0.6), radius: 35, y: 15)
-        }
     }
 }
 

@@ -4,7 +4,7 @@
 //
 //  重设计的窗口外壳：边栏（今天 / 自动抄作业 / 日程与默认 / 日常配置 / 设置）、
 //  顶部状态条（一个胶囊：空闲或运行中 + 做到哪，点开看详情；「日志」按钮）、右侧日志检查器（「本场」卡片 +
-//  本场 / App 两段）、会连游戏的统一确认框。
+//  本场 / App 两段）、会连游戏的统一确认框（系统 `.confirmationDialog`）。
 //
 
 import SwiftUI
@@ -109,11 +109,17 @@ struct RedesignRoot: View {
                         .inspectorColumnWidth(min: 240, ideal: 300, max: 480)
                 }
         }
-        // 确认框要在 wmAccent 之内，不然「开始」按钮拿到的是默认的金色。
-        .overlay {
-            if let confirm {
-                GameConfirmSheet(confirm: confirm) { self.confirm = nil }
-            }
+        // 会连游戏的操作只有这一种确认框；就要到早场 / 晚场时，警告和「仍然开始」也在这里面。
+        .confirmationDialog(
+            confirm?.title ?? "",
+            isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } }),
+            titleVisibility: .visible,
+            presenting: confirm
+        ) { confirm in
+            Button(confirm.ok, role: confirm.warning == nil ? nil : .destructive) { confirm.action() }
+            Button("取消", role: .cancel) {}
+        } message: { confirm in
+            Text(confirm.message)
         }
         // 回执只属于刚才那一页，切页就清掉。
         .onChange(of: page) { store.clearNotice() }

@@ -70,8 +70,6 @@ struct ManualRunCard: View {
     @State private var switches: [String: Bool] = [:]
     @State private var running = false
     @State private var result: (ok: Bool, text: String)?
-    /// 早场 / 晚场就要开始时 `run local` 被挡下的原因；非 nil 时弹「仍然开始」。
-    @State private var forceReason: String?
 
     private var defaultStage: String { store.defaults?.stage ?? "" }
 
@@ -114,15 +112,6 @@ struct ManualRunCard: View {
         .padding(16)
         .wmCard()
         .autoDismiss(result) { result = nil }
-        .alert(
-            blackoutTitle,
-            isPresented: Binding(get: { forceReason != nil }, set: { if !$0 { forceReason = nil } })
-        ) {
-            Button("仍然开始", role: .destructive) { Task { await start(force: true) } }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("现在开始，\(blackoutSlot?.phase == "pm" ? "晚场" : "早场")可能会因为游戏被占用而跳过。")
-        }
     }
 
     /// 快到的那一场（和 maa-remote 的「早晚场优先」同一个算法）。
@@ -131,9 +120,26 @@ struct ManualRunCard: View {
         return gate.upcoming(within: gate.blackoutMinutes)
     }
 
-    private var blackoutTitle: String {
-        guard let slot = blackoutSlot else { return "日常就要开始了" }
-        return "\(slot.label) 就要开始了"
+    /// 「开始日常」的确认框。早场 / 晚场就要开始了（本地算出来的，或者 maa-remote 刚挡下来的）时，
+    /// 同一个确认框带上警告，确认键换成「仍然开始」，确认后带 `--force`（只解除这一条，游戏被占用时照样开不了）。
+    private func startConfirm(_ choices: RunChoices, soon: Bool = false) -> GameConfirm {
+        let names = choices.switches.filter { switches[$0] ?? defaultOn($0) }.map { choices.taskNames[$0] ?? $0 }
+        let rows = [
+            ("关卡", currentStage.isEmpty ? "上次作战关卡" : currentStage),
+            ("要做的事", names.isEmpty ? "无" : names.joined(separator: "、")),
+            ("规矩", "不碎石、不借助战，只吃快过期的理智药"),
+        ]
+        let slot = blackoutSlot
+        guard soon || slot != nil else {
+            return GameConfirm(title: "开始手动日常？", rows: rows, ok: "开始") { Task { await start(force: false) } }
+        }
+        let name = slot?.phase == "pm" ? "晚场" : "早场"
+        return GameConfirm(
+            title: slot.map { "\($0.label) 就要开始了" } ?? "日常就要开始了",
+            rows: rows,
+            warning: "现在开始，\(name)可能会因为游戏被占用而跳过。",
+            ok: "仍然开始"
+        ) { Task { await start(force: true) } }
     }
 
     // 关卡胶囊：默认、上次，再补几关；完整列表在「全部关卡…」。
@@ -215,23 +221,10 @@ struct ManualRunCard: View {
     }
 
     private func goRow(_ choices: RunChoices) -> some View {
-        let on = choices.switches.filter { switches[$0] ?? defaultOn($0) }
-        let names = on.map { choices.taskNames[$0] ?? $0 }
-        let stageText = currentStage.isEmpty ? "上次作战关卡" : currentStage
-        return VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 10) {
             Rectangle().fill(WM.line).frame(height: 1)
             HStack(spacing: 12) {
-                GameButton(title: "开始日常", help: "先确认再开始", big: true) {
-                    GameConfirm(
-                        title: "开始手动日常？",
-                        rows: [
-                            ("关卡", stageText),
-                            ("要做的事", names.isEmpty ? "无" : names.joined(separator: "、")),
-                            ("规矩", "不碎石、不借助战，只吃快过期的理智药"),
-                        ],
-                        ok: "开始"
-                    ) { Task { await start(force: false) } }
-                }
+                GameButton(title: "开始日常", help: "先确认再开始", big: true) { startConfirm(choices) }
                 .disabled(running || store.readOnly || store.lockHolder != nil)
                 if running { ProgressView().controlSize(.small) }
                 if changed {
@@ -269,9 +262,10 @@ struct ManualRunCard: View {
         do {
             let receipt = try await RemoteBridge.run(args)
             result = (receipt.ok, receipt.message)
-            if !receipt.ok, receipt.dictionary["blocked"] as? String == "blackout" {
+            // 确认时还没到、开始时刚好到了：再问一次，还是同一个确认框。
+            if !receipt.ok, !force, receipt.dictionary["blocked"] as? String == "blackout" {
                 result = nil
-                forceReason = receipt.dictionary["reason"] as? String ?? receipt.message
+                askGame(startConfirm(choices, soon: true))
             }
         } catch {
             result = (false, error.localizedDescription)
