@@ -19,6 +19,10 @@ struct CopilotPage: View {
     @State private var chosen: Int?
     @State private var dispatchedToken: String?
     @State private var searching = false
+    /// 正在搜的那次；换关、点「我打过了」、离开页面都会取消它（连带结束 `copilot preview` 子进程）。
+    @State private var searchTask: Task<Void, Never>?
+    /// 每次开搜加一，回来的结果对不上就丢掉。
+    @State private var searchID = 0
     @State private var working = false
     @State private var message: (ok: Bool, text: String)?
     @State private var showRules = false
@@ -57,9 +61,10 @@ struct CopilotPage: View {
             if data.copilot == nil { await data.loadCopilot() }
             if let focus = data.copilotFocus {
                 data.copilotFocus = nil
-                await select(focus)
+                search(focus)
             }
         }
+        .onDisappear { stopSearch() }
     }
 
     /// 没通的排前面，已通的沉到后面。
@@ -86,7 +91,7 @@ struct CopilotPage: View {
             }
             ForEach(sortedStages) { row in
                 Button {
-                    Task { await select(row.stage) }
+                    search(row.stage)
                 } label: {
                     HStack(spacing: 10) {
                         Swatch(code: row.stage, size: 22, radius: 6)
@@ -105,7 +110,7 @@ struct CopilotPage: View {
                     .opacity(row.status == "cleared" || row.nav == false ? 0.55 : 1)
                 }
                 .buttonStyle(.plain)
-                .disabled(row.nav == false || searching)
+                .disabled(row.nav == false)
                 .help(CopilotText.detail(row))
             }
         }
@@ -138,7 +143,7 @@ struct CopilotPage: View {
                 .help("从作业站找作业要 5～20 秒")
                 .frame(maxWidth: .infinity, alignment: .leading).padding(14).wmCard()
             } else {
-                Text("左边选一关").foregroundStyle(WM.f2)
+                Text(selectedRow?.status == "cleared" ? "这一关已经通了" : "左边选一关").foregroundStyle(WM.f2)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(14).wmCard()
             }
         }
@@ -264,23 +269,44 @@ struct CopilotPage: View {
 
     // MARK: 动作（同原 AutoCopilotView）
 
-    private func select(_ stage: String) async {
+    /// 选一关就开搜。搜的时候照样能换关：上一次先取消、等它的子进程退出（放开搜索锁），再搜新的。
+    private func search(_ stage: String) {
+        let previous = searchTask
+        previous?.cancel()
+        searchID += 1
+        let id = searchID
         selected = stage
         searching = true
-        defer { searching = false }
         preview = nil
         chosen = nil
         dispatchedToken = nil
+        searchTask = Task {
+            await previous?.value
+            await loadPreview(stage, id: id)
+        }
+    }
+
+    private func stopSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        searchID += 1
+        searching = false
+    }
+
+    private func loadPreview(_ stage: String, id: Int) async {
+        defer { if searchID == id { searching = false } }
+        guard !Task.isCancelled else { return }
         do {
             let receipt = try await RemoteBridge.run(["copilot", "preview", stage], timeout: 120)
-            guard selected == stage else { return }
+            guard searchID == id else { return }
             if !receipt.ok { message = (false, receipt.message) }
             guard receipt.ok else { return }
             let loaded = try receipt.decode(CopilotPreview.self, snakeCase: false)
             preview = loaded
             chosen = loaded.bestId
+        } catch is CancellationError {
         } catch {
-            message = (false, error.localizedDescription)
+            if searchID == id { message = (false, error.localizedDescription) }
         }
     }
 
@@ -298,7 +324,13 @@ struct CopilotPage: View {
     }
 
     /// 「我打过了」/「撤销通关记录」：只改本地记账（`copilot mark-cleared <关> all` / `copilot unmark <关>`），再重读关卡列表。
+    /// 记「打过了」时这一关的搜索没用了：马上停掉，不等它搜完。
     private func mark(_ stage: String, cleared: Bool) async {
+        if cleared {
+            stopSearch()
+            preview = nil
+            chosen = nil
+        }
         await run(cleared ? ["copilot", "mark-cleared", stage, "all"] : ["copilot", "unmark", stage])
         await data.loadCopilot()
     }

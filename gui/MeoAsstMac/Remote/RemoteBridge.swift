@@ -98,10 +98,16 @@ enum RemoteBridge {
         let python = RemoteConfig.python
         let env = RemoteConfig.environment()
         let cwd = RemoteConfig.hermesHome
+        // 调用方的 Task 被取消（比如抄作业页换了关）时直接结束子进程，不等它跑完；抛 `CancellationError`。
+        let box = Box()
         do {
-            let receipt = try await Task.detached(priority: .userInitiated) {
-                try runBlocking(python: python, script: script, args: args, env: env, cwd: cwd, timeout: timeout)
-            }.value
+            let receipt = try await withTaskCancellationHandler {
+                try await Task.detached(priority: .userInitiated) {
+                    try runBlocking(box: box, python: python, script: script, args: args, env: env, cwd: cwd, timeout: timeout)
+                }.value
+            } onCancel: {
+                box.cancel()
+            }
             // 只记失败的：`schedule show`、`upstream status` 每次重读都带 detail，记进去会把真报错挤掉。
             if !receipt.ok {
                 await Diagnostics.record(receipt.diagnostic(args))
@@ -117,12 +123,23 @@ enum RemoteBridge {
         let process = Process()
         var stderr = Data()
         var timedOut = false
+        private let lock = NSLock()
+        private var _cancelled = false
+
+        var cancelled: Bool { lock.withLock { _cancelled } }
+
+        /// 取消可能早于 `process.run()`：先记下来，起进程后再看一眼。
+        func cancel() {
+            lock.withLock { _cancelled = true }
+            if process.isRunning { process.terminate() }
+        }
     }
 
     private static func runBlocking(
-        python: String, script: String, args: [String], env: [String: String], cwd: URL, timeout: TimeInterval
+        box: Box, python: String, script: String, args: [String], env: [String: String], cwd: URL,
+        timeout: TimeInterval
     ) throws -> RemoteReceipt {
-        let box = Box()
+        if box.cancelled { throw CancellationError() }
         let process = box.process
         process.executableURL = URL(fileURLWithPath: python)
         process.arguments = [script] + args
@@ -138,6 +155,7 @@ enum RemoteBridge {
         } catch {
             throw RemoteBridgeError.launchFailed(error.localizedDescription)
         }
+        if box.cancelled { process.terminate() }
         let killer = DispatchWorkItem {
             if box.process.isRunning {
                 box.timedOut = true
@@ -156,6 +174,7 @@ enum RemoteBridge {
         group.wait()
         process.waitUntilExit()
         killer.cancel()
+        if box.cancelled { throw CancellationError() }
         if box.timedOut {
             throw RemoteBridgeError.timedOut(args)
         }
