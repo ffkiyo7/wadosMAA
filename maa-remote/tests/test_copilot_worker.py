@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -402,6 +403,7 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         ledger = maa_copilot.new_ledger(activity_key)
         reports: list[dict] = []
         settled: list[str] = []
+        merge = unittest.mock.MagicMock()
 
         def default_settle(_config, stage, _env, _log):
             settled.append(stage)
@@ -458,7 +460,7 @@ class CopilotBatchExecutionTests(unittest.TestCase):
                 patch.object(worker, "maa_subprocess_env", return_value={}),
                 patch.object(maa_playcover, "capture_screenshot", return_value=(True, "")),
                 patch.object(maa_playcover, "close_game", return_value=[]),
-                patch.object(worker, "merge_last_run"),
+                patch.object(worker, "merge_last_run", merge),
                 patch.object(worker, "cleanup_run_files"),
                 patch.object(maa_action, "min_lead_reason", return_value=lead),
                 patch.object(worker, "_recheck_before_stage", return_value=(True, ""),
@@ -488,7 +490,7 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         return SimpleNamespace(
             code=code, ledger=ledger, report=reports[0], state=final,
             results=reports[0]["fields"][0]["value"], settled=settled,
-            snapshot=snapshots[0] if snapshots else None,
+            snapshot=snapshots[0] if snapshots else None, merge=merge,
         )
 
     def _run_with_stage_manager(self, fight, paused=True):
@@ -497,10 +499,7 @@ class CopilotBatchExecutionTests(unittest.TestCase):
                           side_effect=lambda _config: order.append("pause") or paused), \
              patch.object(maa_playcover, "restore_stage_manager",
                           side_effect=lambda: order.append("restore") or True):
-            try:
-                self._run([self._entry("SR-5")], fight)
-            except KeyboardInterrupt:
-                order.append("cancelled")
+            self._run([self._entry("SR-5")], fight)
         return order
 
     def test_stage_manager_is_paused_before_launch_and_restored(self) -> None:
@@ -518,12 +517,30 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         def cancel(*_a):
             raise KeyboardInterrupt
 
-        self.assertEqual(
-            self._run_with_stage_manager(cancel), ["pause", "restore", "cancelled"]
-        )
+        # #64：取消不再穿出去，照常收尾。
+        self.assertEqual(self._run_with_stage_manager(cancel), ["pause", "restore"])
         self.assertEqual(
             self._run_with_stage_manager(lambda *a: ("won", ""), paused=False), ["pause"]
         )
+
+    def test_a_cancelled_round_ends_as_cancelled_and_reports(self) -> None:
+        """不变量 #64：`run cancel` 的 SIGINT 停在哪关算哪关，终态 cancelled，不记开打前失败。"""
+        fought: list[str] = []
+
+        def fight(_config, entry, *_a):
+            fought.append(entry["stage"])
+            if len(fought) == 2:
+                raise KeyboardInterrupt
+            return "won", ""
+
+        run = self._run([self._entry("SR-5"), self._entry("SR-6"), self._entry("SR-8")], fight)
+        self.assertEqual(fought, ["SR-5", "SR-6"])
+        self.assertEqual(run.code, 1)
+        self.assertEqual(run.state["status"], "canceled")
+        self.assertNotIn("prefight_error", run.state)
+        self.assertEqual(run.merge.call_args_list[-1].args[0]["status"], "cancelled")
+        self.assertEqual(run.snapshot["status"], "cancelled")
+        self.assertIn("已停止：1/3", run.report["title"])
 
     def test_a_prefight_environment_failure_is_marked_on_the_round(self) -> None:
         """2026-10-11：森空岛过期，每轮都在复核时退出、不记账，watcher 每 15 分钟重派。"""

@@ -237,6 +237,16 @@ struct RunStateView: View {
                         .help("停止本 App 里正在跑的上游任务")
                     }
                     // copy-guard: end
+                    if let run = cancelableRun {
+                        Button {
+                            confirmStop = run
+                        } label: {
+                            Label("停止", systemImage: "stop.fill")
+                        }
+                        .buttonStyle(WMButtonStyle(kind: .danger))
+                        .disabled(stopping)
+                        .help("停下正在跑的\(run.name)")
+                    }
                 } else {
                     Circle().fill(WM.ok).frame(width: 8, height: 8)
                     Text("空闲").fontWeight(.semibold)
@@ -255,6 +265,39 @@ struct RunStateView: View {
             .padding(.horizontal, 10)
             .fixedSize()
         }
+        .alert(
+            "停止\(confirmStop?.name ?? "")？",
+            isPresented: Binding(get: { confirmStop != nil }, set: { if !$0 { confirmStop = nil } })
+        ) {
+            Button("停止", role: .destructive) { Task { await stop() } }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("已经打完的不受影响，游戏会被关掉。")
+        }
+    }
+
+    @State private var confirmStop: LockHolder?
+    @State private var stopping = false
+
+    /// maa-remote 正在跑、可以从这里停下的那一场（日常或抄作业）。本 App 自己的任务另有按钮。
+    private var cancelableRun: LockHolder? {
+        guard viewModel.status == .idle, let holder = store.lockHolder,
+            ["daily", "copilot"].contains(holder.holder)  // copy-guard: ignore
+        else { return nil }
+        return holder
+    }
+
+    /// `run cancel`：给那一场发停止信号，它自己关游戏、发战报；回执显示出来，再刷新状态。
+    private func stop() async {
+        stopping = true
+        defer { stopping = false }
+        do {
+            let receipt = try await RemoteBridge.run(["run", "cancel"])  // copy-guard: ignore
+            store.post(receipt.ok, receipt.message)
+        } catch {
+            store.post(false, "没能停下，稍后再试。")
+        }
+        await store.reload()
     }
 
     private var busyText: String? {
@@ -313,6 +356,7 @@ struct RunReportBanner: View {
         switch report.status {
         case "success": ("checkmark.circle.fill", WM.ok)
         case "skipped": ("minus.circle.fill", WM.f2)
+        case "cancelled", "canceled": ("stop.circle.fill", WM.f2)
         default: ("xmark.circle.fill", WM.danger)
         }
     }

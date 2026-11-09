@@ -37,12 +37,14 @@ from maa_common import (
     BUTTONS_PATH,
     RUNS_DIR,
     SCRIPTS_DIR,
+    CANCELLED_NOTE,
     Config,
     atomic_write_json,
     atomic_write_text,
     cleanup_run_files,
     discord_request,
     discord_token,
+    interrupt_once,
     load_config,
     load_json,
     maa_subprocess_env,
@@ -580,6 +582,16 @@ def _run_copilot_with_watchdog(
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write(f"# watchdog: 检测到接管弹窗，点击确认 (tap {tap_x},{tap_y})\n")
             time.sleep(4)
+    except KeyboardInterrupt:
+        # `run cancel`（#64）：SIGINT 只发给 worker，maa copilot 子进程要自己收掉。
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+        raise
     finally:
         try:
             watch_png.unlink()
@@ -895,6 +907,7 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
     game_touched = False
     results: list[dict[str, Any]] = []
     stop_reason = ""
+    cancelled = False
     cleanup_errors: list[str] = []
 
     # D18：抢到锁之后、碰设备之前先探一次。在线就把这一轮放回排程，什么都不做——
@@ -1060,6 +1073,10 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
                     # 导航 / 切难度失败说明环境坏了，后面几关只会一路失败。
                     stop_reason = detail
                     break
+    except KeyboardInterrupt:
+        # `run cancel`（#64）：停在哪一关就到哪一关，下面照常截图、关游戏、发战报。
+        cancelled = True
+        stop_reason = CANCELLED_NOTE
     except maa_copilot.StaleActivityError as exc:
         stop_reason = str(exc)
     except PrefightError as exc:
@@ -1091,8 +1108,12 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
     )
     duration = time.monotonic() - started
     embed: dict[str, Any] = {
-        "title": f"{'✅' if ok else '⚠️'} 抄作业本轮结束：{len(won)}/{len(entries)} 通过",
-        "color": 0x57F287 if ok else 0xFEE75C,
+        "title": (
+            f"⏹️ 抄作业已停止：{len(won)}/{len(entries)} 通过"
+            if cancelled
+            else f"{'✅' if ok else '⚠️'} 抄作业本轮结束：{len(won)}/{len(entries)} 通过"
+        ),
+        "color": 0x99AAB5 if cancelled else 0x57F287 if ok else 0xFEE75C,
         "fields": [
             {"name": "逐关结果", "value": _entry_result_lines(results)[:1024], "inline": False},
             {"name": "总耗时", "value": f"{duration:.0f}s", "inline": True},
@@ -1108,9 +1129,10 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
         )
     _post_report(config, embed, png_path if game_touched else None)
 
+    final_status = "cancelled" if cancelled else "success" if ok else "failed"
     merge_last_run(
         {
-            "status": "success" if ok else "failed",
+            "status": final_status,
             "finished_at": now_beijing().isoformat(),
             "summary": f"抄作业：{len(won)}/{len(entries)} 通过"
             + (f"；停在 {stop_reason}" if stop_reason else ""),
@@ -1124,7 +1146,7 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
     if isinstance(snapshot, dict):
         snapshot.update(
             {
-                "status": "success" if ok else "failed",
+                "status": final_status,
                 "finished_at": now_beijing().isoformat(),
                 "results": results,
                 "stop_reason": stop_reason,
@@ -1132,17 +1154,21 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
         )
         atomic_write_json(snapshot_path, snapshot)
     cleanup_run_files(int(config.get("retention_days", 14)))
-    extra: dict[str, Any] = {
-        ("executed_at" if ok else "execution_failed_at"): now_beijing().isoformat()
-    }
-    if prefight_error:
-        extra["prefight_error"] = prefight_error[:400]
-    _set_status(
-        token,
-        {"executing"},
-        "executed" if ok else "execution_failed",
-        **extra,
-    )
+    if cancelled:
+        # 和「❌ 取消本轮」同一个终态（`copilot_cancel()`），watcher 按终态重新排。
+        _set_status(token, {"executing"}, "canceled", canceled_at=now_beijing().isoformat())
+    else:
+        extra: dict[str, Any] = {
+            ("executed_at" if ok else "execution_failed_at"): now_beijing().isoformat()
+        }
+        if prefight_error:
+            extra["prefight_error"] = prefight_error[:400]
+        _set_status(
+            token,
+            {"executing"},
+            "executed" if ok else "execution_failed",
+            **extra,
+        )
     print(
         f"copilot batch ok={ok} results={results} "
         f"threads={[t.name for t in threading.enumerate()]}",
@@ -1736,7 +1762,9 @@ def main(argv: list[str]) -> int:
     if argv[:1] == ["search"] and len(argv) == 2:
         return cmd_search(argv[1])
     if argv[:1] == ["run-batch"] and len(argv) == 2:
-        code = cmd_run_batch(argv[1])
+        # `run cancel` 的 SIGINT 只打断一次，收尾（关游戏、还原台前调度）不会再被打断（#64）。
+        with interrupt_once():
+            code = cmd_run_batch(argv[1])
         # Force-exit: a lingering interpreter (threads/fds) once held run.lock
         # for 10 minutes after a successful run, silently blocking the next
         # copilot.  flock dies with the process, so this is safe.

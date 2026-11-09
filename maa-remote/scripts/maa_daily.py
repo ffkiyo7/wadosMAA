@@ -31,6 +31,8 @@ from maa_common import (
     SAFE_ITEM_ID_RE,
     SAFE_MALL_ITEM_RE,
     SCRIPTS_DIR,
+    CANCEL_EXIT_CODE,
+    CANCELLED_NOTE,
     Config,
     LastRun,
     Phase,
@@ -44,6 +46,7 @@ from maa_common import (
     discord_token,
     discord_upload,
     effective_plan,
+    interrupt_once,
     is_phase,
     is_plan_phase,
     load_config,
@@ -1846,9 +1849,12 @@ def report_payload(
     inventory_error: str = "",
     offline_retries: int = 0,
     offline_gave_up: bool = False,
+    cancelled: bool = False,
 ) -> dict[str, Any]:
     label = PHASE_LABELS[phase]
     notes: list[str] = []
+    if cancelled:
+        notes.append(CANCELLED_NOTE)
     if offline_gave_up:
         notes.append(
             f"游戏一直没登录上（获取网络配置失败），重启游戏 {offline_retries} 次都没恢复。"
@@ -1876,8 +1882,12 @@ def report_payload(
     if inventory_error:
         notes.append(f"库存增量记录失败：{inventory_error}")
     embed: dict[str, Any] = {
-        "title": f"{'✅' if ok else '❌'} MAA 日常·{label}{'完成' if ok else '失败'}",
-        "color": 0x57F287 if ok else 0xED4245,
+        "title": (
+            f"⏹️ MAA 日常·{label}已停止"
+            if cancelled
+            else f"{'✅' if ok else '❌'} MAA 日常·{label}{'完成' if ok else '失败'}"
+        ),
+        "color": 0x99AAB5 if cancelled else 0x57F287 if ok else 0xED4245,
         "fields": [
             {"name": "关卡", "value": plan_stage_label(plan), "inline": True},
             {
@@ -2132,6 +2142,26 @@ def report_manual_run_mismatch(
 
 
 def execute(phase: Phase, manual_token: str = "") -> int:
+    """跑一场。`run cancel` 的 SIGINT（不变量 #64）：只有第一次打断，主流程里收到就照常
+    关游戏、还原台前调度、发战报，`last_run.status = cancelled`；落在主流程之外（拿到
+    锁之后、开游戏之前，或者收尾时）也补写 `cancelled`。返回 130。
+    """
+    marks: dict[str, bool] = {"locked": False, "finished": False}
+    with interrupt_once():
+        try:
+            return _execute(phase, manual_token, marks)
+        except KeyboardInterrupt:
+            if marks["locked"] and not marks["finished"]:
+                merge_last_run({
+                    "status": "cancelled",
+                    "finished_at": now_beijing().isoformat(),
+                    "return_code": CANCEL_EXIT_CODE,
+                    "summary": CANCELLED_NOTE,
+                })
+            return CANCEL_EXIT_CODE
+
+
+def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
     started = now_beijing()
     config = load_config()
     # Discord 只是通知出口：缺频道 / token 时两个都是空串，本场照跑（不变量 #63）。
@@ -2181,6 +2211,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
         if not acquired:
             report_lock_conflict(config, token, channel_id, phase, started)
             return 1
+        marks["locked"] = True
         cleanup_run_files(int(config.get("retention_days", 14)), started)
         snapshot = {
             "date": started.date().isoformat(),
@@ -2259,6 +2290,8 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 return 0
 
         game_opened = False
+        launching = False
+        cancelled = False
         session_open = False
         thread_id = ""
         progress_message_id = ""
@@ -2280,6 +2313,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
         try:
             require_executable(config, "maa_bin", "/opt/homebrew/bin/maa", "maa-cli")
             maa_playcover.verify_game_installed(config)
+            launching = True
             maa_playcover.launch_game(config)
             game_opened = True
             maa_playcover.wait_for_game(config)
@@ -2325,6 +2359,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 log_preamble=settle_trail,
             )
             stderr_lines = prior_errors + run_errors
+            cancelled = return_code == CANCEL_EXIT_CODE
             # 重开到底还是拿不到游戏画面 / 登录不上：补跑只是换个关卡 / 换条链，在同一个
             # 死掉的游戏上救不回来，跳过（2026-11-09 早场的后备关补跑就是白跑）。
             if any(CONNECT_GAVE_UP in line for line in run_errors):
@@ -2335,7 +2370,9 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 lost_note = ""
             # 125 也可能是 maa 自己的退出码，所以还要确认日志里真有代理失误，
             # 免得凭一个数字就多跑一趟。
-            if lost_note:
+            if cancelled:
+                pass  # 停下就是停下：不补跑、不换关（#64）。
+            elif lost_note:
                 if return_code == PROXY_BREAK_CODE or fight_failed_dry(stdout_lines + stderr_lines):
                     stderr_lines.append(lost_note)
             elif return_code == PROXY_BREAK_CODE and fight_wiped_out(stdout_lines + stderr_lines)[0]:
@@ -2379,15 +2416,26 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                     salvage_log_path = fallback_log
                 stdout_lines += fallback_out
                 stderr_lines += fallback_err
+            cancelled = cancelled or return_code == CANCEL_EXIT_CODE
             # The final Custom task has returned to Home. Let the last UI
             # animation settle, then capture before the separate CloseDown and
             # confirm by OCR that the frame we ship really is the home page.
-            (
-                screenshot_ok,
-                screenshot_error,
-                home_verified,
-                home_verify_detail,
-            ) = capture_home_screenshot(config, screenshot_path)
+            # 停下来的那一场不在主页，不截。
+            if cancelled:
+                screenshot_error = "已停止，没有截图"
+            else:
+                (
+                    screenshot_ok,
+                    screenshot_error,
+                    home_verified,
+                    home_verify_detail,
+                ) = capture_home_screenshot(config, screenshot_path)
+        except KeyboardInterrupt:
+            # `run cancel`（#64）：落在 maa run 之外（开游戏、等游戏、截图、重开前的等待）。
+            # 只有这一次会打断（interrupt_once），下面照常关游戏、还原、发战报。
+            cancelled = True
+            return_code = CANCEL_EXIT_CODE
+            stderr_lines.append(CANCELLED_NOTE)
         except Exception as exc:  # noqa: BLE001 — (a) 整场兜底：异常进战报 / 直报，finally 照常关游戏
             exception_detail = f"{type(exc).__name__}: {exc}"
             stderr_lines.append(exception_detail)
@@ -2403,7 +2451,8 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                         flush=True,
                     )
         finally:
-            if game_opened:
+            # 停在开游戏半路上也要关（#64）：游戏可能已经拉起来了。
+            if game_opened or (cancelled and launching):
                 try:
                     cleanup_errors = maa_playcover.close_game(config)
                 except Exception as exc:  # noqa: BLE001 — (b) 收尾清理不能盖住主错误，异常并入 cleanup_errors
@@ -2425,7 +2474,8 @@ def execute(phase: Phase, manual_token: str = "") -> int:
         # 看见红色去修作战录像，否则理智白挂在那儿谁也不知道。
         proxy_batches, proxy_refunded = fight_wiped_out(stdout_lines + stderr_lines)
         ok = (
-            return_code == 0
+            not cancelled
+            and return_code == 0
             and not cleanup_errors
             and home_verified is not False
             and not proxy_batches
@@ -2439,8 +2489,14 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             home_verified=home_verified,
             home_verify_detail=home_verify_detail,
         )
+        if cancelled:
+            summary = f"⏹️ {CANCELLED_NOTE}\n{summary}".strip()
         if thread_id and progress_message_id:
-            final_heading = f"{'✅' if ok else '❌'} 结束 · 总耗时 {_format_duration(duration)}"
+            final_heading = (
+                f"⏹️ 已停止 · 总耗时 {_format_duration(duration)}"
+                if cancelled
+                else f"{'✅' if ok else '❌'} 结束 · 总耗时 {_format_duration(duration)}"
+            )
             try:
                 discord_request(
                     token,
@@ -2476,15 +2532,16 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             inventory_error=inventory_error,
             offline_retries=offline_retries,
             offline_gave_up=any(OFFLINE_GAVE_UP in line for line in stderr_lines),
+            cancelled=cancelled,
         )
         report_error = write_report_file(report_path, payload)
-        if session_open and token and channel_id:
+        if (session_open or cancelled) and token and channel_id:
             try:
                 send_report(token, channel_id, payload, screenshot_path, config)
             except Exception as exc:  # noqa: BLE001 — (c) 战报发不出去只记日志，终态照写
                 print(f"战报发送失败：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         finished: LastRun = {
-            "status": "success" if ok else "failed",
+            "status": "cancelled" if cancelled else "success" if ok else "failed",
             "finished_at": now_beijing().isoformat(),
             "duration_seconds": int(duration),
             "return_code": return_code,
@@ -2508,7 +2565,8 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             finished["annihilation_game_day"] = cn_game_day(started)
             finished["annihilation_finished_at"] = now_beijing().isoformat()
         merge_last_run(finished)
-        return 0 if ok else 1
+        marks["finished"] = True
+        return CANCEL_EXIT_CODE if cancelled else 0 if ok else 1
 
 
 def main(argv: list[str]) -> int:

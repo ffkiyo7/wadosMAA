@@ -235,6 +235,7 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
    - `Infrast` 固定 `mode = 0`，MaaCore 按实时识别的干员、技能、心情排七类设施；不用无人机、不补源石碎片订单、宿舍不刷信赖。
      **链里没有 CloseDown**。`profiles/default.toml` 开用户资源层，`resource/tasks/tasks.json` 完整覆盖 `InfrastDormDoubleConfirmButton`（用 `PopupConfirm.png` 认红色确认条、点右侧对勾）。**这条覆盖还没有 run 级实测**；MaaCore 在**进程启动时**一次性载入 `resource/`。再遇到卡确认条先抓截图比对模板与位置，不要改 `roi` 猜（[incidents/2026-09-01-infrast-dorm-confirm-unverified.md](./incidents/2026-09-01-infrast-dorm-confirm-unverified.md)）。
 8. **`run_maa_resilient()` → `run_maa()`** — `maa run daily -v --batch`，注入 `MAA_CONFIG_DIR` / `MAA_LOG_PREFIX=Never` /（可选）剔除代理。两个 reader 线程把 stdout+stderr tee 到 `runs/<date>-<phase>.log`；每 5 秒把解析后的中文状态 PATCH 进子区消息，内容无变化不发，Discord 异常一律吞掉。超时 `maa_run_timeout`（3000s，给 Hermes 外层 3600s 留 10 分钟）→ terminate/kill，返回码 **124**；`KeyboardInterrupt` → **130**。重开与补跑见下。
+   **停下（`run cancel`，#64）**：`execute()` 外面套 `interrupt_once()`，只有第一次 SIGINT 变成 `KeyboardInterrupt`，之后的忽略（不打断收尾）。落在 `maa run` 里 → 130；落在开游戏 / 等游戏 / 重开前等待 / 截图 → 主流程的 `except KeyboardInterrupt` 记 130。两种都不补跑、不截图，照常关游戏（开游戏半路上也关）、还原台前调度、发「⏹️ 已停止」战报，`last_run.status = cancelled`，返回 130。落在主流程之外（拿锁之后、开游戏之前，或收尾时）由外层补写 `cancelled`。
 9. **截图 + 主页校验**（`capture_home_screenshot()`）— 等 `home_screenshot_delay` 秒 → `maa_playcover.capture_screenshot()` → chmod 600 → `ocrbox`核对 `HOME_MARKERS`（终端/编队/采购中心/公开招募/基建/好友/档案/SANITY）命中 ≥ `HOME_MARKER_MIN`（4），不在就重截，最多 `home_screenshot_attempts`（3）次。截图失败不阻断；判定 False 让整场判红并在备注写命中数；无法判定（ocrbox 没部署 / 崩了）记 `None`、不改结论，写 `last_run.home_verify_detail`。这条闸门只挂日常链，抄作业直接 `capture_screenshot()`（#5b）。
 10. **`close_game()`**（在 `finally` 里，只要 `launch_game()` 被调过）：`TERM` → 等退出 → `pkill -f <完整路径>` 兜底 → 首字符加方括号的同一模式 `pgrep -f` 复核。
 11. **判定与上报** — `ok = (return_code == 0 and not cleanup_errors and home_verified is not False)`。有子区就最后编辑一次子区消息。战报两个出口：**一定**写 `runs/<date>-<phase>-report.json`（战报 Embed 原文，路径记进 `last_run.report`）；开始干活之后（启动失败已直报）再往频道发战报 Embed + `attachment://shot.png`，多段上传失败降级成「无图 Embed + `hermes send MEDIA:`」，整个发送失败只记日志。最后写 `last_run.json`（#63）。
@@ -272,6 +273,7 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
 | `plan show` | 只读，一次念完两场 |
 | `run now` | **不开跑**：抢锁探测 → 拒绝窗（`manual_run_blackout_minutes`，30）→ 预检 → 作废上一张 pending 选关卡 → 发「🎯 手动场选关」卡（`_stage_choices()`，无 default）→ 写 `manual_run.json`（`pending`，10 分钟 TTL）→ `Popen` 过期哨兵 + 推荐补写 |
 | `run start <关卡> <token>` | 只由选关卡登记表触发：token 匹配且 `pending` 且未过期 → 关卡白名单 → 锁 → 拒绝窗 → 预检 → `dispatched` → 删登记 → 收卡 → `Popen maa_daily.py now <token>`。过期就地收卡 |
+| `run cancel` | 停下正在跑的日常 / 抄作业（#64）：读 `run.lock` 持有者 → 只认 `daily` / `copilot` → 用 `ps -o command=` 核对那个 pid 真是 `maa_daily.py` / `maa_copilot_worker.py run-batch`（防 pid 复用）→ `SIGINT`，立即回执。对方自己收尾。没在跑 / 别的持有者 / 核对不上一律 `ok=false`、什么都不发。Wado's MAA 状态条的「停止」也调它 |
 | `run expire <token> [--after 秒]` | 过期哨兵：睡够后仍 `pending` 且到期 → `expired` + 删登记 + 收卡；幂等 |
 | `run recommend <token>` | 推荐补写（脱离会话）：仍 `pending` 才 PATCH 卡写「缺口推荐」并打 🎯；算不出写「推荐暂不可用」 |
 | `log tail` | 读 `last_run.summary`；旧格式则回读 log 用 `extract_summary` 重建 |
@@ -554,6 +556,7 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | 36 | 每开新一关前查距下一场是否够 `auto_copilot_min_lead_minutes`；三条时间闸门（blackout / Depot 窗口 / 时间预算）只有一份，在 `maa_action.py` | `min_lead_reason()` / `_copilot_blackout_reason()` / `depot_window_reason()` + `CopilotTimeBudgetTests` | — |
 | 60 | 上游更新只有一份（`maa_upstream.run_update()`），全库只有它调 `maa update` / `hot-update` / `brew upgrade`，期间持 `run.lock`。开跑前 `hard_block()` 只在钉住项被改、或上次更新不自洽时拒跑；开发副本只检查不更新 | `run_update()` / `hard_block()` / `update_gate()` + `tests/test_upstream.py` | [2026-08-26](./incidents/2026-08-26-maaresource-out-of-sync.md)、[2026-09-07](./incidents/2026-09-07-hot-update-libgit2-proxy.md) |
 | 62 | 动游戏的流程（日常 `execute()`、抄作业 `_batch_run_locked()`）在拿到 `run.lock` 之后、`launch_game()` 之前 `pause_stage_manager()`，在 `finally` 里**关完游戏之后** `restore_stage_manager()`；成功、失败、`KeyboardInterrupt` 都要还原。关之前必须先把原状态落盘（`state/maa/stage_manager.json`），落盘失败就不关；原本关着就不动也不还原；遗留文件以它为准、不得被覆盖。两个函数永不抛。单测不许真的读写 `com.apple.WindowManager`（`_isolation` 审计钩子拦 `subprocess.Popen`，`guard_devices()` 默认把两个函数桩成空操作） | `pause_stage_manager()` / `restore_stage_manager()` + `StageManagerTests` / `StageManagerExecuteTests` / `test_stage_manager_is_paused_before_launch_and_restored` | [2026-11-08](./incidents/2026-11-08-am-window-shelved.md) |
+| 64 | `run cancel` 只给核对过的进程发 SIGINT：持有者必须是 `daily` / `copilot`，pid 的命令行必须真有 `maa_daily.py` / `maa_copilot_worker.py run-batch`（按文件名比，不按子串），否则 `ok=false` 什么都不发。被停的一方只让第一次 SIGINT 打断（`interrupt_once()`），不补跑、不截主页，照常关游戏、还原台前调度（#62）、发战报，终态 `last_run.status = cancelled`（抄作业的轮记 `canceled`、不记开打前失败），返回 130；放锁随进程收尾 | `run_cancel()` / `_is_run_process()` + `maa_common.interrupt_once()` / `CANCEL_EXIT_CODE` + `execute()` / `_batch_run_locked()` + `RunCancelTests` / `CancelledRunTests` / `test_a_cancelled_round_ends_as_cancelled_and_reports` | REVIEW_2026-11-09 §2.2 |
 
 ### 8.5 部署与状态文件
 | # | 不变量 | 落点 | 来由 |
@@ -747,6 +750,8 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 | `upstream status [--online]` | 上游状态，默认离线、< 2 秒 | 见 12.3 |
 | `upstream update` | 过闸门后派一个 worker，立即返回；GUI 每 2 秒轮询 `upstream status`，直到 `running` 变成 false | `started`，或 `blocked` |
 
+**GUI 也用的通用命令**：`run cancel`（在 `dispatch()` 里，Discord 和 GUI 走同一个入口，回执没有 `data`）。状态条的「停止」在 `run.lock` 持有者是 `daily` / `copilot` 时先弹确认、再调它，然后刷新状态；被停的那一场写 `last_run.status = cancelled`（#64）。
+
 实现细节：`run local` 不发选关卡，关卡白名单 → 开关校验（`fight/infrast/recruit/mall/award/annihilation`，只认真布尔，五项全关拒绝）→ 锁 → 拒绝窗（`--force` 只跳过这一条，锁冲突永远不能强行）→ 预检 → 收掉 Discord 上没选的选关卡（`superseded`）→ 写 `manual_run.json`（`dispatched` + `tasks` / `annihilation` / `source` / `forced`）→ `Popen maa_daily.py now <token>`；`maa_daily.apply_local_switches()` 只把开关叠到这一场，不进 `plan.json`（M4）。`copilot preview` 要 5～20 秒、不走 Discord 的 20 秒路径（#6）：持 `copilot_search.lock`、森空岛刷新失败直接报错、绕过 12h 缓存搜全部候选，返回每份是否完全满足（`maa_copilot.is_perfect()`，与 `pick_perfect_candidate()` 同一判据）、缺什么，自动选中第一份完全满足的，存 `copilot/previews/<token>.json`（30 分钟，不在 `searches/` 下）。`copilot go` 被挡什么都不写，否则发「已排程」卡 → 写 `searches/<新 token>.json` 为 `queued` → `dispatch_batch()`；同一次预览只能派一次。
 
 ### 12.2 锁
@@ -762,7 +767,7 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 | 文件 | GUI 用到的字段 |
 |---|---|
 | `config.json` | `session_schedule`、`config_meta`、`maa_core_version` / `maa_cli_version`，以及 `config get` 列出的键 |
-| `last_run.json` | `status`、`phase`（`am` / `pm` / `now` / `copilot-<token>`）、`started_at` / `finished_at`、`summary`、`plan.stage` / `plan.tasks`（日常）、`stage`（抄作业）、`resource_update_*`、`log`（本场 maa-cli 日志的绝对路径。日常、手动场、抄作业**开跑那一笔就写上**，运行中逐行追加，GUI 只读新增部分、按 `<Task> Start` 显示当前阶段；文件可能还没建，或者在 maa run 开写前仍是同名旧场的内容——修改时间早于 `started_at` 的当没有，文件变短就从头读）。新一场开跑时只属于上一场的字段会被整批删掉（§6 `new_run`），读不到就当没有；判成败只看 `status`，不要读 `ok` |
+| `last_run.json` | `status`、`phase`（`am` / `pm` / `now` / `copilot-<token>`）、`started_at` / `finished_at`、`summary`、`plan.stage` / `plan.tasks`（日常）、`stage`（抄作业）、`resource_update_*`、`log`（本场 maa-cli 日志的绝对路径。日常、手动场、抄作业**开跑那一笔就写上**，运行中逐行追加，GUI 只读新增部分、按 `<Task> Start` 显示当前阶段；文件可能还没建，或者在 maa run 开写前仍是同名旧场的内容——修改时间早于 `started_at` 的当没有，文件变短就从头读）。新一场开跑时只属于上一场的字段会被整批删掉（§6 `new_run`），读不到就当没有；判成败只看 `status`（`running` / `success` / `failed` / `skipped` / `cancelled`），不要读 `ok`。`thread_id` 可能是 `null`（Discord 不可用，#63），`report` 是本场战报文件 `runs/<场>-report.json` 的路径（日常才有） |
 | `plan.json` / `defaults.json` | 本场关卡、跳过；默认关和默认任务 |
 | `upstream.json` | 见下表 |
 

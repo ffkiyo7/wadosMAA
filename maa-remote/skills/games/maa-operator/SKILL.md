@@ -60,6 +60,7 @@ python3 ~/.hermes/scripts/maa_action.py plan skip-today off <am|pm>
 python3 ~/.hermes/scripts/maa_action.py plan fight <on|off> <am|pm>
 python3 ~/.hermes/scripts/maa_action.py plan show
 python3 ~/.hermes/scripts/maa_action.py run now
+python3 ~/.hermes/scripts/maa_action.py run cancel
 python3 ~/.hermes/scripts/maa_action.py log tail
 python3 ~/.hermes/scripts/maa_action.py copilot card
 python3 ~/.hermes/scripts/maa_action.py copilot find <关卡或区域> [<关卡或区域> ...]
@@ -71,7 +72,7 @@ python3 ~/.hermes/scripts/maa_action.py copilot auto <off|on|status>
 ```
 
 `copilot cancel <token>` 通常由「已排程」卡上的「❌ 取消本轮」按钮触发；
-token 形如 12 位十六进制，来自那张卡，不要猜测。已经开跑的一轮取消不了。
+token 形如 12 位十六进制，来自那张卡，不要猜测。已经开跑的一轮要用 `run cancel` 停。
 
 ## 意图映射
 
@@ -88,6 +89,8 @@ token 形如 12 位十六进制，来自那张卡，不要猜测。已经开跑�
 - “现在跑” / “手动跑 CE-6” → `run now`（**只发选关卡**，用户从卡上的下拉选关才开跑，
   10 分钟不选作废；带关卡名也照样只发卡、让用户点，不要替他选。手动场豁免 skip：
   设了跳过也照跑。距 08:00 / 22:00 不足 30 分钟会拒绝，原样转述）
+- “停下 / 别跑了 / 把正在跑的停掉” → `run cancel`（停下正在跑的日常或抄作业：已经打完的
+  不受影响，游戏会被关掉，战报照发。没在跑会原样说明。**先向用户确认再执行**）
 - “看日志 / 最近怎么了” → `log tail`（只返回中文结果，不展示 CLI 原文）
 - “抄作业 / 有什么关能抄 / 抄作业卡” → `copilot card`（发一张当前能抄的关一览卡，
   用户从卡上的下拉选关；不要替用户选）

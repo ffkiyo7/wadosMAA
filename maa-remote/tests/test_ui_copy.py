@@ -63,7 +63,7 @@ GUARD = re.compile(r"//\s*copy-guard:\s*(developer|legacy|end|ignore)\b")
 EXTRA_ACTION_FUNCTIONS = {
     "dispatch_blocker", "_copilot_blackout_reason", "min_lead_reason", "depot_window_reason",
     "manual_run_blackout_reason", "_schedule_write", "_local_run_switches", "copilot_cancel",
-    "copilot_status",
+    "copilot_status", "run_cancel",
 }
 
 

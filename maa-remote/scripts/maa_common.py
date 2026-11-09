@@ -10,6 +10,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import sys
 import tempfile
 import time
@@ -148,7 +149,7 @@ SAFE_MALL_ITEM_RE = re.compile(r"^[　-鿿·・A-Za-z0-9 \-_]{1,20}$")
 PlanPhase = Literal["am", "pm"]
 Phase = Literal["am", "pm", "now"]
 # `last_run.json` 的 `status`。
-RunStatus = Literal["running", "success", "failed", "skipped"]
+RunStatus = Literal["running", "success", "failed", "skipped", "cancelled"]
 # `manual_run.json` 的 `status`（`maa_action` 写 pending / superseded / expired / failed，
 # 派发时写 dispatched，`maa_daily` 只认 dispatched）。
 ManualRunStatus = Literal["pending", "dispatched", "superseded", "expired", "failed"]
@@ -567,6 +568,37 @@ def lock_holder_text(marker: Mapping[str, Any] | None) -> str:
         return f"{label}（自 {since:%H:%M}）"
     except (TypeError, ValueError):
         return label
+
+
+# `run cancel`（不变量 #64）给持锁的日常 / 抄作业发 SIGINT；收到后的统一说法和返回码。
+CANCEL_EXIT_CODE = 130
+CANCELLED_NOTE = "已按你的指令停止，已经打完的不受影响。"
+
+
+@contextmanager
+def interrupt_once() -> Iterator[None]:
+    """只让第一次 SIGINT 打断：变成 KeyboardInterrupt；之后的一律忽略，免得打断关游戏、
+    还原台前调度这些收尾（不变量 #64）。退出时还原原来的处理函数。不在主线程时什么都不做。
+    """
+    fired = False
+
+    def handler(_signum: int, _frame: object) -> None:
+        nonlocal fired
+        if fired:
+            print("已经在停止了，忽略重复的停止请求", file=sys.stderr, flush=True)
+            return
+        fired = True
+        raise KeyboardInterrupt
+
+    try:
+        previous = signal.signal(signal.SIGINT, handler)
+    except ValueError:  # 不在主线程
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
 
 
 def is_run_locked() -> bool:

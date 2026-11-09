@@ -8,6 +8,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import time
@@ -1872,6 +1873,72 @@ def copilot_cancel(token: str) -> tuple[bool, str]:
     return True, "❌ 已取消，相关按钮已清理。"
 
 
+# `run cancel`（不变量 #64）只停这两种：持锁种类 → 必须出现在对方命令行里的脚本名和子命令。
+CANCELABLE_RUNS: dict[str, tuple[str, str]] = {
+    "daily": ("maa_daily.py", ""),
+    "copilot": ("maa_copilot_worker.py", "run-batch"),
+}
+DAILY_RUN_NAMES = {"早": "早场日常", "晚": "晚场日常", "手动": "手动日常"}
+
+
+def _process_command(pid: int) -> list[str]:
+    """`pid` 现在的命令行（拆成词）；进程不在或读不到返回空表。"""
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    return result.stdout.strip().split()
+
+
+def _is_run_process(command: list[str], script: str, subcommand: str) -> bool:
+    """命令行里真有这个脚本（按文件名比，不按子串）且带着该有的子命令：防 pid 被别的程序复用。"""
+    has_script = any(Path(word).name == script for word in command)
+    return has_script and (not subcommand or subcommand in command)
+
+
+def run_cancel() -> tuple[bool, str]:
+    """停下正在跑的日常 / 抄作业（REVIEW §2.2，不变量 #64）。
+
+    读 `run.lock` 的持有者标记 → 只认 `daily` / `copilot` → 核对那个 pid 的命令行真是
+    `maa_daily.py` / `maa_copilot_worker.py run-batch` → 发 SIGINT。对方自己收尾：关游戏、
+    还原台前调度、发战报、`last_run.status = cancelled`、放锁。这里不等它，立即回执。
+    """
+    marker = run_lock_holder()
+    if not marker:
+        return False, "现在没有在跑的日常或抄作业。"
+    holder = str(marker.get("holder") or "")
+    detail = str(marker.get("detail") or "")
+    if holder not in CANCELABLE_RUNS:
+        busy = lock_holder_text(marker) or "另一个任务"
+        return False, f"{busy}正在用游戏，这里停不了，等它做完。"
+    name = (
+        DAILY_RUN_NAMES.get(detail, "日常")
+        if holder == "daily"
+        else f"抄作业 {detail}".strip()
+    )
+    pid = marker.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return False, f"认不出{name}是哪一个，没有停。"
+    script, subcommand = CANCELABLE_RUNS[holder]
+    if not _is_run_process(_process_command(pid), script, subcommand):
+        return False, f"{name}好像已经结束了，没有停。"
+    try:
+        os.kill(pid, signal.SIGINT)
+    except ProcessLookupError:
+        return False, f"{name}刚刚结束了。"
+    except PermissionError:
+        return False, f"没有权限停下{name}。"
+    return True, f"⏹️ 正在停止{name}：已经打完的不受影响，游戏会被关掉，战报稍后就到。"
+
+
 def copilot_status(token: str) -> tuple[bool, str]:
     state = _load_search(token)
     if state is None:
@@ -1957,6 +2024,8 @@ def dispatch(argv: list[str]) -> tuple[bool, str]:
         return show_plan()
     if argv == ["run", "now"]:
         return run_now()
+    if argv == ["run", "cancel"]:
+        return run_cancel()
     if argv[:2] == ["run", "start"] and len(argv) == 4:
         return run_start(argv[2], argv[3])
     if argv[:2] == ["run", "expire"] and len(argv) == 3:
@@ -1988,7 +2057,7 @@ def dispatch(argv: list[str]) -> tuple[bool, str]:
         return copilot_auto(argv[2])
     return False, (
         "不支持的动作；只允许 plan set-stage <关卡> <am|pm>、"
-        "plan skip-today <on|off> <am|pm>、plan fight <on|off> <am|pm>、plan show、run now、run start <关卡> <token>、"
+        "plan skip-today <on|off> <am|pm>、plan fight <on|off> <am|pm>、plan show、run now、run cancel、run start <关卡> <token>、"
         "run expire <token> [--after 秒]、run recommend <token>、log tail、"
         "copilot card/find/cancel/status/mark-cleared/unmark、copilot auto <on|off|status>。"
     )

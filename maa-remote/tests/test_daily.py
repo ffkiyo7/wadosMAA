@@ -1073,8 +1073,9 @@ class StageManagerExecuteTests(unittest.TestCase):
         self.assertEqual(order, ["pause", "restore"])
 
     def test_restored_when_the_run_is_cancelled(self) -> None:
+        # #64：取消不再穿出 execute()，照常收尾、返回 130。
         result, order = self._execute(lambda _config: None, wait=KeyboardInterrupt())
-        self.assertIsInstance(result, KeyboardInterrupt)
+        self.assertEqual(result, maa_common.CANCEL_EXIT_CODE)
         self.assertEqual(order, ["pause", "close", "restore"])
 
     def test_nothing_to_restore_when_it_was_already_off(self) -> None:
@@ -1188,6 +1189,181 @@ class DiscordOptionalTests(unittest.TestCase):
             request.assert_not_called()
             request.side_effect = OSError("boom")
             self.assertIsNone(maa_daily.notify("t", "POST", "/channels/1/messages", {}, what="x"))
+
+
+class CancelledRunTests(unittest.TestCase):
+    """不变量 #64：`run cancel` 的 SIGINT → 关游戏、发战报、`last_run.status = cancelled`、返回 130。"""
+
+    def setUp(self) -> None:
+        isolate_stage_index(self)
+
+    def _execute(self, **overrides: Any) -> SimpleNamespace:
+        at = datetime(2026, 11, 9, 8, 0, tzinfo=BEIJING)
+        lock = unittest.mock.MagicMock()
+        lock.__enter__.return_value = True
+        lock.__exit__.return_value = False
+        plan = maa_common.normalize_plan({"stage": "TL-7"})
+        plan["farming_fallback_stage"] = "TL-9"
+        with tempfile.TemporaryDirectory() as raw, contextlib.ExitStack() as stack:
+            def stub(target: Any, name: str, **kwargs: Any) -> unittest.mock.MagicMock:
+                return stack.enter_context(patch.object(target, name, **kwargs))
+
+            stub(maa_daily, "RUNS_DIR", new=Path(raw))
+            stub(maa_daily, "now_beijing", return_value=at)
+            stub(maa_daily, "load_config", return_value={"channel_id": "123", "maa_config_dir": raw})
+            stub(maa_daily, "discord_token", return_value="token")
+            stub(maa_daily, "load_json", return_value={})
+            stub(maa_daily, "effective_plan", return_value=plan)
+            stub(maa_daily, "run_lock", return_value=lock)
+            stub(maa_daily, "cleanup_run_files")
+            stub(maa_daily, "atomic_write_text")
+            stub(maa_daily, "should_skip", return_value=False)
+            stub(maa_daily, "upstream_hard_block", **overrides.get("block", {"return_value": ""}))
+            stub(maa_playcover, "game_is_online", return_value=(False, ""))
+            merge = stub(maa_daily, "merge_last_run")
+            stub(maa_daily, "discord_request", return_value={"id": "9"})
+            stub(maa_daily, "create_thread", return_value={"id": "7"})
+            direct = stub(maa_daily, "send_direct_failure")
+            stub(maa_daily, "require_executable")
+            stub(maa_playcover, "verify_game_installed")
+            stub(maa_playcover, "launch_game")
+            stub(maa_playcover, "wait_for_game", **overrides.get("wait", {}))
+            stub(maa_playcover, "settle_game_window", return_value="")
+            stub(maa_daily, "run_maa_resilient", **overrides.get(
+                "run", {"return_value": (130, DRY_FIGHT_ERROR_LOG, ["maa run 已按人工指令终止。"], 0, 0)}
+            ))
+            fallback = stub(maa_daily, "_fallback_fight_run")
+            salvage = stub(maa_daily, "_salvage_run")
+            shot = stub(maa_daily, "capture_home_screenshot", return_value=(True, "", True, ""))
+            close = stub(maa_playcover, "close_game", return_value=[])
+            report = stub(maa_daily, "send_report")
+            code = maa_daily.execute("am")
+            report_file = Path(raw) / "2026-11-09-am-report.json"
+            saved = json.loads(report_file.read_text("utf-8")) if report_file.is_file() else None
+        return SimpleNamespace(
+            code=code, finished=merge.call_args_list[-1].args[0], merge=merge, fallback=fallback,
+            salvage=salvage, shot=shot, close=close, report=report, direct=direct, saved=saved,
+        )
+
+    def test_interrupted_maa_run_ends_cancelled_without_any_rerun(self) -> None:
+        result = self._execute()
+        self.assertEqual(result.code, maa_common.CANCEL_EXIT_CODE)
+        self.assertEqual(result.finished["status"], "cancelled")
+        self.assertEqual(result.finished["return_code"], 130)
+        self.assertIn(maa_common.CANCELLED_NOTE, result.finished["summary"])
+        # 停下就是停下：主关空跑也不补后备关，不截图，照常关游戏、发战报。
+        result.fallback.assert_not_called()
+        result.salvage.assert_not_called()
+        result.shot.assert_not_called()
+        result.close.assert_called_once()
+        embed = result.report.call_args.args[2]["embeds"][0]
+        self.assertIn("已停止", embed["title"])
+        self.assertIn("已停止", result.saved["embeds"][0]["title"])
+
+    def test_interrupt_outside_maa_run_still_closes_the_game_and_reports(self) -> None:
+        result = self._execute(wait={"side_effect": KeyboardInterrupt()})
+        self.assertEqual(result.code, maa_common.CANCEL_EXIT_CODE)
+        self.assertEqual(result.finished["status"], "cancelled")
+        self.assertIsNone(result.finished["startup_error"])
+        result.close.assert_called_once()
+        result.direct.assert_not_called()
+        result.report.assert_called_once()
+
+    def test_interrupt_before_the_game_opens_still_writes_cancelled(self) -> None:
+        result = self._execute(block={"side_effect": KeyboardInterrupt()})
+        self.assertEqual(result.code, maa_common.CANCEL_EXIT_CODE)
+        self.assertEqual(result.finished["status"], "cancelled")
+        result.close.assert_not_called()
+
+    def test_only_the_first_interrupt_counts(self) -> None:
+        import signal
+
+        before = signal.getsignal(signal.SIGINT)
+        with maa_common.interrupt_once():
+            handler = signal.getsignal(signal.SIGINT)
+            assert callable(handler)
+            with self.assertRaises(KeyboardInterrupt):
+                handler(signal.SIGINT, None)
+            with contextlib.redirect_stderr(io.StringIO()):
+                handler(signal.SIGINT, None)  # 第二次不再打断收尾
+        self.assertIs(signal.getsignal(signal.SIGINT), before)
+
+
+class RunCancelTests(unittest.TestCase):
+    """不变量 #64：`run cancel` 只给核对过的日常 / 抄作业 worker 发 SIGINT。"""
+
+    DAILY = ["/opt/homebrew/bin/python3", "/Users/x/.hermes/scripts/maa_daily.py", "now", "abc"]
+    WORKER = ["/usr/bin/python3", "/Users/x/.hermes/scripts/maa_copilot_worker.py", "run-batch", "a" * 12]
+
+    def _cancel(self, marker: Any, command: list[str] | None = None, kill: Any = None):
+        with patch.object(maa_action, "run_lock_holder", return_value=marker), patch.object(
+            maa_action, "_process_command", return_value=command or []
+        ), patch.object(maa_action.os, "kill", side_effect=kill) as killed:
+            ok, message = maa_action.dispatch(["run", "cancel"])
+        return ok, message, killed
+
+    def _assert_plain(self, message: str) -> None:
+        for word in ("锁", "进程", "派发", "场次", "开跑", "token"):
+            self.assertNotIn(word, message)
+
+    def test_nothing_running(self) -> None:
+        ok, message, killed = self._cancel(None)
+        self.assertFalse(ok)
+        self.assertIn("没有在跑", message)
+        killed.assert_not_called()
+        self._assert_plain(message)
+
+    def test_other_holders_are_never_signalled(self) -> None:
+        for holder in ("gui", "update", "depot"):
+            with self.subTest(holder=holder):
+                ok, message, killed = self._cancel(
+                    {"holder": holder, "detail": "", "pid": 4242}, self.DAILY
+                )
+                self.assertFalse(ok)
+                killed.assert_not_called()
+                self._assert_plain(message)
+
+    def test_a_reused_pid_is_never_signalled(self) -> None:
+        cases = [
+            ({"holder": "daily", "detail": "早", "pid": 4242}, ["/usr/bin/vim", "notes.txt"]),
+            ({"holder": "daily", "detail": "早", "pid": 4242}, ["/bin/sh", "-c", "echo maa_daily.py.bak"]),
+            ({"holder": "copilot", "detail": "SR-8", "pid": 4242},
+             ["/usr/bin/python3", "/x/maa_copilot_worker.py", "search", "b" * 12]),
+            ({"holder": "daily", "detail": "早", "pid": 4242}, []),
+            ({"holder": "daily", "detail": "早", "pid": "4242"}, self.DAILY),
+            ({"holder": "daily", "detail": "早", "pid": 1}, self.DAILY),
+        ]
+        for marker, command in cases:
+            with self.subTest(command=command, pid=marker["pid"]):
+                ok, message, killed = self._cancel(marker, command)
+                self.assertFalse(ok)
+                killed.assert_not_called()
+                self._assert_plain(message)
+
+    def test_the_daily_run_gets_sigint(self) -> None:
+        import signal
+
+        ok, message, killed = self._cancel({"holder": "daily", "detail": "早", "pid": 4242}, self.DAILY)
+        self.assertTrue(ok)
+        killed.assert_called_once_with(4242, signal.SIGINT)
+        self.assertIn("早场日常", message)
+        self.assertIn("已经打完的不受影响", message)
+        self._assert_plain(message)
+
+    def test_the_copilot_worker_gets_sigint(self) -> None:
+        import signal
+
+        ok, message, killed = self._cancel({"holder": "copilot", "detail": "SR-8", "pid": 5151}, self.WORKER)
+        self.assertTrue(ok)
+        killed.assert_called_once_with(5151, signal.SIGINT)
+        self.assertIn("抄作业 SR-8", message)
+
+    def test_a_run_that_just_ended(self) -> None:
+        ok, message, _killed = self._cancel(
+            {"holder": "daily", "detail": "晚", "pid": 4242}, self.DAILY, kill=ProcessLookupError()
+        )
+        self.assertFalse(ok)
+        self.assertIn("刚刚结束", message)
 
 
 class ProxyFailureTests(unittest.TestCase):
