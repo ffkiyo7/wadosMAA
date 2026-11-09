@@ -112,11 +112,21 @@ enum RemoteBridge {
             if !receipt.ok {
                 await Diagnostics.record(receipt.diagnostic(args))
             }
-            return receipt
+            return Self.explained(receipt)
         } catch let error as RemoteBridgeError {
             await Diagnostics.record(error.diagnostic)
             throw error
         }
+    }
+
+    /// 后台不认识这条命令（`unknown_command`）：App 比线上 maa-remote 新。原话是给 Discord 看的命令清单，
+    /// 换成一句人话，原话进诊断信息（`detail`）。
+    static func explained(_ receipt: RemoteReceipt) -> RemoteReceipt {
+        guard !receipt.ok, receipt.code == "unknown_command" else { return receipt }
+        return RemoteReceipt(
+            ok: false, code: receipt.code,
+            message: "后台还是旧版，不支持这个操作；更新后台后再试。",
+            detail: receipt.detail ?? receipt.message, data: receipt.data)
     }
 
     private final class Box: @unchecked Sendable {
