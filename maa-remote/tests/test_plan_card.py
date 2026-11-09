@@ -991,6 +991,34 @@ class CurrentActivityKeyTests(unittest.TestCase):
                     "SideStory「昨日海」|YW",
                 )
 
+    def test_the_today_page_gets_the_open_activity_and_its_first_three_stages(self) -> None:
+        self._cache(YW=self.YW, TL=_side_story(
+            "SideStory「时间啊，向前！」", "2026/11/01 12:00:00", "2026/11/22 03:59:59",
+            ["TL-9", "TL-8", "TL-7", "TL-4"],
+        ))
+        activity = maa_plan_card.current_activity({"maa_activity_cache": str(self.cache)}, self.at)
+        self.assertEqual(activity, {
+            "name": "「时间啊，向前！」",
+            "start_at": "2026-11-01T12:00:00+08:00",
+            "end_at": "2026-11-22T03:59:59+08:00",
+            "stages": ["TL-9", "TL-8", "TL-7"],
+        })
+
+    def test_no_open_or_unreadable_activity_is_none(self) -> None:
+        self._cache(YW=self.YW)
+        self.assertIsNone(maa_plan_card.current_activity({"maa_activity_cache": str(self.cache)}, self.at))
+        self.cache.unlink()
+        self.assertIsNone(maa_plan_card.current_activity({"maa_activity_cache": str(self.cache)}, self.at))
+
+    def test_a_rerun_keeps_its_name_and_skips_the_entry_pseudo_stage(self) -> None:
+        self._cache(SSReopen=_side_story(
+            "SideStory「墟」复刻", "2026/11/05 16:00:00", "2026/11/15 03:59:59",
+            ["SSReopen-AT", "AT-8", "AT-7"],
+        ))
+        activity = maa_plan_card.current_activity({"maa_activity_cache": str(self.cache)}, self.at)
+        assert activity is not None
+        self.assertEqual(activity["name"], "「墟」复刻")
+        self.assertEqual(activity["stages"], ["AT-8", "AT-7"])
 
 
 if __name__ == "__main__":

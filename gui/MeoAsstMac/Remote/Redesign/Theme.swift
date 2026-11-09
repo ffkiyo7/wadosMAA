@@ -433,6 +433,18 @@ enum Beijing {
         return formatter.string(from: date)
     }
 
+    /// 「11/22」
+    static func slashDay(_ date: Date) -> String {
+        let parts = calendar.dateComponents([.month, .day], from: date)
+        return "\(parts.month ?? 0)/\(parts.day ?? 0)"
+    }
+
+    /// 「还剩 12 天」；不到一天按小时。
+    static func left(until end: Date, now: Date = .now) -> String {
+        let hours = max(0, end.timeIntervalSince(now)) / 3600
+        return hours >= 24 ? "还剩 \(Int(hours / 24)) 天" : "还剩 \(max(1, Int(hours.rounded(.up)))) 小时"
+    }
+
     static func monthDay(_ date: Date) -> String {
         let parts = calendar.dateComponents([.month, .day], from: date)
         return "\(parts.month ?? 0) 月 \(parts.day ?? 0) 日"

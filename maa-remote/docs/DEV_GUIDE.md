@@ -756,7 +756,7 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 | `config set <键> <JSON>` / `config patch <JSON 对象>` | 改配置。按 `maa_settings.FIELDS` 白名单校验；`patch` 要么全改、要么全不改 | 同 `config get` |
 | `defaults show` / `defaults set stage <关>` / `defaults set task <名> on\|off` | 持久默认值 | `defaults.json` 的内容 |
 | `schedule show` / `set <am\|pm> <HH:MM>` / `enable <场>` / `disable <场>` / `sync` | 早晚场时间和 cron（§3、K6）。只有拨开关才会 pause / resume | `maa_schedule.schedule_report()` |
-| `run choices` | 一键长草页的选项：关卡（和选关卡同源 `_stage_choices()`）、环节开关、锁 / 定时场优先的现状 | `choices`、`switches`、`task_names`、`busy`、`blackout` |
+| `run choices` | 一键长草页的选项：关卡（和选关卡同源 `_stage_choices()`）、环节开关、锁 / 定时场优先的现状 | `choices`、`switches`、`task_names`、`busy`、`blackout`；`activity`：此刻开放的活动（`maa_plan_card.current_activity()`，和抄作业认同一期，读 MaaCore 活动缓存）`{name, start_at, end_at, stages}`，时间是北京时间 ISO，`stages` 是缓存里排前三的活动关（首页前置用），没有活动是 `null` |
 | `copilot stages` | 自动抄作业的关卡列表（和抄作业卡同源 `copilot_card_stages()`），只读本地。「已通」和 watcher 同一把尺子：记账，或森空岛区域进度按游戏数据的区域链精确到关（`maa_gamedata.skland_cleared()`，只算普通，森空岛不分突袭） | `stages`（每行 `stage` / `code` / `nav` / `reason` / `status` / `status_text` / `ledger_cleared`：本地记账里有通关记录，可撤销）、`in_activity` |
 | `run local <关> <开关 JSON> [--force]` | 本机手动场：`--force` 只解除「定时场优先」，不解锁 | `token` 等 |
 | `plan today` | 今天早场、晚场各打算做什么。只读本地（不联网、不重算自动定关、不写盘），首页场卡用 | `date`；`sessions[]`（按 am、pm）：`phase` / `name` / `time` / `enabled`（`session_schedule`）、`stage`、`stage_source`（`auto` / `discord` / 空 = 默认关）、`skip`、`tasks`（`effective_plan()` 的环节开关，`plan fight off` 后 `fight` 为假）、`drops`（`[{item_id, name, count}]`，自动定关的刷够即停上限，物品名读不出来就是 itemId）、`fallback_stage`、`source` / `updated_at`（这场覆盖最后是谁改的）、`choices`（可换的关，和计划卡下拉同源 `_stage_choices()`）；`task_names` |

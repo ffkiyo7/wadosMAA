@@ -144,13 +144,18 @@ def activity_deadlines(
 ACTIVITY_STAGE_RE = re.compile(r"^([A-Za-z]{1,8})-\d{1,2}$")
 
 
-def cached_activity_key(
-    path: Path | None = None, at: datetime | None = None
-) -> str | None:
-    """MaaCore 活动缓存里**此刻开放**的 SideStory 的 key（`标题|前缀`，同 `activity_target()`）。
+# 首页「当期活动」前置几个活动关：MaaCore 活动缓存按关号倒序列，前三个就是 21 理智的三张材料图。
+ACTIVITY_FRONT_STAGES = 3
 
-    缓存在、但此刻没有开放的活动 → `""`；缓存读不出来 → `None`（调用方退回别的来源）。
-    几个同时开放时取开始最晚的那个。复刻条目（`SSReopen`）的前缀从它的关卡里取。
+
+def _open_side_stories(
+    path: Path | None = None, at: datetime | None = None
+) -> list[dict[str, Any]] | None:
+    """MaaCore 活动缓存里**此刻开放**的 SideStory，开始最晚的在前。
+
+    每项 `title`（缓存的 Tip）、`family`（关卡前缀）、`start` / `expire`（北京时间）、`stages`
+    （缓存里列的活动关，原顺序）。缓存在、但此刻没有开放的 → `[]`；缓存读不出来 → `None`。
+    复刻条目（`SSReopen`）的前缀从它的关卡里取。
     """
     try:
         raw = load_json(path or DEFAULT_STAGE_ACTIVITY_PATH, None)
@@ -160,7 +165,7 @@ def cached_activity_key(
     if not isinstance(side_stories, dict):
         return None
     moment = at or now_beijing()
-    best: tuple[datetime, str] | None = None
+    found: list[dict[str, Any]] = []
     for entry in side_stories.values():
         activity = entry.get("Activity") if isinstance(entry, dict) else None
         if not isinstance(activity, dict):
@@ -177,18 +182,55 @@ def cached_activity_key(
             continue
         if not start <= moment < expire:
             continue
-        family = ""
-        for stage in entry.get("Stages") or []:
-            match = ACTIVITY_STAGE_RE.match(str(stage.get("Value") or "") if isinstance(stage, dict) else "")
-            if match:
-                family = match.group(1)
-                break
-        if not family:
+        stages = [
+            str(stage.get("Value"))
+            for stage in entry.get("Stages") or []
+            if isinstance(stage, dict) and ACTIVITY_STAGE_RE.match(str(stage.get("Value") or ""))
+        ]
+        if not stages:
             continue
-        title = str(activity.get("Tip") or activity.get("StageName") or "当前活动")[:120]
-        if best is None or start > best[0]:
-            best = (start, f"{title}|{family}")
-    return best[1] if best else ""
+        found.append({
+            "title": str(activity.get("Tip") or activity.get("StageName") or "当前活动")[:120],
+            "family": ACTIVITY_STAGE_RE.match(stages[0]).group(1),  # type: ignore[union-attr]
+            "start": start.astimezone(BEIJING),
+            "expire": expire.astimezone(BEIJING),
+            "stages": stages,
+        })
+    found.sort(key=lambda item: item["start"], reverse=True)
+    return found
+
+
+def cached_activity_key(
+    path: Path | None = None, at: datetime | None = None
+) -> str | None:
+    """MaaCore 活动缓存里**此刻开放**的 SideStory 的 key（`标题|前缀`，同 `activity_target()`）。
+
+    缓存在、但此刻没有开放的活动 → `""`；缓存读不出来 → `None`（调用方退回别的来源）。
+    几个同时开放时取开始最晚的那个。
+    """
+    found = _open_side_stories(path, at)
+    if found is None:
+        return None
+    return f"{found[0]['title']}|{found[0]['family']}" if found else ""
+
+
+def current_activity(config: Config, at: datetime | None = None) -> dict[str, Any] | None:
+    """首页「当期活动」：名字、起止（北京时间 ISO）、前置的几个活动关。没有开放的活动 → `None`。
+
+    和 `cached_activity_key()` 认同一期活动；名字去掉缓存 Tip 里的「SideStory」前缀。
+    """
+    configured = str(config.get("maa_activity_cache") or "").strip()
+    found = _open_side_stories(Path(configured) if configured else None, at)
+    if not found:
+        return None
+    best = found[0]
+    name = re.sub(r"^\s*SideStory\s*", "", best["title"]) or best["title"]
+    return {
+        "name": name,
+        "start_at": best["start"].isoformat(timespec="seconds"),
+        "end_at": best["expire"].isoformat(timespec="seconds"),
+        "stages": best["stages"][:ACTIVITY_FRONT_STAGES],
+    }
 
 
 def current_activity_key(config: Config, at: datetime | None = None) -> str:

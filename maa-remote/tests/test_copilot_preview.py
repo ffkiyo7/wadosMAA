@@ -174,12 +174,13 @@ class GuiListTests(unittest.TestCase):
             "maa_plan_card._stage_choices", return_value=choices
         ), patch.object(maa_action, "is_run_locked", return_value=False), patch.object(
             maa_action, "manual_run_blackout_reason", return_value="距早场 08:00 不足 30 分钟"
-        ):
+        ), patch("maa_plan_card.current_activity", return_value={"name": "「时间啊，向前！」"}):
             ok, _, data = maa_action.run_choices()
         self.assertTrue(ok)
         self.assertEqual([c["stage"] for c in data["choices"]], ["", "1-7"])
         self.assertIn("annihilation", data["switches"])
         self.assertIn("不足", data["blackout"])
+        self.assertEqual(data["activity"]["name"], "「时间啊，向前！」")
 
     def test_copilot_stages_share_the_card_source(self) -> None:
         rows = [{"stage": "SR-5", "status": "todo"}]

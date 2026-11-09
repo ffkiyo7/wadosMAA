@@ -739,7 +739,7 @@ def _local_run_switches(raw: str) -> dict[str, bool]:
 
 def run_choices() -> tuple[bool, str, dict[str, Any]]:
     """GUI「一键长草」页的选项：关卡和选关卡同源（`_stage_choices()`，K12），外加当前能不能开。"""
-    from maa_plan_card import _stage_choices
+    from maa_plan_card import _stage_choices, current_activity
 
     config = load_config()
     choices = [
@@ -754,6 +754,7 @@ def run_choices() -> tuple[bool, str, dict[str, Any]]:
         "task_names": {**TASK_NAMES, "annihilation": "剿灭"},
         "busy": busy,
         "blackout": blackout,
+        "activity": current_activity(config),
     })
 
 

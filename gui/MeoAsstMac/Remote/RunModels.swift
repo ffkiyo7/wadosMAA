@@ -23,9 +23,34 @@ struct RunChoices: Decodable, Sendable {
     let taskNames: [String: String]
     let busy: String
     let blackout: String
+    /// 此刻开放的活动；没有活动、或旧版 maa-remote 没有这个键时是 nil。
+    let activity: Activity?
+
+    /// `run choices` 的 `activity`（DEV_GUIDE §12）：名字、起止（北京时间 ISO）、首页前置的活动关。
+    struct Activity: Decodable, Sendable, Hashable {
+        let name: String
+        let startAt: String
+        let endAt: String
+        let stages: [String]
+
+        var start: Date? { Self.parse(startAt) }
+        var end: Date? { Self.parse(endAt) }
+
+        private static func parse(_ text: String) -> Date? {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            return formatter.date(from: text)
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case name, stages
+            case startAt = "start_at"
+            case endAt = "end_at"
+        }
+    }
 
     enum CodingKeys: String, CodingKey {
-        case choices, switches, busy, blackout
+        case choices, switches, busy, blackout, activity
         case taskNames = "task_names"
     }
 }

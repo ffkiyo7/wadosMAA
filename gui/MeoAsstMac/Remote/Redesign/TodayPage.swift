@@ -19,7 +19,7 @@ struct TodayPage: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                PageHeader(title: "今天", caption: Beijing.todayCaption())
+                PageHeader(title: "今天", caption: caption)
                 RemoteNotices()
                 HStack(alignment: .top, spacing: 16) {
                     ManualRunCard()
@@ -35,7 +35,20 @@ struct TodayPage: View {
             .padding(.top, 22)
             .padding(.bottom, 40)
         }
-        .task { await store.reload() }
+        .task {
+            await store.reload()
+            // 活动跟着日子变；进首页顺手重读一次关卡选项（里面带当期活动）。
+            await data.loadChoices()
+        }
+    }
+
+    /// 「11 月 10 日 星期二 · 「时间啊，向前！」11/1–11/22 · 还剩 12 天」。没有活动就只有日期。
+    private var caption: String {
+        let today = Beijing.todayCaption()
+        guard let activity = data.choices?.activity, let start = activity.start, let end = activity.end,
+            end > .now
+        else { return today }
+        return "\(today)  ·  \(activity.name) \(Beijing.slashDay(start))–\(Beijing.slashDay(end)) · \(Beijing.left(until: end))"
     }
 }
 
@@ -72,7 +85,21 @@ struct ManualRunCard: View {
     @State private var running = false
     @State private var result: (ok: Bool, text: String)?
 
-    private var defaultStage: String { store.defaults?.stage ?? "" }
+    /// 活动期间前置的活动关（只留关卡选项里有的）；没有活动是空的。
+    private var activityStages: [String] {
+        guard let choices = data.choices, let activity = choices.activity else { return [] }
+        let known = Set(choices.choices.map(\.stage))
+        return activity.stages.filter { known.contains($0) }
+    }
+
+    /// 平时是「日常」里设的默认关；活动期间换成活动关：下一场自动定关选中的活动关，没有就第一个活动关。
+    private var defaultStage: String {
+        let front = activityStages
+        guard let first = front.first else { return store.defaults?.stage ?? "" }
+        let next = SessionGate.load().upcoming(within: 24 * 60)?.phase
+        let sessions = (store.todayPlan?.sessions ?? []).sorted { $0.phase == next && $1.phase != next }
+        return sessions.first { $0.stageSource == "auto" && front.contains($0.stage) }?.stage ?? first
+    }
 
     private func defaultOn(_ key: String) -> Bool { store.defaults?.tasks?[key] ?? true }
 
@@ -143,12 +170,18 @@ struct ManualRunCard: View {
         ) { Task { await start(force: true) } }
     }
 
-    // 关卡胶囊：默认、上次，再补几关；完整列表在「全部关卡…」。
+    // 关卡胶囊：活动期间是活动关和上次作战；平时是默认、上次，再补几关。完整列表在「全部关卡…」。
     private func stageChips(_ choices: RunChoices) -> some View {
         var shown: [RunChoices.Choice] = []
-        if let def = choices.choices.first(where: { $0.stage == defaultStage }) { shown.append(def) }
-        for choice in choices.choices where !shown.contains(choice) && shown.count < 4 {
-            shown.append(choice)
+        let front = activityStages
+        if front.isEmpty {
+            if let def = choices.choices.first(where: { $0.stage == defaultStage }) { shown.append(def) }
+            for choice in choices.choices where !shown.contains(choice) && shown.count < 4 {
+                shown.append(choice)
+            }
+        } else {
+            shown = front.compactMap { stage in choices.choices.first { $0.stage == stage } }
+            if let last = choices.choices.first(where: { $0.stage.isEmpty }) { shown.append(last) }
         }
         if let picked = choices.choices.first(where: { $0.stage == currentStage }), !shown.contains(picked) {
             shown.append(picked)
@@ -235,7 +268,7 @@ struct ManualRunCard: View {
                     }
                     .buttonStyle(WMLinkStyle())
                     .font(.system(size: 11.5))
-                    .help("关卡和要做的事回到「日常」里的设置")
+                    .help(activityStages.isEmpty ? "关卡和要做的事回到「日常」里的设置" : "关卡回到活动关，要做的事回到「日常」里的设置")
                 }
                 Spacer(minLength: 0)
             }
