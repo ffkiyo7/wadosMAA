@@ -32,7 +32,7 @@ struct LockHolder: Decodable, Sendable, Equatable {
             default: return "日常"
             }
         case "copilot": return detail.isEmpty ? "抄作业" : "抄作业 \(detail)"
-        case "depot": return "识别仓库"
+        case "depot": return "清点仓库"
         case "update": return "更新游戏资源"
         case "gui": return detail.isEmpty ? "Wado's MAA" : detail
         default: return "另一个任务"

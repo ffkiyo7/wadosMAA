@@ -460,6 +460,9 @@ struct StatusStack: View {
 
     private func versionHelp(_ status: UpstreamStatus?) -> String {
         let version = CorePreflight.loadedVersion ?? status?.versions.maaCore ?? "未知"
+        if status?.verdict == "blocked" {
+            return "游戏资源状态不对，暂时不能开始日常。请稍后再看，或在设置 › 开发者里复制诊断信息。\n版本 \(version)"
+        }
         return "版本 \(version)"
     }
 
@@ -471,7 +474,7 @@ struct StatusStack: View {
     private func verdictShort(_ status: UpstreamStatus?) -> (text: String, color: Color) {
         guard let status else { return ("没查到", WM.f3) }
         if status.running { return ("正在更新", WM.game) }
-        if status.verdict == "blocked" { return ("有问题，暂时不能开始日常", WM.danger) }
+        if status.verdict == "blocked" { return ("待确认", WM.game) }
         if status.online?.maaResourceOutdated == true || status.online?.maaCliOutdated == true {
             return ("有新版本", accent.color)
         }

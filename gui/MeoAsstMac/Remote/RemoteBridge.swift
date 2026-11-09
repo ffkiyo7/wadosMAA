@@ -47,10 +47,10 @@ enum RemoteBridgeError: LocalizedError {
     /// 界面上的一句人话；技术细节在 `diagnostic`，用「复制诊断信息」拿。
     var errorDescription: String? {
         switch self {
-        case .notDeployed: return "后台还没装好，暂时用不了。"
-        case .launchFailed: return "后台启动不了，请稍后再试。"
-        case .timedOut: return "后台太久没有响应，请稍后再试。"
-        case .badReceipt: return "后台没有响应，请稍后再试。"
+        case .notDeployed: return "Wado's MAA 还没装好，暂时用不了。"
+        case .launchFailed: return "Wado's MAA 启动不了，请稍后再试。"
+        case .timedOut: return "Wado's MAA 太久没有响应，请稍后再试。"
+        case .badReceipt: return "Wado's MAA 没有响应，请稍后再试。"
         }
     }
 

@@ -954,7 +954,7 @@ def depot_window_reason(at: datetime | None = None) -> str | None:
     moment = at or now_beijing()
     minutes = moment.hour * 60 + moment.minute
     if DEPOT_WINDOW_START_MINUTES <= minutes < DEPOT_WINDOW_END_MINUTES:
-        return "04:20–05:00 要识别仓库，这段时间不抄作业。"
+        return "04:20–05:00 要清点仓库，这段时间不抄作业。"
     return None
 
 

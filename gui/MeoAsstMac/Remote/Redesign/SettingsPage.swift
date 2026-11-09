@@ -168,7 +168,7 @@ struct DeveloperSection: View {
                             .buttonStyle(WMButtonStyle())
                             .disabled(store.busy || store.readOnly)
                     }
-                    FormRow(title: "诊断信息", help: "最近的后台报错、版本和路径") {
+                    FormRow(title: "诊断信息", help: "最近的报错、版本和路径") {
                         Button("复制") { Diagnostics.copy() }.buttonStyle(WMButtonStyle())
                     }
                 }
