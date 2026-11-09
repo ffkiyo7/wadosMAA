@@ -87,13 +87,77 @@ def phase_label(phase: str, config: Config | None = None) -> str:
     return f"{name}（{hhmm}）" if hhmm else name
 
 
-def emit(ok: bool, message: str, data: dict[str, Any] | None = None) -> None:
-    # Persistent button runner accepts at most 8192 bytes and parses only JSON.
-    # 带 `data` 的回执只有 GUI 读（它读完整 stdout），不受这个上限；但 message 照样截。
-    payload: dict[str, Any] = {"ok": ok, "message": message}
+class Reply(tuple[Any, ...]):
+    """一条回执（§12.1）：解包照旧是 `(ok, message)` 或 `(ok, message, data)`，另外带两样东西：
+
+    - `code`：稳定的短码，给程序判断（GUI 按它分支，不去比对 `message` 的措辞）；
+    - `detail`：给开发者 / 日志的原始信息（异常文本、路径、对齐细节），不给玩家看。
+
+    `message` 只写给玩家看的一句话（`test_ui_copy` 扫禁用词）。用 `done()` / `refuse()` 造。
+    """
+
+    code: str
+    detail: str
+
+    def __new__(cls, items: tuple[Any, ...], code: str, detail: str = "") -> Reply:
+        reply = super().__new__(cls, items)
+        reply.code = code
+        reply.detail = detail
+        return reply
+
+
+def done(code: str, message: str, data: dict[str, Any] | None = None, *, detail: str = "") -> Reply:
+    """成功的回执；带 `data`（GUI 专用命令）就是三元组。"""
+    items: tuple[Any, ...] = (True, message) if data is None else (True, message, data)
+    return Reply(items, code, detail)
+
+
+def refuse(code: str, message: str, data: dict[str, Any] | None = None, *, detail: str = "") -> Reply:
+    """失败的回执：`message` 说为什么不行、能做什么；技术细节放 `detail`。"""
+    items: tuple[Any, ...] = (False, message) if data is None else (False, message, data)
+    return Reply(items, code, detail)
+
+
+def reply_code(reply: tuple[Any, ...]) -> str:
+    """没用 `done()` / `refuse()` 造的旧回执（Discord 专用的几条命令）给个通用码。"""
+    code = getattr(reply, "code", "")
+    return code if isinstance(code, str) and code else ("ok" if reply[0] else "failed")
+
+
+def reply_detail(reply: tuple[Any, ...]) -> str:
+    detail = getattr(reply, "detail", "")
+    return detail if isinstance(detail, str) else ""
+
+
+DETAIL_LIMIT = 2000
+
+
+def emit(
+    ok: bool,
+    message: str,
+    data: dict[str, Any] | None = None,
+    *,
+    code: str = "",
+    detail: str = "",
+) -> None:
+    """打一行回执 `{"ok", "code", "message", "detail"?, "data"?}`。
+
+    Discord 的组件运行器只读 `ok` / `message`，整行不许超过 8192 字节；它也看不到 `detail`，
+    所以不是 GUI 调的（`MAA_ACTION_SOURCE` 不是 gui）就把 `detail` 接在 `message` 后面，
+    和改成三段之前 Discord 上看到的一样。带 `data` 的回执只有 GUI 读，不受这个上限；
+    但 message 照样截。
+    """
+    detail = detail[:DETAIL_LIMIT]
+    if detail and action_source() != "gui":
+        message = f"{message}\n（{detail}）"
+    payload: dict[str, Any] = {"ok": ok, "code": code or ("ok" if ok else "failed"), "message": message}
+    if detail:
+        payload["detail"] = detail
     raw = json.dumps(payload, ensure_ascii=False)
     if len(raw.encode("utf-8")) > 7900:
         payload["message"] = message[:1800] + "\n…（已截断）"
+        if detail:
+            payload["detail"] = detail[:1000]
     if data is not None:
         payload["data"] = data
     print(json.dumps(payload, ensure_ascii=False))
@@ -188,7 +252,7 @@ def _running_context() -> tuple[str, str]:
     if not isinstance(state, dict) or state.get("status") != "running":
         return "本场", "上次的本"
     phase = str(state.get("phase", "now"))
-    phase_label = {"am": "早场", "pm": "晚场", "now": "手动场"}.get(phase, "本场")
+    phase_label = {"am": "早场", "pm": "晚场", "now": "手动日常"}.get(phase, "本场")
     plan = state.get("plan", {})
     stage = plan_stage_label(plan if isinstance(plan, dict) else {})
     return phase_label, stage
@@ -228,7 +292,7 @@ def _confirmation(plan: Plan, was_running: bool, phase: PlanPhase) -> str:
 
 
 def _reject_phase(phase: str) -> tuple[bool, str]:
-    return False, f"只能改早场（am）或晚场（pm），收到 {phase[:20]!r}。"
+    return refuse("bad_phase", f"只能改早场（am）或晚场（pm），收到 {phase[:20]!r}。")
 
 
 def set_stage(stage: str, phase: str) -> tuple[bool, str]:
@@ -236,8 +300,8 @@ def set_stage(stage: str, phase: str) -> tuple[bool, str]:
         return _reject_phase(phase)
     config = load_config()
     if not valid_stage(stage, config):
-        return (
-            False,
+        return refuse(
+            "bad_stage",
             "关卡不在白名单：只接受常规关卡格式（如 CE-6、1-7）、空串（上次的本）"
             "或当前活动关。碎石设置永远不受支持。",
         )
@@ -253,7 +317,7 @@ def set_stage(stage: str, phase: str) -> tuple[bool, str]:
         farming_drops={},
         farming_fallback_stage="",
     )
-    return True, _confirmation(plan, was_running, phase)
+    return done("stage_set", _confirmation(plan, was_running, phase))
 
 
 def set_medicine(value: str) -> tuple[bool, str]:
@@ -263,23 +327,23 @@ def set_medicine(value: str) -> tuple[bool, str]:
 
 def skip_today(value: str, phase: str) -> tuple[bool, str]:
     if value not in {"on", "off"}:
-        return False, "skip-today 只接受 on 或 off。"
+        return refuse("bad_value", "skip-today 只接受 on 或 off。")
     if not valid_phase(phase):
         return _reject_phase(phase)
     was_running = is_run_locked()
     plan = _save_override(phase, "skip", value == "on")
-    return True, _confirmation(plan, was_running, phase)
+    return done("skip_set", _confirmation(plan, was_running, phase))
 
 
 def fight_today(value: str, phase: str) -> tuple[bool, str]:
     """`plan fight <on|off> <am|pm>`：今天这一场清不清理智（off = 只收菜）。"""
     if value not in {"on", "off"}:
-        return False, "fight 只接受 on 或 off。"
+        return refuse("bad_value", "fight 只接受 on 或 off。")
     if not valid_phase(phase):
         return _reject_phase(phase)
     was_running = is_run_locked()
     plan = _save_override(phase, "fight", value == "on")
-    return True, _confirmation(plan, was_running, phase)
+    return done("fight_set", _confirmation(plan, was_running, phase))
 
 
 def show_plan() -> tuple[bool, str]:
@@ -684,13 +748,13 @@ def run_choices() -> tuple[bool, str, dict[str, Any]]:
     ]
     busy = maa_common.lock_holder_text(maa_common.run_lock_holder()) if is_run_locked() else ""
     blackout = manual_run_blackout_reason(config) or ""
-    return True, f"可选 {len(choices)} 关。", {
+    return done("choices", f"可选 {len(choices)} 关。", {
         "choices": choices,
         "switches": list(LOCAL_RUN_SWITCHES),
         "task_names": {**TASK_NAMES, "annihilation": "剿灭"},
         "busy": busy,
         "blackout": blackout,
-    }
+    })
 
 
 def run_local(stage: str, raw_switches: str, *flags: str) -> tuple[bool, str, dict[str, Any]]:
@@ -703,38 +767,42 @@ def run_local(stage: str, raw_switches: str, *flags: str) -> tuple[bool, str, di
     """
     force = "--force" in flags
     if set(flags) - {"--force"}:
-        return False, "只认 --force 一个选项。", {}
+        return refuse("bad_args", "只认 --force 一个选项。", {})
     config = load_config()
     if not valid_stage(stage, config):
-        return False, "关卡不在白名单：只接受常规关卡格式（如 CE-6、1-7）、空串（上次的本）或当前活动关。", {}
+        return refuse(
+            "bad_stage",
+            "关卡不在白名单：只接受常规关卡格式（如 CE-6、1-7）、空串（上次的本）或当前活动关。",
+            {},
+        )
     try:
         switches = _local_run_switches(raw_switches)
     except ValueError as exc:
-        return False, str(exc), {}
+        return refuse("bad_switches", str(exc), {})
     if is_run_locked():
         busy = maa_common.lock_holder_text(maa_common.run_lock_holder())
         if busy:
-            return False, f"{busy}正在用游戏，等它结束后再开。", {"blocked": "locked", "holder": busy}
+            return refuse("busy", f"{busy}正在用游戏，等它结束后再开。", {"blocked": "locked", "holder": busy})
         phase, running = _running_context()
-        return False, f"{phase}已经在跑 {running}，等它结束后再开。", {"blocked": "locked"}
+        return refuse("busy", f"{phase}已经在跑 {running}，等它结束后再开。", {"blocked": "locked"})
     now = now_beijing()
     reason = manual_run_blackout_reason(config, now)
     if reason and not force:
-        return False, f"⛔ {reason}", {"blocked": "blackout", "reason": reason}
+        return refuse("session_soon", f"⛔ {reason}", {"blocked": "blackout", "reason": reason})
     script = SCRIPTS_DIR / "maa_daily.py"
     if not script.is_file():
-        return False, "maa_daily.py 尚未部署。", {}
+        return refuse("not_installed", "还没装好，暂时不能开始。", {}, detail=f"{script} 不存在")
     try:
         require_executable(config, "maa_bin", "/opt/homebrew/bin/maa", "maa-cli")
         maa_playcover.verify_game_installed(config)
     except RuntimeError as exc:
-        return False, f"暂时不能运行：{exc}", {}
+        return refuse("not_ready", "游戏或 MAA 还没准备好，暂时不能开始。", {}, detail=str(exc))
     warning = ""
     try:
         # Discord 上还挂着一张没选的选关卡：收掉，免得两边各派一场。
-        _retire_manual_run(config, "superseded", "已被 Wado's MAA 的手动场取代")
+        _retire_manual_run(config, "superseded", "已被 Wado's MAA 的手动日常取代")
     except Exception as exc:  # noqa: BLE001 — (c) 收卡尽力而为，本地状态已先改掉
-        warning = f"；旧选关卡收起失败：{type(exc).__name__}: {exc}"
+        warning = f"{type(exc).__name__}: {exc}"
     token = _new_search_token()
     tasks = {key: switches[key] for key in maa_common.DEFAULT_TASKS}
     state: dict[str, Any] = {
@@ -765,12 +833,14 @@ def run_local(stage: str, raw_switches: str, *flags: str) -> tuple[bool, str, di
         skipped.append("剿灭")
     tail = f"，跳过{'、'.join(skipped)}" if skipped else ""
     forced = "（日常就要开始了，已确认仍然开始）" if state["forced"] else ""
-    return (
-        True,
+    return done(
+        "run_started",
         f"▶️ 手动日常开始了，刷 {plan_stage_label(state)}{tail}{forced}；"
-        f"进度稍后发到 Discord{warning}。",
+        f"进度稍后发到 Discord{'；Discord 上那张旧的选关卡没收起来，不用管它' if warning else ''}。",
         {"token": token, "stage": stage, "tasks": tasks, "annihilation": switches["annihilation"]},
+        detail=f"收起旧选关卡失败：{warning}" if warning else "",
     )
+
 
 
 def run_expire(token: str, after: int = 0) -> tuple[bool, str]:
@@ -1423,15 +1493,19 @@ def _schedule_text(report: dict[str, Any]) -> str:
 
 def schedule_show() -> tuple[bool, str, dict[str, Any]]:
     report = maa_schedule.schedule_report(load_config())
-    return True, _schedule_text(report), report
+    times = "，".join(
+        f"{PHASE_NAMES[phase]} {item['time']}（{'开' if item['enabled'] else '关'}）"
+        for phase, item in report["sessions"].items()
+    )
+    return done("schedule", f"{times}。", report, detail=_schedule_text(report))
 
 
 def _schedule_write(
     phase: str, *, time_value: str | None = None, enabled: bool | None = None
 ) -> tuple[bool, str, dict[str, Any]]:
     if not valid_phase(phase):
-        ok, message = _reject_phase(phase)
-        return ok, message, {}
+        rejected = _reject_phase(phase)
+        return refuse(reply_code(rejected), rejected[1], {})
     config = load_config()
     current = maa_common.session_schedule(config)
     slot = dict(current[phase])
@@ -1442,7 +1516,7 @@ def _schedule_write(
     try:
         updated = maa_common.validate_session_schedule({**current, phase: slot})
     except ValueError as exc:
-        return False, str(exc), {}
+        return refuse("bad_value", str(exc), {})
     if updated == current and config.get("session_schedule") == updated:
         changed_config = config
     else:
@@ -1455,10 +1529,15 @@ def _schedule_write(
         )
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
         report = maa_schedule.schedule_report(changed_config)
-        return False, f"{label}已保存，但到点自动开始没跟着改好，请稍后再改一次（{exc}）。", report
+        return refuse(
+            "schedule_not_synced",
+            f"{label}已保存，但到点自动开始没跟着改好，请稍后再改一次。",
+            report,
+            detail=str(exc),
+        )
     report = maa_schedule.schedule_report(changed_config)
     state = "开" if updated[phase]["enabled"] else "关"
-    return True, f"{label}已保存，到点自动开始：{state}。", report
+    return done("schedule_saved", f"{label}已保存，到点自动开始：{state}。", report)
 
 
 def schedule_set(phase: str, value: str) -> tuple[bool, str, dict[str, Any]]:
@@ -1477,7 +1556,9 @@ def schedule_sync() -> tuple[bool, str, dict[str, Any]]:
     for phase in PLAN_PHASES:
         notes.extend(maa_schedule.sync_phase(config, phase, hermes))
     report = maa_schedule.schedule_report(config)
-    return True, ("时间已对齐：" + "；".join(notes)) if notes else "时间本来就一致。", report
+    if notes:
+        return done("schedule_synced", "到点自动开始的时间已对齐。", report, detail="；".join(notes))
+    return done("schedule_synced", "时间本来就一致。", report)
 
 
 # ---------------------------------------------------------------------------
@@ -1488,7 +1569,12 @@ def schedule_sync() -> tuple[bool, str, dict[str, Any]]:
 def upstream_status(online: bool = False) -> tuple[bool, str, dict[str, Any]]:
     """离线 < 2 秒；`--online` 再查 brew / MaaResource 远端，带代理 < 20 秒。"""
     data = maa_upstream.status(load_config(), online=online)
-    return True, maa_upstream.status_text(data), data
+    message = {
+        "running": "游戏资源正在更新。",
+        "blocked": "游戏资源现在不能用，需要先更新。",
+        "stale": "游戏资源今天还没更新。",
+    }.get(str(data.get("verdict") or ""), "游戏资源今天已更新。")
+    return done("resource_status", message, data, detail=maa_upstream.status_text(data))
 
 
 def upstream_update() -> tuple[bool, str, dict[str, Any]]:
@@ -1500,10 +1586,13 @@ def upstream_update() -> tuple[bool, str, dict[str, Any]]:
         if holder is not None or is_run_locked():
             reason = f"{lock_holder_text(holder) or '另一个任务'}正在用游戏，等它结束再更新"
     if reason:
-        return False, f"⛔ 没有开始更新：{reason}", {"started": False, "blocked": reason}
+        return refuse("update_blocked", f"⛔ 没有开始更新：{reason}", {"started": False, "blocked": reason})
     worker = SCRIPTS_DIR / "maa_upstream.py"
     if not worker.is_file():
-        return False, "maa_upstream.py 尚未部署", {"started": False, "blocked": "未部署"}
+        return refuse(
+            "not_installed", "还没装好，暂时不能更新。", {"started": False, "blocked": "未部署"},
+            detail=f"{worker} 不存在",
+        )
     subprocess.Popen(
         [sys.executable, str(worker), "update", "gui"],
         stdin=subprocess.DEVNULL,
@@ -1512,7 +1601,7 @@ def upstream_update() -> tuple[bool, str, dict[str, Any]]:
         start_new_session=True,
         close_fds=True,
     )
-    return True, "⏳ 开始更新游戏资源，要几分钟，期间不能开始日常。", {"started": True}
+    return done("update_started", "⏳ 开始更新游戏资源，要几分钟，期间不能开始日常。", {"started": True})
 
 
 # ---------------------------------------------------------------------------
@@ -1551,10 +1640,13 @@ def copilot_preview(stage: str) -> tuple[bool, str, dict[str, Any]]:
     activity_key = current_activity_key(config)
     prefix = maa_copilot._activity_prefix(activity_key)
     targets, refusal, _ = _expand_copilot_targets([stage], config, prefix, activity_key)
+    if refusal.startswith("导航不到"):
+        # 原因（缺哪份导航定义）是给排障看的；玩家只需要知道这关自动去不了。
+        return refuse("cannot_reach", "这一关暂不支持自动前往，没法抄作业。", {}, detail=refusal)
     if refusal:
-        return False, refusal, {}
+        return refuse("bad_stage", refusal, {})
     if len(targets) != 1:
-        return False, "预览一次只看一关，请选具体的关卡而不是区域。", {}
+        return refuse("not_one_stage", "预览一次只看一关，请选具体的关卡而不是区域。", {})
     target = targets[0]
     code, stage_id = target["stage"], target["stage_id"]
     now = now_beijing()
@@ -1563,13 +1655,18 @@ def copilot_preview(stage: str) -> tuple[bool, str, dict[str, Any]]:
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return False, "已有另一项作业正在匹配，请稍后再试。", {}
+            return refuse("search_busy", "已有另一项作业正在匹配，请稍后再试。", {})
         import maa_skland
 
         try:
             maa_skland.refresh_roster()
         except Exception as exc:  # noqa: BLE001 — (a) 转译：任何失败都包成回执，不降级
-            return False, f"森空岛练度与理智刷新失败，不降级预览：{type(exc).__name__}: {exc}", {}
+            return refuse(
+                "roster_failed",
+                "森空岛的练度和理智没读到，这次不预览；稍后再试，还不行就检查森空岛的绑定。",
+                {},
+                detail=f"{type(exc).__name__}: {exc}",
+            )
         roster = maa_copilot.load_roster()
         candidates = maa_copilot.search_copilots(
             stage_id, code, config, roster, limit=1000, use_cache=False
@@ -1616,7 +1713,7 @@ def copilot_preview(stage: str) -> tuple[bool, str, dict[str, Any]]:
         head = f"{code} 搜到 {len(candidates)} 份作业，没有完全满足练度的，不能开打。"
     else:
         head = f"{code} 搜到 {len(candidates)} 份作业，{len(perfect)} 份完全满足，已选中最优的一份。"
-    return True, head + (f"\n现在不能开打：{blocker}" if blocker else ""), data
+    return done("previewed", head + (f"\n现在不能开打：{blocker}" if blocker else ""), data)
 
 
 def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]:
@@ -1626,10 +1723,10 @@ def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]
     发「已排程」卡（Discord 上能「取消本轮」）→ `queued` → `dispatch_batch()`。
     """
     if not maa_copilot.SEARCH_TOKEN_RE.fullmatch(token or ""):
-        return False, "这次预览已失效，请重新选一次关卡。", {}
+        return refuse("preview_expired", "这次预览已失效，请重新选一次关卡。", {})
     preview = load_json(_preview_path(token), {})
     if not isinstance(preview, dict) or preview.get("status") != "previewed":
-        return False, "这次预览已失效（用过了或过期），请重新预览。", {}
+        return refuse("preview_expired", "这次预览已失效（用过了或过期），请重新预览。", {})
     now = now_beijing()
     try:
         expires = datetime.fromisoformat(str(preview.get("expires_at")))
@@ -1637,21 +1734,22 @@ def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]
         expires = now - timedelta(seconds=1)
     if now > expires:
         _preview_path(token).unlink(missing_ok=True)
-        return False, "这次预览已过期，请重新预览（作业和练度都可能变了）。", {}
+        return refuse("preview_expired", "这次预览已过期，请重新预览（作业和练度都可能变了）。", {})
     pool = {int(c["id"]): c for c in preview.get("candidates") or [] if isinstance(c, dict)}
     wanted = int(chosen) if chosen.isdigit() else preview.get("best_id")
     candidate = pool.get(int(wanted)) if isinstance(wanted, int) else None
     if candidate is None or not maa_copilot.is_perfect(candidate):
-        return False, "只能选完全满足练度、没有任何缺口的作业。", {}
+        return refuse("not_perfect", "只能选完全满足练度、没有任何缺口的作业。", {})
     cost = preview.get("sanity_cost")
     if not isinstance(cost, int):
-        return False, f"{preview.get('stage')} 的理智消耗查不到，拒绝执行。", {}
+        return refuse("cost_unknown", f"{preview.get('stage')} 的理智消耗查不到，拒绝执行。", {})
     config = load_config()
     blocker = dispatch_blocker(config, "", now)
     if blocker:
-        return False, f"现在不能开打：{blocker}。", {"blocked": blocker}
-    if not (SCRIPTS_DIR / "maa_copilot_worker.py").is_file():
-        return False, "maa_copilot_worker.py 尚未部署。", {}
+        return refuse("blocked", f"现在不能开打：{blocker}。", {"blocked": blocker})
+    worker = SCRIPTS_DIR / "maa_copilot_worker.py"
+    if not worker.is_file():
+        return refuse("not_installed", "还没装好，暂时不能开打。", {}, detail=f"{worker} 不存在")
     code = str(preview["stage"])
     entries = [
         {"stage": code, "stage_id": preview["stage_id"], "mode": mode,
@@ -1685,8 +1783,8 @@ def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]
     preview["search_token"] = search
     atomic_write_json(_preview_path(token), preview)
     dispatch_batch(search)
-    return (
-        True,
+    return done(
+        "copilot_started",
         f"▶️ 开打 {code}（作业 {candidate['id']}）；Discord 上有「已排程」卡，可以在那里取消。",
         {"token": search, "stage": code, "candidate_id": candidate["id"]},
     )
@@ -1699,7 +1797,7 @@ def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]
 
 def config_get() -> tuple[bool, str, dict[str, Any]]:
     data = maa_settings.snapshot(load_config())
-    return True, f"可改的配置共 {len(data['fields'])} 项。", data
+    return done("config", f"可改的设置共 {len(data['fields'])} 项。", data)
 
 
 def config_patch(raw: str) -> tuple[bool, str, dict[str, Any]]:
@@ -1707,16 +1805,18 @@ def config_patch(raw: str) -> tuple[bool, str, dict[str, Any]]:
     try:
         updates = json.loads(raw)
     except json.JSONDecodeError as exc:
-        return False, f"不是合法的 JSON：{exc.msg}", {}
+        return refuse("bad_value", "填的值格式不对。", {}, detail=f"JSON：{exc.msg}")
     if not isinstance(updates, dict):
-        return False, "要传一个 JSON 对象：{键: 值}", {}
+        return refuse("bad_value", "填的值格式不对。", {}, detail="要传一个 JSON 对象：{键: 值}")
     try:
         clean = maa_settings.validate_many(updates)
     except ValueError as exc:
-        return False, str(exc), {}
+        return refuse("bad_value", str(exc), {})
     config = maa_common.update_config(clean, action_source())
     labels = "、".join(maa_settings.BY_KEY[key].label for key in clean)
-    return True, f"已保存：{labels}。下一场日常生效，正在跑的不受影响。", maa_settings.snapshot(config)
+    return done(
+        "config_saved", f"已保存：{labels}。下一次日常生效，正在进行的不受影响。", maa_settings.snapshot(config)
+    )
 
 
 def config_set(key: str, raw: str) -> tuple[bool, str, dict[str, Any]]:
@@ -1724,7 +1824,7 @@ def config_set(key: str, raw: str) -> tuple[bool, str, dict[str, Any]]:
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        return False, f"值不是合法的 JSON：{exc.msg}", {}
+        return refuse("bad_value", "填的值格式不对。", {}, detail=f"JSON：{exc.msg}")
     return config_patch(json.dumps({key: value}, ensure_ascii=False))
 
 
@@ -1742,7 +1842,7 @@ def _defaults_snapshot() -> dict[str, Any]:
 
 def defaults_show() -> tuple[bool, str, dict[str, Any]]:
     data = _defaults_snapshot()
-    return True, f"默认：刷 {data['stage'] or '上次的本'}。", data
+    return done("defaults", f"默认：刷 {data['stage'] or '上次的本'}。", data)
 
 
 def defaults_set(field: str, *values: str) -> tuple[bool, str, dict[str, Any]]:
@@ -1757,7 +1857,7 @@ def defaults_set(field: str, *values: str) -> tuple[bool, str, dict[str, Any]]:
     if field == "stage" and len(values) == 1:
         stage = values[0]
         if not valid_stage(stage, config):
-            return False, f"关卡格式不对：{stage[:20]!r}", {}
+            return refuse("bad_stage", f"关卡格式不对：{stage[:20]!r}", {})
         current["stage"] = stage
         what = f"默认关改成 {stage or '上次的本'}"
     elif (
@@ -1771,17 +1871,17 @@ def defaults_set(field: str, *values: str) -> tuple[bool, str, dict[str, Any]]:
         current["tasks"] = tasks
         what = f"默认{TASK_NAMES.get(values[0], values[0])}{'开' if values[1] == 'on' else '关'}"
     else:
-        return False, (
+        return refuse("bad_args", "只能改默认关卡或默认要做的事。", {}, detail=(
             "只支持 defaults set stage <关卡> 或 "
             "defaults set task <fight|infrast|recruit|mall|award> <on|off>。"
-        ), {}
+        ))
     now = now_beijing()
     with state_lock():
         written = dict(normalize_plan(current))
         written.pop("skip", None)
         written.update({"source": action_source(), "updated_at": now.isoformat()})
         atomic_write_json(DEFAULTS_PATH, written)
-    return True, f"{what}；今天没单独改过的日常从下一次起生效。", _defaults_snapshot()
+    return done("defaults_saved", f"{what}；今天没单独改过的日常从下一次起生效。", _defaults_snapshot())
 
 
 TASK_NAMES = {"fight": "刷理智", "infrast": "基建", "recruit": "公招", "mall": "信用商店", "award": "领奖"}
@@ -1838,10 +1938,10 @@ def copilot_stages() -> tuple[bool, str, dict[str, Any]]:
     from maa_plan_card import copilot_card_stages
 
     stages, in_activity = copilot_card_stages(load_config())
-    return True, f"可选 {len(stages)} 关。", {
+    return done("copilot_stages", f"可选 {len(stages)} 关。", {
         "stages": json.loads(json.dumps(stages, ensure_ascii=False, default=str)),
         "in_activity": in_activity,
-    }
+    })
 
 
 def copilot_cancel(token: str) -> tuple[bool, str]:
@@ -1850,9 +1950,9 @@ def copilot_cancel(token: str) -> tuple[bool, str]:
     with state_lock():
         state = _load_search(token)
         if state is None:
-            return False, "找不到这次搜索。"
+            return refuse("not_found", "找不到这次搜索。")
         if state.get("status") not in maa_copilot.CANCELABLE_STATUSES:
-            return False, "本次作业已经失效、开始或结束，不能再取消。"
+            return refuse("not_cancelable", "本次作业已经失效、开始或结束，不能再取消。")
         state["status"] = "canceled"
         state["canceled_at"] = now_beijing().isoformat()
         message_id = state.get("message_id")
@@ -1865,12 +1965,12 @@ def copilot_cancel(token: str) -> tuple[bool, str]:
     try:
         retire_discord_components(config, message_id)
     except Exception as exc:  # noqa: BLE001 — (c) 已取消，收按钮失败只附在回执里
-        return (
-            True,
-            "❌ 已取消；旧卡按钮收起失败但已经不能执行："
-            f"{type(exc).__name__}: {exc}",
+        return done(
+            "copilot_canceled",
+            "❌ 已取消；旧卡上的按钮没收起来，但已经不能点了。",
+            detail=f"收起旧卡按钮失败：{type(exc).__name__}: {exc}",
         )
-    return True, "❌ 已取消，相关按钮已清理。"
+    return done("copilot_canceled", "❌ 已取消，相关按钮已清理。")
 
 
 # `run cancel`（不变量 #64）只停这两种：持锁种类 → 必须出现在对方命令行里的脚本名和子命令。
@@ -1913,12 +2013,12 @@ def run_cancel() -> tuple[bool, str]:
     """
     marker = run_lock_holder()
     if not marker:
-        return False, "现在没有在跑的日常或抄作业。"
+        return refuse("not_running", "现在没有在跑的日常或抄作业。")
     holder = str(marker.get("holder") or "")
     detail = str(marker.get("detail") or "")
     if holder not in CANCELABLE_RUNS:
         busy = lock_holder_text(marker) or "另一个任务"
-        return False, f"{busy}正在用游戏，这里停不了，等它做完。"
+        return refuse("not_cancelable", f"{busy}正在用游戏，这里停不了，等它做完。")
     name = (
         DAILY_RUN_NAMES.get(detail, "日常")
         if holder == "daily"
@@ -1926,17 +2026,17 @@ def run_cancel() -> tuple[bool, str]:
     )
     pid = marker.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
-        return False, f"认不出{name}是哪一个，没有停。"
+        return refuse("unknown_run", f"认不出{name}是哪一个，没有停。", detail=f"pid={pid!r}")
     script, subcommand = CANCELABLE_RUNS[holder]
     if not _is_run_process(_process_command(pid), script, subcommand):
-        return False, f"{name}好像已经结束了，没有停。"
+        return refuse("already_finished", f"{name}好像已经结束了，没有停。", detail=f"pid {pid} 不是 {script}")
     try:
         os.kill(pid, signal.SIGINT)
     except ProcessLookupError:
-        return False, f"{name}刚刚结束了。"
+        return refuse("already_finished", f"{name}刚刚结束了。")
     except PermissionError:
-        return False, f"没有权限停下{name}。"
-    return True, f"⏹️ 正在停止{name}：已经打完的不受影响，游戏会被关掉，战报稍后就到。"
+        return refuse("no_permission", f"没有权限停下{name}。", detail=f"pid {pid}")
+    return done("stopping", f"⏹️ 正在停止{name}：已经打完的不受影响，游戏会被关掉，战报稍后就到。")
 
 
 def copilot_status(token: str) -> tuple[bool, str]:
@@ -2006,17 +2106,19 @@ def plan_today() -> tuple[bool, str, dict[str, Any]]:
                 for label, stage, description in _stage_choices(plan, config)
             ],
         })
-    return True, "今天的计划。", {
+    return done("plan", "今天的计划。", {
         "date": now_beijing().date().isoformat(),
         "sessions": sessions,
         "task_names": TASK_NAMES,
-    }
+    })
 
 
 def plan_refresh_card(phase: PlanPhase) -> tuple[bool, str, dict[str, Any]]:
     from maa_plan_card import refresh_card
 
-    return True, refresh_card(phase), {}
+    return done("card_refreshed", "Discord 上的计划卡已跟着改。", {}, detail=refresh_card(phase))
+
+
 
 
 def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
@@ -2105,12 +2207,12 @@ def dispatch(argv: list[str]) -> tuple[bool, str]:
         return copilot_unmark(argv[2])
     if argv[:2] == ["copilot", "auto"] and len(argv) == 3:
         return copilot_auto(argv[2])
-    return False, (
+    return refuse("unknown_command", (
         "不支持的动作；只允许 plan set-stage <关卡> <am|pm>、"
         "plan skip-today <on|off> <am|pm>、plan fight <on|off> <am|pm>、plan show、run now、run cancel、run start <关卡> <token>、"
         "run expire <token> [--after 秒]、run recommend <token>、log tail、"
         "copilot card/find/cancel/status/mark-cleared/unmark、copilot auto <on|off|status>。"
-    )
+    ))
 
 
 def main(argv: list[str]) -> int:
@@ -2118,12 +2220,14 @@ def main(argv: list[str]) -> int:
         gui = dispatch_gui(argv[1:])
         if gui is not None:
             ok, message, data = gui
+            reply: tuple[Any, ...] = gui
         else:
-            (ok, message), data = dispatch(argv[1:]), None
+            reply = dispatch(argv[1:])
+            (ok, message), data = reply, None
     except Exception as exc:  # noqa: BLE001 — (a) 进程顶层：任何失败都要变成 ok=false 回执交给技能
-        emit(False, f"操作失败：{type(exc).__name__}: {exc}")
+        emit(False, "操作没有完成，请稍后再试。", code="error", detail=f"{type(exc).__name__}: {exc}")
         return 1
-    emit(ok, message, data)
+    emit(ok, message, data, code=reply_code(reply), detail=reply_detail(reply))
     return 0 if ok else 2
 
 

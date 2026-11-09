@@ -260,7 +260,7 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
 ```
 按钮/下拉 ─ adapter 查 buttons.json ─┐
                                      ├─→ python3 ~/.hermes/scripts/maa_action.py <argv>
-自然语言 ─ maa-operator 技能 ─ terminal ┘        └─ stdout: {"ok":bool,"message":str}
+自然语言 ─ maa-operator 技能 ─ terminal ┘        └─ stdout: {"ok":bool,"code":str,"message":str,"detail"?:str}
 ```
 
 **来自 Hermes adapter 源码的三条硬约束**：exec 脚本硬超时 **20 秒**（只能写状态或 `Popen(start_new_session=True)` 后立即返回）；exec 白名单是**精确文件名**（`deploy.py` 显式加入 `maa_action.py`）；`buttons.json` 路径写死且全局共享（必须 merge、用 agent-book 的 `state.lock`）。
@@ -287,7 +287,7 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
 - **场次参数不可省**（按 argv 长度精确匹配），只接受 `am` / `pm`（`valid_phase()`）；`now` 不是可写场次（D4）。
 - 关卡白名单 `valid_stage()`：空串 / `^[A-Za-z0-9]{1,8}-\d{1,2}$` / 在 `config.activity_stages` 里 / 否则现场跑 `maa activity Official` 按词边界精确匹配（超时 **0.7s**）。
 - `_today_override()` 返回 `{date, sessions: {am, pm}}`，只保留 `PLAN_SESSION_FIELDS` 的键；日期不是今天或是旧的按天格式（顶层 `stage`/`skip`）就重置成空，所以「今天说的话明天失效」，不需要清理任务和迁移。`is_run_locked()` 决定确认话术（正在跑就回「不打断本场」）。
-- `emit()` 把输出压在 7900 字节内（组件运行器只收 ≤8192 字节）。
+- `emit()` 把输出压在 7900 字节内（组件运行器只收 ≤8192 字节）。回执三段见 §12.1（#67）：Discord 的组件运行器和技能只读 `ok` / `message`；不是 GUI 调的（`MAA_ACTION_SOURCE` ≠ `gui`）`emit()` 会把 `detail` 接在 `message` 后面，所以 Discord 上看到的和拆三段之前一样。
 
 **技能只是第一道防线**：`SKILL.md` 禁止 `write_file` 改状态、禁止调 `maa_daily.py`、碎石永久关闭、原样转述 `message`。即使 LLM 无视技能，`maa_action.py` 的白名单和 `render_daily_toml` 的硬编码字面量仍然拦得住。写代码时始终假设「提示词会失效」。
 
@@ -547,6 +547,7 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | 14b | 抄作业卡前缀 `hermes:btn:maa-copilot:card:`，`card.json` 必须在 `copilot/` 而不是 `searches/`；发新卡顺序固定「PATCH 旧卡 → 删旧登记 → 写新登记 → 发卡 → 记 message_id」 | `CARD_BUTTON_PREFIX` / `CARD_PATH` + `copilot_card()` + `CopilotCardTests` | — |
 | 41 | 「已排程」卡只有 ❌ 取消本轮（watcher 的轮另加固定 id 的「⏸️ 暂停自动作业」）；不许再出现 `:raid-` / `:again` / `:confirm` 键；只在 `scheduled` / `queued` 可取消 | `build_scheduled_card()` / `CANCELABLE_STATUSES` + `ButtonRegistryTests` | — |
 | 63 | Discord 只是通知出口，不是执行的前提：没有频道 / token、网络错误、HTTP 错误、建子区失败都只记一行日志，一场照常跑完、写 `last_run.json` 终态和 `runs/<场>-report.json`；没有子区就跳过进度和子区发帖（`thread_id` 为 `null`）。抄作业 `_notice()` / `_post_report()` 同样永不抛。共用的 `report_game_busy()` / `report_lock_conflict()` 只在状态写不进去时抛 | `discord_outlet()` / `notify()` / `open_thread()` / `write_report_file()` + 抄作业 `_post_report()` + `DiscordOptionalTests` / `CopilotReportOutletTests` | REVIEW_2026-11-09 §1.1 |
+| 67 | 回执三段：`maa_action.py` 每行回执都带 `ok` / `code` / `message`，`detail` 可选。GUI 会调到的命令每个 `return` 都用 `done()` / `refuse()` 写明 `code`（小写短码，改名就是改接口），或转给另一条这样的命令；`message` 只写给玩家看的一句话（过 `test_ui_copy` 禁用词），异常文本、路径、对齐细节放 `detail`。GUI 不显示 `detail`、只记进诊断信息；非 GUI 调用时 `emit()` 把 `detail` 接回 `message`，整行仍 ≤ 7900 字节。`ok` 和 `message` 的含义不变（Discord 只读这两个） | `Reply` / `done()` / `refuse()` / `emit()` / `main()` + `tests/test_receipts.py` / `test_gui_receipts_have_no_implementation_words` | REVIEW_2026-11-09 §3.5 |
 
 ### 8.4 锁、闸门与设备
 | # | 不变量 | 落点 | 来由 |
@@ -732,7 +733,17 @@ hermes cron run 50cd1fb095f2                          # 完整早场（真的开
 Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东西**和 maa-remote 打交道。这里列出的字段、路径、命令和格式改了，GUI 就会坏：要改，就同一天在 fork 里改，并在两边的提交说明里写明。
 
 ### 12.1 怎么调
-- **入口**：`python3 $HERMES_HOME/scripts/maa_action.py <命令…>`。stdout 是一行回执 JSON：`{"ok": bool, "message": str}`，GUI 专用命令再多一个 `data`（对象）。`message` 不超过 7900 字节，写给人看，GUI 原样显示。
+- **入口**：`python3 $HERMES_HOME/scripts/maa_action.py <命令…>`。stdout 是一行回执 JSON（#67）：
+
+  | 字段 | 含义 |
+  |---|---|
+  | `ok` | 成没成，含义不变 |
+  | `code` | 稳定的短码（小写加下划线），给程序判断；GUI 要分支就比它，不比对 `message` 的措辞。没细分的旧命令是 `ok` / `failed`，进程顶层异常是 `error` |
+  | `message` | 给玩家看的一句话，不超过 7900 字节，GUI 原样显示；不写异常、路径、命令名（`test_ui_copy` 守着） |
+  | `detail` | 可选：给开发者的原始信息（异常文本、路径、`schedule` 的对齐细节、`upstream status` 的版本摘要）。GUI 不显示，只记进「复制诊断信息」；GUI 以外的调用方（`MAA_ACTION_SOURCE` 不是 `gui`）会在 `message` 末尾另起一行看到它 |
+  | `data` | 只有 GUI 专用命令有（对象） |
+
+  GUI 现在按码分支的：`run local` 的 `session_soon`（早晚场就要开始，可 `--force`）。其余常见码：`busy`（游戏正被占用）、`blocked`（抄作业闸门）、`update_blocked`、`not_installed`、`not_ready`、`bad_stage` / `bad_phase` / `bad_value` / `bad_args`、`preview_expired`、`roster_failed`、`cannot_reach`、`not_running` / `not_cancelable` / `already_finished`；成功码按命令（`stage_set`、`run_started`、`copilot_started`、`config_saved`、`schedule_saved`…），以 `maa_action.py` 里 `done()` / `refuse()` 的第一个参数为准。旧的 `data.blocked`（`locked` / `blackout`）照旧保留。
 - **环境变量**：
   - `HERMES_HOME`：开发期指向副本；
   - `MAA_ACTION_SOURCE=gui`：改动会被记成「由 Wado's MAA 改的」，不传就记成 `discord`；

@@ -264,7 +264,7 @@ struct ManualRunCard: View {
             let receipt = try await RemoteBridge.run(args)
             result = (receipt.ok, receipt.message)
             // 确认时还没到、开始时刚好到了：再问一次，还是同一个确认框。
-            if !receipt.ok, !force, receipt.dictionary["blocked"] as? String == "blackout" {
+            if !receipt.ok, !force, receipt.code == "session_soon" || receipt.dictionary["blocked"] as? String == "blackout" {
                 result = nil
                 askGame(startConfirm(choices, soon: true))
             }

@@ -3,7 +3,8 @@
 //  Wado's MAA
 //
 //  调 `maa_action.py`：GUI 对 maa-remote 的一切改动都只走这一个入口（DEV_GUIDE §12.1）。
-//  stdout 是一行回执 `{"ok", "message", "data"?}`。
+//  stdout 是一行回执 `{"ok", "code", "message", "detail"?, "data"?}`：`code` 给程序判断，
+//  `message` 给玩家看，`detail` 是技术细节，只进诊断信息，不上界面。
 //
 
 import AppKit
@@ -11,7 +12,12 @@ import Foundation
 
 struct RemoteReceipt: Sendable {
     let ok: Bool
+    /// 稳定的短码（`session_soon`、`busy`…），按它分支，不比对 `message` 的措辞。旧版后端没有，按 ok 补成 `ok` / `failed`。
+    let code: String
+    /// 给玩家看的一句话。
     let message: String
+    /// 技术细节（异常、路径）；只记进诊断信息。
+    let detail: String?
     /// `data` 字段的原始 JSON；没有就是 nil。
     let data: Data?
 
@@ -28,6 +34,15 @@ struct RemoteReceipt: Sendable {
             throw RemoteBridgeError.recorded(.badReceipt("\(T.self): \(error)"))
         }
     }
+
+    // copy-guard: developer
+    /// 记进诊断信息的一行：命令、结果码、给人看的话和技术细节。
+    func diagnostic(_ args: [String]) -> String {
+        var line = "\(args.joined(separator: " ")) → \(ok ? "ok" : "failed") [\(code)] \(message)"
+        if let detail { line += " | detail: \(detail)" }
+        return line
+    }
+    // copy-guard: end
 
     /// `data` 当成字典读（配置页这种键不固定的场合）。
     var dictionary: [String: Any] {
@@ -87,8 +102,9 @@ enum RemoteBridge {
             let receipt = try await Task.detached(priority: .userInitiated) {
                 try runBlocking(python: python, script: script, args: args, env: env, cwd: cwd, timeout: timeout)
             }.value
+            // 只记失败的：`schedule show`、`upstream status` 每次重读都带 detail，记进去会把真报错挤掉。
             if !receipt.ok {
-                await Diagnostics.record("\(args.joined(separator: " ")) → \(receipt.message)")
+                await Diagnostics.record(receipt.diagnostic(args))
             }
             return receipt
         } catch let error as RemoteBridgeError {
@@ -161,7 +177,9 @@ enum RemoteBridge {
         if let payload = object["data"], !(payload is NSNull) {
             data = try? JSONSerialization.data(withJSONObject: payload)
         }
-        return RemoteReceipt(ok: ok, message: object["message"] as? String ?? "", data: data)
+        let code = (object["code"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? (ok ? "ok" : "failed")
+        let detail = (object["detail"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return RemoteReceipt(ok: ok, code: code, message: object["message"] as? String ?? "", detail: detail, data: data)
     }
 }
 

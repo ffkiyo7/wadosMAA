@@ -151,9 +151,13 @@ class CopilotPreviewTests(unittest.TestCase):
 
     def test_preview_never_downgrades_when_skland_fails(self) -> None:
         self.refresh_error = RuntimeError("cred 过期")
-        ok, message, data = maa_action.copilot_preview("SR-5")
+        reply = maa_action.copilot_preview("SR-5")
+        ok, message, data = reply
         self.assertFalse(ok)
-        self.assertIn("不降级", message)
+        self.assertIn("不预览", message)
+        # 原始错误不给玩家看，但要留在 detail 里（GUI 记进诊断信息，Discord 接在 message 后面）。
+        self.assertEqual(maa_action.reply_code(reply), "roster_failed")
+        self.assertIn("cred 过期", maa_action.reply_detail(reply))
         self.assertEqual(list(self.previews.iterdir()), [])
 
     def test_preview_and_go_are_gui_only(self) -> None:

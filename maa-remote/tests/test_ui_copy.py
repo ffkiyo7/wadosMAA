@@ -39,7 +39,7 @@ BANNED = (
     "锁", "派发", "闸门", "上游", "cron", "Hermes", "HERMES", "maa-remote", "maa-cli", "MaaCore",
     "MaaResource", "MaaTools", "进程", "token", "回执", "退出码", "schema", "不变量", "PLAN_",
     "开跑", "定时场", "场次", "清理智", "开始唤醒", "熔断", "链条", "持久默认", "导航不过去", "prts",
-    "run.lock",
+    "run.lock", "手动场",
 )
 
 # 文件里的局部白名单（设置页的开发者区、诊断信息）用上面的 copy-guard 注释圈，不在这里列。
@@ -162,6 +162,13 @@ def _strings(node: ast.AST) -> list[tuple[int, str]]:
     ]
 
 
+REPLY_BUILDERS = {"done", "refuse"}
+
+
+def reply_call(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in REPLY_BUILDERS
+
+
 def scan_action() -> list[str]:
     tree = ast.parse(ACTION.read_text(encoding="utf-8"))
     functions = {
@@ -181,6 +188,11 @@ def scan_action() -> list[str]:
                 value = node.value
                 if isinstance(value, ast.Tuple) and len(value.elts) >= 2:
                     targets.append(value.elts[1])
+                elif reply_call(value):
+                    # `done(code, message, data, detail=…)`：只有 message 给人看；code 是给程序的短码，
+                    # detail 是给开发者的原始信息，都不扫。
+                    assert isinstance(value, ast.Call)
+                    targets.extend(value.args[1:2])
                 elif not isinstance(value, ast.Tuple):
                     targets.append(value)
             elif isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
