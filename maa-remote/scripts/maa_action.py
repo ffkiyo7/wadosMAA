@@ -1336,6 +1336,8 @@ def copilot_mark_cleared(stage: str, mode_arg: str = "") -> tuple[bool, str]:
     )
     if not marked:
         return True, f"ℹ️ {code} 账本里已经记着通关了，没有改动。"
+    if action_source() == "gui":
+        return True, f"✅ 已把 {labels} 记为通关，自动抄作业不再排这一关。"
     return True, (
         f"✅ 已把 {labels} 记为手动通关；自动抄作业不再排这一关，"
         f"抄作业卡上会显示 ✅ 已通。标错了可用 `copilot unmark {code}` 撤销。"
@@ -1355,6 +1357,8 @@ def copilot_unmark(stage: str) -> tuple[bool, str]:
             maa_copilot.save_ledger(ledger, maa_copilot.ledger_path(activity_key))
     if not cleared:
         return True, f"ℹ️ {code} 账本里本来就没有通关记录，没有改动。"
+    if action_source() == "gui":
+        return True, f"↩️ 已撤销 {code} 的通关记录，自动抄作业会重新考虑它。"
     return True, f"↩️ 已撤销 {code} 的通关记账（{'、'.join(cleared)}）；下一轮自动排轮会重新考虑它。"
 
 
@@ -1903,14 +1907,14 @@ def copilot_auto(value: str) -> tuple[bool, str]:
     if value not in {"on", "off"}:
         return False, "用法：copilot auto <on|off|status>"
     if value == "on":
-        maa_copilot.set_auto_paused(False)
+        maa_copilot.set_auto_paused(False, by=action_source())
         # 「今天开打前失败到上限」的停排也一并解除：用户说恢复，就是修好了。
         watch = load_json(WATCH_PATH, {})
         if isinstance(watch, dict) and watch.pop("prefight_failures", None) is not None:
             watch.pop("blocked_reason", None)
             atomic_write_json(WATCH_PATH, watch)
         return True, "▶️ 已恢复自动作业，下一次活动监控（≤15 分钟）重新排轮。"
-    maa_copilot.set_auto_paused(True)
+    maa_copilot.set_auto_paused(True, by=action_source())
     watch = load_json(WATCH_PATH, {})
     token = str(watch.get("batch_token") or "") if isinstance(watch, dict) else ""
     note = ""
@@ -1927,6 +1931,8 @@ def copilot_auto(value: str) -> tuple[bool, str]:
                 note = "已作废还没开打的一轮" + note + "。"
         elif status == "executing":
             note = "当前这一关打完就停，不会再开下一关。"
+    if action_source() == "gui":
+        return True, "⏸️ 已暂停自动作业。" + note
     return True, (
         "⏸️ 已暂停自动作业。" + note
         + "恢复：说「恢复自动作业」或 `copilot auto on`。"

@@ -463,8 +463,9 @@ class ActivityWatchTickTests(unittest.TestCase):
 class CopilotAutoPauseCommandTests(unittest.TestCase):
     """`copilot auto off|on|status`：Discord 里能叫停自动作业。"""
 
-    def _run(self, value, *, watch=None, rounds=None, paused=False):
-        with tempfile.TemporaryDirectory() as raw:
+    def _run(self, value, *, watch=None, rounds=None, paused=False, source="discord"):
+        with tempfile.TemporaryDirectory() as raw, \
+             patch.dict("os.environ", {"MAA_ACTION_SOURCE": source}):
             root = Path(raw)
             searches = root / "searches"
             searches.mkdir()
@@ -491,7 +492,8 @@ class CopilotAutoPauseCommandTests(unittest.TestCase):
                 for path in searches.glob("*.json")
             }
             final_watch = json.loads(watch_path.read_text("utf-8"))
-        return SimpleNamespace(ok=ok, message=message, paused=paused_now,
+            pause_file = json.loads(pause_path.read_text("utf-8")) if pause_path.exists() else {}
+        return SimpleNamespace(ok=ok, message=message, paused=paused_now, pause_file=pause_file,
                                rounds=final_rounds, watch=final_watch, retire=retire)
 
     def test_off_pauses_and_supersedes_the_scheduled_round(self) -> None:
@@ -523,6 +525,15 @@ class CopilotAutoPauseCommandTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertFalse(result.paused)
         self.assertNotIn("prefight_failures", result.watch)
+
+    def test_the_gui_switch_is_recorded_as_gui_without_the_chat_hint(self) -> None:
+        paused = self._run("off", source="gui")
+        self.assertEqual(paused.pause_file["by"], "gui")
+        self.assertNotIn("copilot auto", paused.message)
+        self.assertEqual(self._run("on", paused=True, source="gui").pause_file["by"], "gui")
+        chat = self._run("off")
+        self.assertEqual(chat.pause_file["by"], "discord")
+        self.assertIn("copilot auto on", chat.message)
 
     def test_status_and_bad_values(self) -> None:
         self.assertIn("已暂停", self._run("status", paused=True).message)

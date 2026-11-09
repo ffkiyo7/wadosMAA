@@ -757,7 +757,7 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 | `defaults show` / `defaults set stage <关>` / `defaults set task <名> on\|off` | 持久默认值 | `defaults.json` 的内容 |
 | `schedule show` / `set <am\|pm> <HH:MM>` / `enable <场>` / `disable <场>` / `sync` | 早晚场时间和 cron（§3、K6）。只有拨开关才会 pause / resume | `maa_schedule.schedule_report()` |
 | `run choices` | 一键长草页的选项：关卡（和选关卡同源 `_stage_choices()`）、环节开关、锁 / 定时场优先的现状 | `choices`、`switches`、`task_names`、`busy`、`blackout` |
-| `copilot stages` | 自动抄作业的关卡列表（和抄作业卡同源 `copilot_card_stages()`），只读本地 | `stages`、`in_activity` |
+| `copilot stages` | 自动抄作业的关卡列表（和抄作业卡同源 `copilot_card_stages()`），只读本地。「已通」和 watcher 同一把尺子：记账，或森空岛区域进度按游戏数据的区域链精确到关（`maa_gamedata.skland_cleared()`，只算普通，森空岛不分突袭） | `stages`（每行 `stage` / `code` / `nav` / `reason` / `status` / `status_text` / `ledger_cleared`：本地记账里有通关记录，可撤销）、`in_activity` |
 | `run local <关> <开关 JSON> [--force]` | 本机手动场：`--force` 只解除「定时场优先」，不解锁 | `token` 等 |
 | `plan today` | 今天早场、晚场各打算做什么。只读本地（不联网、不重算自动定关、不写盘），首页场卡用 | `date`；`sessions[]`（按 am、pm）：`phase` / `name` / `time` / `enabled`（`session_schedule`）、`stage`、`stage_source`（`auto` / `discord` / 空 = 默认关）、`skip`、`tasks`（`effective_plan()` 的环节开关，`plan fight off` 后 `fight` 为假）、`drops`（`[{item_id, name, count}]`，自动定关的刷够即停上限，物品名读不出来就是 itemId）、`fallback_stage`、`source` / `updated_at`（这场覆盖最后是谁改的）、`choices`（可换的关，和计划卡下拉同源 `_stage_choices()`）；`task_names` |
 | `plan refresh-card <场>` | 让 Discord 上的计划卡跟着刷新 | — |
@@ -769,6 +769,8 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 
 - `plan set-stage <关> <场>` / `plan skip-today on|off <场>` / `plan fight on|off <场>`：首页场卡的换关、跳过 / 恢复、「刷理智」开关，点了就生效。成功时 GUI 不显示 `message`、重读 `plan today`；失败原样显示 `message`。带 `MAA_ACTION_SOURCE=gui` 时 `_save_override()` 会在脱离会话的子进程里调 `plan refresh-card`，Discord 上的计划卡跟着变。改计划不动游戏、不持锁；那一场开跑后改的不影响它（#10），所以 GUI 在那一场今天已开始后不再给改。
 - `plan auto-stage <场>`（GUI 专用，`dispatch_gui`）：场卡下拉里的「自动选关」。马上按材料缺口算一次（`current_farming_result()` + `apply_auto_stage(force=True)`），把这一场的关写成 `stage_source = auto`（带 `farming_drops` / 后备关），用户之前手动选的关也让出来，之后建卡时自动定关可以继续改它。算不出来回 `auto_unavailable`、不动原来的关。`data = {"stage": 定下的关}`。
+- `copilot auto on|off`：抄作业页「规则」弹窗顶上的「自动抄作业」开关（§5.5、#55），和 Discord 的暂停 / 恢复按钮同一个命令。GUI 显示的开关状态读 `copilot/auto_pause.json` 的 `paused`（文件不在 = 没暂停），点了调命令再重读；`by` 记谁改的（`MAA_ACTION_SOURCE`，GUI 是 `gui`）。暂停时这一关打完才停，回执里会说。
+- `copilot mark-cleared <关> all` / `copilot unmark <关>`：抄作业页右栏的「我打过了」（普通 + 突袭都记上）/「撤销通关记录」（`ledger_cleared` 为真才显示），只改本地记账，做完 GUI 重读 `copilot stages`。
 - `run cancel`：状态条的「停止」在 `run.lock` 持有者是 `daily` / `copilot` 时先弹确认、再调它，然后刷新状态；被停的那一场写 `last_run.status = cancelled`（#64）。
 
 实现细节：`run local` 不发选关卡，关卡白名单 → 开关校验（`fight/infrast/recruit/mall/award/annihilation`，只认真布尔，五项全关拒绝）→ 锁 → 拒绝窗（`--force` 只跳过这一条，锁冲突永远不能强行）→ 预检 → 收掉 Discord 上没选的选关卡（`superseded`）→ 写 `manual_run.json`（`dispatched` + `tasks` / `annihilation` / `source` / `forced`）→ `Popen maa_daily.py now <token>`；`maa_daily.apply_local_switches()` 只把开关叠到这一场，不进 `plan.json`（M4）。`copilot preview` 要 5～20 秒、不走 Discord 的 20 秒路径（#6）：持 `copilot_search.lock`、森空岛刷新失败直接报错、绕过 12h 缓存搜全部候选，返回每份是否完全满足（`maa_copilot.is_perfect()`，与 `pick_perfect_candidate()` 同一判据）、缺什么，自动选中第一份完全满足的，存 `copilot/previews/<token>.json`（30 分钟，不在 `searches/` 下）。`copilot go` 被挡什么都不写，否则发「已排程」卡 → 写 `searches/<新 token>.json` 为 `queued` → `dispatch_batch()`；同一次预览只能派一次。
@@ -789,6 +791,7 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 | `last_run.json` | `status`、`phase`（`am` / `pm` / `now` / `copilot-<token>`）、`started_at` / `finished_at`、`summary`、`plan.stage` / `plan.tasks`（日常）、`stage`（抄作业）、`resource_update_*`、`log`（本场 maa-cli 日志的绝对路径。日常、手动场、抄作业**开跑那一笔就写上**，运行中逐行追加，GUI 只读新增部分、按 `<Task> Start` 显示当前阶段；文件可能还没建，或者在 maa run 开写前仍是同名旧场的内容——修改时间早于 `started_at` 的当没有，文件变短就从头读）。新一场开跑时只属于上一场的字段会被整批删掉（§6 `new_run`），读不到就当没有；判成败只看 `status`（`running` / `success` / `failed` / `skipped` / `cancelled`），不要读 `ok`。`thread_id` 可能是 `null`（Discord 不可用，#63），`report` 是本场战报文件 `runs/<场>-report.json` 的路径（日常才有）；`progress` 是本场进度文件的路径（日常开跑那一笔就写上；没有这个键 = 旧版 maa-remote 或抄作业，GUI 退回解析 `log`） |
 | `runs/<场>.progress.json` | 见下表。GUI 正在跑时每秒读一次（`state/maa/` 的目录监听收不到 `runs/` 里的改动），跑完再读一次终态 |
 | `runs/index.jsonl` | 场次索引，见下表。GUI 每次重读状态（`last_run.json` 一变）时整份读一遍，首页「最近几场」和「近 N 场成功」用它；文件不在或一行都读不出来就退回只显示 `last_run.json` 那一场 |
+| `copilot/auto_pause.json` | `paused`（自动抄作业是否暂停）。`state/maa/` 的目录监听收不到子目录的改动，GUI 靠重读状态时顺带读它（60 秒兜底轮询） |
 | `plan.json` / `defaults.json` | 本场关卡、跳过；默认关和默认任务 |
 | `upstream.json` | 见下表 |
 

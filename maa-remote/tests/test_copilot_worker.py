@@ -1118,6 +1118,19 @@ class ManualClearMarkTests(unittest.TestCase):
         # 顺手把账建好、种子也种上（`ensure_ledger` 那条路），不另开一套。
         self.assertEqual(result.files["ledger.json"]["seeded"], "SR")
 
+    def test_the_gui_receipt_drops_the_chat_command_hint(self) -> None:
+        with patch.dict("os.environ", {"MAA_ACTION_SOURCE": "gui"}):
+            result = self._run(["copilot", "mark-cleared", "SR-1", "all"])
+        self.assertTrue(result.ok, result.message)
+        self.assertNotIn("copilot unmark", result.message)
+        entry = result.files["ledger.json"]["stages"]["SR-1"]
+        self.assertTrue(entry["normal"] and entry["raid"])
+        with patch.dict("os.environ", {"MAA_ACTION_SOURCE": "gui"}):
+            undone = self._run(["copilot", "unmark", "SR-1"], ledger=result.files["ledger.json"])
+        self.assertTrue(undone.ok, undone.message)
+        self.assertNotIn("normal", undone.message)
+        self.assertIsNone(undone.files["ledger.json"]["stages"]["SR-1"]["normal"])
+
     def test_marking_with_raid_on_covers_both_modes_and_all_is_explicit(self) -> None:
         both = self._run(["copilot", "mark-cleared", "SR-1"])
         entry = both.files["ledger.json"]["stages"]["SR-1"]
@@ -1554,6 +1567,35 @@ class CopilotCardTests(unittest.TestCase):
         self.assertIn("⏳ 排程 14:30", listing)
         # 已通的关照样能选——手动路径允许重打（D14）。
         self.assertIn("SR-5", [stage for _l, stage, _d in options])
+
+    def test_a_hand_cleared_ex_stage_counts_from_skland_like_the_watcher_does(self) -> None:
+        """2026-11-09：TL-EX 森空岛已全清，卡和 GUI 还写「待抄」——EX 关的 stage_id 对不上
+        粗的 zone 判据，只有 watcher 用了游戏数据的区域链。现在两边同一把尺子。"""
+        self.nav_keys = self.nav_keys | {"SR-EX-1"}
+        roster = {"activity_progress": {"act54side": [
+            {"zoneId": "act54side_zone1", "clearedStage": 3, "totalStage": 8},
+            {"zoneId": "act54side_zone2", "clearedStage": 1, "totalStage": 1},
+        ]}}
+        maa_common.atomic_write_json(self.watch, {"activity_key": SR_KEY})
+        with patch.object(maa_plan_card, "WATCH_PATH", self.watch), \
+             patch.object(maa_copilot, "SEARCHES_DIR", self.searches), \
+             patch.object(maa_copilot, "load_stage_index", return_value=SR_INDEX), \
+             patch.object(maa_copilot, "load_ledger",
+                          return_value={"stages": {"SR-5": {"normal": "t", "raid": None}}}), \
+             patch.object(maa_copilot, "load_roster", return_value=roster), \
+             patch("maa_gamedata.load_layout", return_value=_helpers.SR_LAYOUT), \
+             _nav_patch(self.nav_keys), \
+             patch.object(maa_plan_card, "stage_drops", return_value={}):
+            rows, _in_activity = maa_plan_card.copilot_card_stages(RAID_ON)
+        by_stage = {row["stage"]: row for row in rows}
+        # 森空岛不分突袭：普通算过了，突袭照旧待补。
+        self.assertEqual(by_stage["SR-EX-1"]["status"], "raid_pending")
+        self.assertFalse(by_stage["SR-EX-1"]["ledger_cleared"])
+        # 区域链前 3 关（ST-1、SR-1、TR-1）过了，链上更靠后的 SR-8 还没。
+        self.assertEqual(by_stage["SR-1"]["status"], "raid_pending")
+        self.assertNotIn(by_stage["SR-8"]["status"], {"cleared", "raid_pending"})
+        # 记账里有记录的关可以撤销。
+        self.assertTrue(by_stage["SR-5"]["ledger_cleared"])
 
     def test_with_the_raid_switch_off_a_normal_clear_says_so_on_the_card(self) -> None:
         """开关关掉时 ✅ 只代表普通难度打过了，卡上必须写明白，不能让人误以为突袭也通了。"""

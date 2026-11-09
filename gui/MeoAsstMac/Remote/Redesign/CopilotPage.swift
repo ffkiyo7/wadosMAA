@@ -70,7 +70,11 @@ struct CopilotPage: View {
 
     /// 未通的关数边栏角标已经有了，这里只说活动。
     private var caption: String? {
-        data.copilot?.inActivity == true ? "活动进行中" : nil
+        let parts = [
+            data.copilot?.inActivity == true ? "活动进行中" : nil,
+            store.copilotAutoPaused ? "自动已暂停" : nil,
+        ].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     // MARK: 关卡
@@ -233,9 +237,29 @@ struct CopilotPage: View {
                 ) { Task { await go() } }
             }
             .disabled(working || pick == nil || preview == nil || dispatchedToken != nil || !blocker.isEmpty)
+            if let row = selectedRow {
+                HStack(spacing: 8) {
+                    if row.status != "cleared" {
+                        Button("我打过了") { Task { await mark(row.stage, cleared: true) } }
+                            .help("记为普通和突袭都已通关，自动抄作业不再排这一关")
+                    }
+                    if row.ledgerCleared == true {
+                        Button("撤销通关记录") { Task { await mark(row.stage, cleared: false) } }
+                            .help("清掉这一关的通关记录，自动抄作业会重新考虑它")
+                    }
+                }
+                .buttonStyle(WMButtonStyle())
+                .disabled(working || store.readOnly)
+                .padding(.top, 10)
+            }
         }
         .padding(16)
         .wmCard()
+    }
+
+    private var selectedRow: CopilotStageRow? {
+        guard let selected else { return nil }
+        return data.copilot?.stages.first { $0.stage == selected }
     }
 
     // MARK: 动作（同原 AutoCopilotView）
@@ -273,6 +297,12 @@ struct CopilotPage: View {
         }
     }
 
+    /// 「我打过了」/「撤销通关记录」：只改本地记账（`copilot mark-cleared <关> all` / `copilot unmark <关>`），再重读关卡列表。
+    private func mark(_ stage: String, cleared: Bool) async {
+        await run(cleared ? ["copilot", "mark-cleared", stage, "all"] : ["copilot", "unmark", stage])
+        await data.loadCopilot()
+    }
+
     private func run(_ args: [String]) async {
         working = true
         defer { working = false }
@@ -285,9 +315,12 @@ struct CopilotPage: View {
     }
 }
 
-/// 抄作业页右上角「规则」：自动抄作业每天试几次、多久再找、离早晚场多近就不开新的一关。改了就写，可撤销。
+/// 抄作业页右上角「规则」：自动抄作业开不开（`copilot auto on|off`），每天试几次、多久再找、
+/// 离早晚场多近就不开新的一关。数值改了就写，可撤销；开关一拨就调命令。
 struct CopilotRules: View {
     @Environment(RemoteStore.self) private var store
+    /// 刚拨、命令还没回来时先显示拨到的位置。
+    @State private var pendingAuto: Bool?
 
     static let keys: Set<String> = [
         "auto_copilot_max_attempts_per_day", "activity_search_retry_minutes", "auto_copilot_min_lead_minutes",
@@ -296,6 +329,26 @@ struct CopilotRules: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            FormGroup {
+                FormRow(
+                    title: "自动抄作业",
+                    help: "活动期间自动找作业、自动开打。关掉后正在打的这一关打完就停；手动抄作业不受影响"
+                ) {
+                    Toggle("自动抄作业", isOn: Binding(
+                        get: { pendingAuto ?? !store.copilotAutoPaused },
+                        set: { on in
+                            pendingAuto = on
+                            Task {
+                                await store.perform(["copilot", "auto", on ? "on" : "off"])
+                                pendingAuto = nil
+                            }
+                        }
+                    ))
+                    .toggleStyle(.switch).labelsHidden()
+                    .disabled(pendingAuto != nil)
+                }
+            }
+            .padding(.top, -20)
             FormGroup {
                 ConfigFieldRow(key: "auto_copilot_max_attempts_per_day") { value in
                     Int(value.number ?? 0) == 0 ? "不限次数" : nil
@@ -310,7 +363,7 @@ struct CopilotRules: View {
                     lead(value, "不能开打")
                 }
             }
-            .padding(.top, -20)
+            .padding(.top, -8)
         }
         .padding(16)
         .frame(width: 460)

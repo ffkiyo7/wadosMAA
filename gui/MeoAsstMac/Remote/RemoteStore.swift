@@ -297,6 +297,8 @@ struct SavedChange: Identifiable, Equatable, Sendable {
     /// 最近几场（`runs/index.jsonl`），最新的在前；还没有记录就是空。
     private(set) var recentRuns: [RunRecord] = []
     private(set) var lockHolder: LockHolder?
+    /// 自动抄作业暂停了（`copilot/auto_pause.json` 的 `paused`，DEV_GUIDE §12.3）。手动抄作业不受影响。
+    private(set) var copilotAutoPaused = false
     private(set) var schemaProblem: String?
     private(set) var loadError: String?
     private(set) var reloadedAt: Date?
@@ -392,6 +394,7 @@ struct SavedChange: Identifiable, Equatable, Sendable {
         checkSchemas()
         lockHolder = RunLock.currentHolder()
         lastRun = Self.readJSON("last_run.json")
+        copilotAutoPaused = Self.readJSON("copilot/auto_pause.json")["paused"]?.bool == true
         recentRuns = RunHistory.read()
         progress.update(run: lastRun)
         noticeFinishedRun()

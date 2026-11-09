@@ -928,6 +928,7 @@ def copilot_card_stages(
     零网络、零子进程，整条按钮路径必须 < 20s（不变量 #6）。
     """
     import maa_clearing
+    import maa_gamedata
 
     index = maa_copilot.load_stage_index(config)
     drops = stage_drops(config)
@@ -946,6 +947,8 @@ def copilot_card_stages(
     ledger = maa_copilot.load_ledger() or {}
     roster = maa_copilot.load_roster()
     scheduled = _scheduled_stages()
+    layout = maa_gamedata.load_layout()
+    skland_done: dict[str, set[str]] = {}
 
     candidates = maa_copilot.activity_stage_codes(index, prefix) if prefix else []
     in_activity = bool(candidates)
@@ -958,6 +961,7 @@ def copilot_card_stages(
     for stage in candidates:
         resolved = maa_copilot.resolve_copilot_stage(stage, index)
         supported, detail = nav_of(stage)
+        marked = False
         if not supported:
             # 上游没写导航定义的关不自动进、也不给下拉（D8 / 不变量 #37）。
             status, text = "no_nav", f"⛔ {detail or '上游无导航'}"
@@ -970,6 +974,15 @@ def copilot_card_stages(
             pending = maa_copilot.ledger_pending_modes(
                 ledger, roster, stage, resolved[0], modes
             )
+            # 和 watcher 同一把尺子（`collect_targets()`）：森空岛区域进度能精确到
+            # 「链上前 N 关」时，手打过的关普通难度算过了。森空岛不分突袭，突袭仍看记账。
+            act_id = maa_gamedata.act_id_of(resolved[0])
+            if act_id not in skland_done:
+                skland_done[act_id] = maa_gamedata.skland_cleared(layout, roster, act_id)
+            if resolved[0] in skland_done[act_id]:
+                pending = [mode for mode in pending if mode != "normal"]
+            entry = (ledger.get("stages") or {}).get(stage) if isinstance(ledger, dict) else None
+            marked = isinstance(entry, dict) and any(entry.get(mode) for mode in ("normal", "raid"))
             failure = stage_state.get(stage) if isinstance(stage_state, dict) else None
             gaps = list((failure or {}).get("gaps") or []) if isinstance(failure, dict) else []
             capped = maa_copilot.daily_capped_modes(ledger, stage, pending, config, at)
@@ -1013,6 +1026,8 @@ def copilot_card_stages(
                 "reason": text if status in {"no_nav", "not_indexed"} else "",
                 "status": status,
                 "status_text": text,
+                # 本地记账里有通关记录（MAA 打赢的或手动标的）：GUI 据此给「撤销通关记录」。
+                "ledger_cleared": marked,
             }
         )
     return rows, in_activity
