@@ -4,7 +4,8 @@
 - `gui/MeoAsstMac/Remote/**/*.swift` 里的字符串字面量：含中文的全部算，外加 `Text(` / `Label(` /
   `Button(` / `.help(` / `title:` / `help:` / `sub:` / `rows:` 等界面调用那一行上的英文字面量；
 - `maa_action.py` 里 `dispatch_gui` 会走到的回执 `message`（Wado's MAA 原样显示，Discord 也用）；
-- `maa_daily.py` 写进 `runs/<场>.progress.json` 的步骤名和恢复说明（`PROGRESS_STEPS` / `PROGRESS_NOTES`，GUI 原样显示）。
+- `maa_daily.py` 写进 `runs/<场>.progress.json` 的步骤名和恢复说明（`PROGRESS_STEPS` / `PROGRESS_NOTES`，GUI 原样显示）；
+- `maa_settings.py` 里设置项的标签、分组名、灰字说明和校验失败的提示（`config get` / `config set` 原样给 GUI）。
 
 命中禁用词就红，报出「文件:行号 词 原文」。开发者区、诊断信息用注释圈起来跳过：
 
@@ -32,6 +33,7 @@ REPO = Path(__file__).resolve().parents[2]
 SWIFT_ROOT = REPO / "gui" / "MeoAsstMac" / "Remote"
 ACTION = REPO / "maa-remote" / "scripts" / "maa_action.py"
 DAILY = REPO / "maa-remote" / "scripts" / "maa_daily.py"
+SETTINGS = REPO / "maa-remote" / "scripts" / "maa_settings.py"
 # 进度文件里给人看的字：这些模块级常量里的每个字符串字面量都算。
 PROGRESS_CONSTANTS = ("PROGRESS_STEPS", "PROGRESS_NOTES")
 
@@ -231,6 +233,24 @@ def scan_progress() -> list[str]:
     return problems
 
 
+def scan_settings() -> list[str]:
+    """`maa_settings.py` 里所有含中文的字符串字面量（标签、分组、说明、`ValueError` 提示），文档字符串除外。"""
+    tree = ast.parse(SETTINGS.read_text(encoding="utf-8"))
+    docstrings = {
+        id(node.value) for node in ast.walk(tree)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)
+    }
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, str)) or id(node) in docstrings:
+            continue
+        if not CJK.search(node.value):
+            continue
+        for word in banned_in(node.value):
+            problems.append(f"maa_settings.py:{node.lineno} 「{word}」 {node.value!r}")
+    return problems
+
+
 def tearDownModule() -> None:
     # 这里只读源码，不碰 HOME；照全套测试的规矩（test_isolation）也查一遍。
     _isolation.assert_shared_home_clean()
@@ -265,6 +285,19 @@ class UiCopyTests(unittest.TestCase):
     def test_progress_notes_have_no_implementation_words(self) -> None:
         problems = scan_progress()
         self.assertEqual(problems, [], "进度文件的文案里出现了实现层的词：\n" + "\n".join(problems))
+
+    def test_setting_labels_have_no_implementation_words(self) -> None:
+        problems = scan_settings()
+        self.assertEqual(problems, [], "设置项的字里出现了实现层的词：\n" + "\n".join(problems))
+        # 真正下发给 GUI 的那一份也查一遍（分组名、标签、说明、只读提示）。
+        sys.path.insert(0, str(SETTINGS.parent))
+        import maa_settings
+
+        shown = [*maa_settings.GROUPS, *maa_settings.READ_ONLY_HERE.values()]
+        for item in maa_settings.FIELDS:
+            shown += [item.group, item.label, item.help]
+        hits = [f"{word} {text!r}" for text in shown for word in banned_in(text)]
+        self.assertEqual(hits, [], "\n".join(hits))
 
     def test_gui_receipts_have_no_implementation_words(self) -> None:
         problems = scan_action()

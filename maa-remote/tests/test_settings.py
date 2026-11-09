@@ -63,7 +63,7 @@ class SettingsTableTests(unittest.TestCase):
                 maa_settings.validate(key, "x")
 
     def test_session_times_only_change_through_schedule(self) -> None:
-        with self.assertRaisesRegex(ValueError, "schedule"):
+        with self.assertRaisesRegex(ValueError, "日常页"):
             maa_settings.validate("session_schedule", maa_common.DEFAULT_SESSION_SCHEDULE)
 
     def test_the_renderer_and_the_validator_share_one_whitelist(self) -> None:

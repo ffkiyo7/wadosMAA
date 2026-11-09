@@ -108,7 +108,7 @@ struct AdvancedSection: View {
         "session_schedule", "skland_roster_refresh_days", "game_display_name", "disable_stage_manager_during_run",
     ])
     /// 分组排序和显示名：算法参数在前，运行相关在后。
-    static let groupTitles: [(String, String)] = [("自动定关", "自动定关"), ("日常", "代理指挥"), ("运行环境", "运行")]
+    static let groupTitles: [(String, String)] = [("自动定关", "自动定关"), ("日常", "代理指挥"), ("运行", "运行")]
 
     @Environment(RemoteStore.self) private var store
     @AppStorage(RemoteConfig.hermesHomeKey) private var hermesHome = ""

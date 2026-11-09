@@ -64,14 +64,16 @@ def _f(key: str, group: str, label: str, kind: str, default: Any, lo: float | No
 
 
 # 分组即 GUI 的页面（K5）。默认值与种子 `state/config.json` 一致（`SettingsSeedTests` 盯着）。
+# label / group / help 原样显示在 Wado's MAA 上，只用游戏里的词和日常用语（REVIEW §3.5 词表，
+# `test_ui_copy` 扫禁用词）；label 末尾的「（分钟）」这类括号是单位，GUI 拿去当步进器的单位。
 FIELDS: tuple[Field, ...] = (
-    # 场次（K6）：改它要同步 cron，所以只能走 `schedule` 命令，这里只读。
-    _f("session_schedule", "场次", "早晚场时间", "session_schedule",
+    # 早晚场时间（K6）：改它要同步定时任务，所以只能走 `schedule` 命令，这里只读。
+    _f("session_schedule", "早晚场", "早晚场时间", "session_schedule",
        {"am": {"time": "08:00", "enabled": True}, "pm": {"time": "22:00", "enabled": True}},
-       help="用「场次」页改：会同步 Hermes cron"),
+       help="在日常页改时间和到点自动开始"),
     # 日常细项
-    _f("medicine_expire_days", "日常", "吃临期理智药的窗口（天）", "int", 2, 0, 7,
-       "只吃这么多天内过期的药；0 = 一瓶都不吃"),
+    _f("medicine_expire_days", "日常", "只吃几天内过期的理智药（天）", "int", 2, 0, 7,
+       "0 = 一瓶都不吃"),
     _f("recruit_times", "日常", "公招次数", "int", 4, 0, 4),
     _f("report_drops", "日常", "匿名上报掉落（一图流 / 企鹅物流）", "bool", True),
     _f("award_orundum", "日常", "领幸运墙合成玉", "bool", False),
@@ -82,51 +84,53 @@ FIELDS: tuple[Field, ...] = (
     _f("mall_blacklist", "日常", "信用商店不买", "str_list", []),
     _f("mall_reserve_max_credit", "日常", "信用点低于 300 停止购买", "bool", False),
     _f("mall_only_buy_discount", "日常", "只买打折物品", "bool", False),
-    _f("proxy_failure_limit", "日常", "代理指挥连续失误几批熔断", "int", 2, 1, 10),
-    _f("proxy_failure_salvage", "日常", "熔断后补跑去掉刷理智的链条", "bool", True),
+    _f("proxy_failure_limit", "日常", "代理指挥连续失败几次就停下（次）", "int", 2, 1, 10),
+    _f("proxy_failure_salvage", "日常", "代理指挥停下后，其余任务照常做完", "bool", True,
+       help="基建、公招、商店、领奖照做，只是不再刷理智"),
     _f("annihilation_sanity", "日常", "为每日剿灭预留的理智", "int", 25, 0, 135),
+    _f("manual_run_blackout_minutes", "日常", "早晚场前多久不能开始手动日常（分钟）", "int", 30, 0, 180),
     # 自动定关（材料缺口）
-    _f("farming_weights", "自动定关", "稀缺 / 缺口 / 效率 三项权重", "weights",
-       {"scarcity": 0.5, "gap": 0.3, "efficiency": 0.2}, help="和为任意值都会归一"),
-    _f("farming_min_samples", "自动定关", "掉率最低样本量", "int", 300, 0, 100000),
-    _f("farming_target_days", "自动定关", "缺口按多少天用量算", "int", 30, 1, 365),
+    _f("farming_weights", "自动定关", "选关时看重什么：稀缺 / 缺口 / 效率", "weights",
+       {"scarcity": 0.5, "gap": 0.3, "efficiency": 0.2}, help="三项按比例算，加起来不用等于 1"),
+    _f("farming_min_samples", "自动定关", "掉率至少要统计多少次才可信（次）", "int", 300, 0, 100000),
+    _f("farming_target_days", "自动定关", "缺口按多少天的用量算（天）", "int", 30, 1, 365),
     _f("farming_activity_edge", "自动定关", "活动关要便宜多少倍才算明显更优", "float", 1.3, 1.0, 10.0),
-    _f("farming_rerun_days", "自动定关", "预计复刻间隔（天）", "int", 378, 30, 1000),
-    _f("farming_scarcity_horizon_days", "自动定关", "稀缺分视野（天）", "int", 400, 30, 2000),
-    _f("farming_stage_table", "自动定关", "材料 → 关卡手工表", "stage_table", {},
-       help="只放主线 / 资源本；活动关跟随上游掉落表"),
-    _f("farming_manual_weights", "自动定关", "材料手工权重", "number_table", {}),
+    _f("farming_rerun_days", "自动定关", "预计多久复刻一次（天）", "int", 378, 30, 1000),
+    _f("farming_scarcity_horizon_days", "自动定关", "算稀缺时往后看多少天（天）", "int", 400, 30, 2000),
+    _f("farming_stage_table", "自动定关", "指定材料去哪一关刷", "stage_table", {},
+       help="只填主线和资源本；活动关会自动跟上"),
+    _f("farming_manual_weights", "自动定关", "调高某些材料的优先级", "number_table", {}),
     # 抄作业
-    _f("copilot_blackout_minutes", "抄作业", "早晚场前多久不派发抄作业（分钟）", "int", 25, 0, 180),
-    _f("auto_copilot_min_lead_minutes", "抄作业", "距下一场不足多久不再开新的一关（分钟）", "int", 40, 0, 240),
-    _f("activity_search_retry_minutes", "抄作业", "练度不满足 / 没作业时的重试间隔（分钟）", "int", 30, 5, 1440),
+    _f("copilot_blackout_minutes", "抄作业", "早晚场前多久不开打抄作业（分钟）", "int", 25, 0, 180),
+    _f("auto_copilot_min_lead_minutes", "抄作业", "离早晚场不到多久就不再开新的一关（分钟）", "int", 40, 0, 240),
+    _f("activity_search_retry_minutes", "抄作业", "练度不够 / 没作业时多久再找（分钟）", "int", 30, 5, 1440),
     _f("auto_copilot_max_attempts_per_day", "抄作业", "同一关每天最多自动尝试几次", "int", 2, 0, 20,
        "0 = 不限"),
-    _f("manual_run_blackout_minutes", "抄作业", "早晚场前多久不接受手动场（分钟）", "int", 30, 0, 180),
     # 森空岛
-    _f("skland_roster_refresh_days", "森空岛", "练度快照多少天强制刷新", "int", 7, 1, 60),
-    # 运行环境
-    _f("game_display_name", "运行环境", "游戏窗口常驻的显示器名", "text", "MAA-Game",
+    _f("skland_roster_refresh_days", "森空岛", "干员练度多久强制刷新一次（天）", "int", 7, 1, 60),
+    # 运行
+    _f("game_display_name", "运行", "游戏窗口常驻的显示器名", "text", "MAA-Game",
        help="系统设置里显示器的名字；留空 = 不挪窗口"),
-    _f("disable_stage_manager_during_run", "运行环境", "跑的时候临时关掉台前调度", "bool", True,
-       help="跑完恢复原样；本来就关着的不动"),
-    _f("game_launch_timeout", "运行环境", "等游戏和 MaaTools 就绪（秒）", "int", 120, 30, 600),
-    _f("game_quit_timeout", "运行环境", "等游戏退出（秒）", "int", 30, 5, 120),
-    _f("game_probe_timeout", "运行环境", "开跑前探测游戏是否在玩（秒）", "int", 5, 0, 30, "0 = 不探测"),
-    _f("maa_run_timeout", "运行环境", "一场日常的上限（秒）", "int", 3000, 600, 3300,
-       "Hermes 外层上限 1 小时，要留出清理时间"),
-    _f("update_wait_minutes", "运行环境", "日常等上游更新跑完的上限（分钟）", "int", 15, 0, 30,
-       "从一场日常的上限里扣"),
-    _f("connect_retry_limit", "运行环境", "连接阶段崩溃重开次数", "int", 2, 0, 5),
-    _f("offline_retry_limit", "运行环境", "没登录上时重启游戏次数", "int", 2, 0, 5,
-       "游戏弹「获取网络配置失败」时等一会儿、重启游戏、整场重跑"),
-    _f("retention_days", "运行环境", "本地日志 / 截图保留天数", "int", 14, 1, 90),
-    _f("resource_update_timeout", "运行环境", "资源更新超时（秒）", "int", 300, 60, 1800),
-    _f("maa_cli_update_timeout", "运行环境", "maa-cli 升级超时（秒）", "int", 180, 60, 1800),
+    _f("disable_stage_manager_during_run", "运行", "日常和抄作业期间临时关掉台前调度", "bool", True,
+       help="做完恢复原样；本来就关着的不动"),
+    _f("game_launch_timeout", "运行", "等游戏启动好（秒）", "int", 120, 30, 600),
+    _f("game_quit_timeout", "运行", "等游戏退出（秒）", "int", 30, 5, 120),
+    _f("game_probe_timeout", "运行", "开始前看看你是不是在玩（秒）", "int", 5, 0, 30, "0 = 不看，直接开始"),
+    _f("maa_run_timeout", "运行", "一次日常最长多久（秒）", "int", 3000, 600, 3300,
+       "整次最多 1 小时，要留出收尾的时间"),
+    _f("update_wait_minutes", "运行", "日常最多等游戏资源更新多久（分钟）", "int", 15, 0, 30,
+       "算在一次日常的时长里"),
+    _f("connect_retry_limit", "运行", "游戏连接失败时重试几次（次）", "int", 2, 0, 5),
+    _f("offline_retry_limit", "运行", "没登录上时重启游戏几次（次）", "int", 2, 0, 5,
+       "游戏弹「获取网络配置失败」时等一会儿、重启游戏、从头再来"),
+    _f("retention_days", "运行", "本地日志 / 截图保留几天（天）", "int", 14, 1, 90),
+    _f("resource_update_timeout", "运行", "游戏资源更新最多等多久（秒）", "int", 300, 60, 1800),
+    _f("maa_cli_update_timeout", "运行", "MAA 升级最多等多久（秒）", "int", 180, 60, 1800),
 )
 BY_KEY: dict[str, Field] = {item.key: item for item in FIELDS}
 # 只能经别的命令改的键：`config set` 拒绝，`config get` 照常给。
-READ_ONLY_HERE = {"session_schedule": "早晚场时间用 schedule set / enable / disable 改（要同步 cron）"}
+# 提示原样显示在 GUI 上（`config set` 失败的 message），只说去哪改；为什么（要同步定时任务）写在这里。
+READ_ONLY_HERE = {"session_schedule": "早晚场时间要在日常页改"}
 GROUPS = tuple(dict.fromkeys(item.group for item in FIELDS))
 
 

@@ -752,7 +752,7 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 
 | 命令 | 作用 | `data` |
 |---|---|---|
-| `config get` | 可改的配置项和当前值 | `fields`（`key` / `group` / `label` / `kind` / `default` / 范围）、`groups`、`values`、`meta` |
+| `config get` | 可改的配置项和当前值。`label` / `group` / `help` 原样上界面，按 REVIEW §3.5 词表写（`test_ui_copy` 扫）；`label` 末尾的括号是单位。分组：早晚场 / 日常 / 自动定关 / 抄作业 / 森空岛 / 运行，GUI「高级」按分组名排，改名两边一起改 | `fields`（`key` / `group` / `label` / `kind` / `default` / 范围）、`groups`、`values`、`meta` |
 | `config set <键> <JSON>` / `config patch <JSON 对象>` | 改配置。按 `maa_settings.FIELDS` 白名单校验；`patch` 要么全改、要么全不改 | 同 `config get` |
 | `defaults show` / `defaults set stage <关>` / `defaults set task <名> on\|off` | 持久默认值 | `defaults.json` 的内容 |
 | `schedule show` / `set <am\|pm> <HH:MM>` / `enable <场>` / `disable <场>` / `sync` | 早晚场时间和 cron（§3、K6）。只有拨开关才会 pause / resume | `maa_schedule.schedule_report()` |
