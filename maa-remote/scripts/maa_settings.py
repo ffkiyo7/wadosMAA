@@ -108,6 +108,8 @@ FIELDS: tuple[Field, ...] = (
     # 运行环境
     _f("game_display_name", "运行环境", "游戏窗口常驻的显示器名", "text", "MAA-Game",
        help="系统设置里显示器的名字；留空 = 不挪窗口"),
+    _f("disable_stage_manager_during_run", "运行环境", "跑的时候临时关掉台前调度", "bool", True,
+       help="跑完恢复原样；本来就关着的不动"),
     _f("game_launch_timeout", "运行环境", "等游戏和 MaaTools 就绪（秒）", "int", 120, 30, 600),
     _f("game_quit_timeout", "运行环境", "等游戏退出（秒）", "int", 30, 5, 120),
     _f("game_probe_timeout", "运行环境", "开跑前探测游戏是否在玩（秒）", "int", 5, 0, 30, "0 = 不探测"),

@@ -142,6 +142,16 @@ def _audit(event: str, args: tuple) -> None:
                     "路径要从 maa_common / deploy 的常量来（已指向临时 HOME），或自行打桩"
                 )
         return
+    if event == "subprocess.Popen":
+        # 台前调度是用户的系统设置：任何用例都不许真的读写它（不变量 #62），一律自行打桩。
+        argv = args[1] if len(args) > 1 else None
+        if isinstance(argv, (list, tuple)) and any(
+            "com.apple.WindowManager" in os.fsdecode(part)
+            for part in argv
+            if isinstance(part, (str, bytes))
+        ):
+            raise RealHomeTouched(f"单测碰到了本机台前调度设置：{argv!r}——自行打桩")
+        return
     if LIVE_TESTS:
         return
     if event == "socket.getaddrinfo":
@@ -246,6 +256,9 @@ def guard_devices() -> list:
     guards = [
         patch.object(maa_playcover, "subprocess", NoRealGame("subprocess")),
         patch.object(maa_playcover, "socket", NoRealGame("socket")),
+        # 日常 / 抄作业主流程会调这两个；它们自己的行为在 `test_playcover.py` 里测。
+        patch.object(maa_playcover, "pause_stage_manager", return_value=False),
+        patch.object(maa_playcover, "restore_stage_manager", return_value=False),
     ]
     for item in guards:
         item.start()

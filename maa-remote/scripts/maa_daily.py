@@ -2167,6 +2167,8 @@ def execute(phase: Phase, manual_token: str = "") -> int:
         connect_retries = 0
         offline_retries = 0
         startup_error = ""
+        # 不变量 #62：拿到锁之后、开游戏之前关台前调度，finally 里关完游戏再还原。永不抛。
+        stage_manager_paused = maa_playcover.pause_stage_manager(config)
         try:
             require_executable(config, "maa_bin", "/opt/homebrew/bin/maa", "maa-cli")
             maa_playcover.verify_game_installed(config)
@@ -2332,6 +2334,8 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                     cleanup_errors = maa_playcover.close_game(config)
                 except Exception as exc:  # noqa: BLE001 — (b) 收尾清理不能盖住主错误，异常并入 cleanup_errors
                     cleanup_errors = [f"清理异常：{type(exc).__name__}: {exc}"]
+            if stage_manager_paused:
+                maa_playcover.restore_stage_manager()
 
         # 两个刷理智块的掉落一起回写库存估算（四期步骤 3b）。
         fight_lines = farming_sections(stdout_lines + stderr_lines)

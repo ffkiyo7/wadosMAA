@@ -1010,6 +1010,78 @@ class OfflineExecuteTests(unittest.TestCase):
         self.assertIn("重启游戏 2 次都没恢复", notes)
 
 
+class StageManagerExecuteTests(unittest.TestCase):
+    """不变量 #62：拿到锁之后、开游戏之前关台前调度；成功、失败、取消都在关完游戏后还原。"""
+
+    def setUp(self) -> None:
+        isolate_stage_index(self)
+
+    def _execute(self, launch: Any, paused: bool = True, wait: Any = None) -> tuple[Any, list[str]]:
+        at = datetime(2026, 11, 9, 8, 0, tzinfo=BEIJING)
+        lock = unittest.mock.MagicMock()
+        lock.__enter__.return_value = True
+        lock.__exit__.return_value = False
+        plan = maa_common.normalize_plan({"stage": "TL-7"})
+        order: list[str] = []
+        with tempfile.TemporaryDirectory() as raw, contextlib.ExitStack() as stack:
+            def stub(target: Any, name: str, **kwargs: Any) -> unittest.mock.MagicMock:
+                return stack.enter_context(patch.object(target, name, **kwargs))
+
+            stub(maa_daily, "RUNS_DIR", new=Path(raw))
+            stub(maa_daily, "now_beijing", return_value=at)
+            stub(maa_daily, "load_config", return_value={"channel_id": "123", "maa_config_dir": raw})
+            stub(maa_daily, "discord_token", return_value="token")
+            stub(maa_daily, "load_json", return_value={})
+            stub(maa_daily, "effective_plan", return_value=plan)
+            stub(maa_daily, "run_lock", return_value=lock)
+            stub(maa_daily, "cleanup_run_files")
+            stub(maa_daily, "atomic_write_json")
+            stub(maa_daily, "atomic_write_text")
+            stub(maa_daily, "should_skip", return_value=False)
+            stub(maa_daily, "upstream_hard_block", return_value="")
+            stub(maa_playcover, "game_is_online", return_value=(False, ""))
+            stub(maa_daily, "merge_last_run")
+            stub(maa_daily, "discord_request", return_value={"id": "9"})
+            stub(maa_daily, "create_thread", return_value={"id": "7"})
+            stub(maa_daily, "send_direct_failure")
+            stub(maa_daily, "require_executable")
+            stub(maa_playcover, "verify_game_installed")
+            stub(maa_playcover, "pause_stage_manager",
+                 side_effect=lambda _config: order.append("pause") or paused)
+            stub(maa_playcover, "launch_game", side_effect=launch)
+            stub(maa_playcover, "wait_for_game", side_effect=wait)
+            stub(maa_playcover, "settle_game_window", return_value="")
+            stub(maa_daily, "run_maa_resilient", return_value=(0, [], [], 0, 0))
+            stub(maa_daily, "capture_home_screenshot", return_value=(True, "", True, ""))
+            stub(maa_playcover, "close_game", side_effect=lambda _config: order.append("close") or [])
+            stub(maa_playcover, "restore_stage_manager",
+                 side_effect=lambda: order.append("restore") or True)
+            stub(maa_daily, "send_report")
+            try:
+                result: Any = maa_daily.execute("am")
+            except BaseException as exc:  # noqa: BLE001 — 用例要看 KeyboardInterrupt 穿出来
+                result = exc
+        return result, order
+
+    def test_paused_before_launch_and_restored_after_close(self) -> None:
+        _result, order = self._execute(lambda _config: None)
+        self.assertEqual(order, ["pause", "close", "restore"])
+
+    def test_restored_when_the_launch_fails(self) -> None:
+        result, order = self._execute(RuntimeError("无法启动明日方舟"))
+        self.assertEqual(result, 1)
+        self.assertEqual(order, ["pause", "restore"])
+
+    def test_restored_when_the_run_is_cancelled(self) -> None:
+        result, order = self._execute(lambda _config: None, wait=KeyboardInterrupt())
+        self.assertIsInstance(result, KeyboardInterrupt)
+        self.assertEqual(order, ["pause", "close", "restore"])
+
+    def test_nothing_to_restore_when_it_was_already_off(self) -> None:
+        _result, order = self._execute(lambda _config: None, paused=False)
+        self.assertEqual(order, ["pause", "close"])
+
+
 class ProxyFailureTests(unittest.TestCase):
     def test_returned_sanity_is_not_a_drop(self) -> None:
         self.assertEqual(maa_daily._drop_pairs(PROXY_WIPEOUT_LOG), [])

@@ -805,6 +805,122 @@ class WindowRestoreTests(unittest.TestCase):
         self.assertEqual(domain.parent.parent.parent.parent.name, "com.example.game")
 
 
+class FakeDefaults:
+    """顶替 `defaults read/write com.apple.WindowManager GloballyEnabled`：只改内存里的值。"""
+
+    def __init__(self, value: str | None, *, fail_read: bool = False, fail_write: bool = False) -> None:
+        self.value = value  # "1" / "0" / None（没有这个键）
+        self.fail_read = fail_read
+        self.fail_write = fail_write
+        self.writes: list[str] = []
+
+    def __call__(self, argv: list[str], **_kwargs: object) -> SimpleNamespace:
+        assert argv[:3] in (["defaults", "read", "com.apple.WindowManager"],
+                            ["defaults", "write", "com.apple.WindowManager"]), argv
+        assert argv[3] == "GloballyEnabled", argv
+        if argv[1] == "read":
+            if self.fail_read:
+                raise subprocess.TimeoutExpired("defaults", 10)
+            if self.value is None:
+                return SimpleNamespace(returncode=1, stdout="", stderr="The domain/default pair does not exist")
+            return _completed(0, self.value + "\n")
+        if self.fail_write:
+            return SimpleNamespace(returncode=1, stdout="", stderr="Could not write domain")
+        self.writes.append(argv[5])
+        self.value = "1" if argv[5] == "true" else "0"
+        return _completed(0)
+
+
+class StageManagerTests(unittest.TestCase):
+    """不变量 #62：跑场期间关掉台前调度、跑完还原；绝不真的调 `defaults`。"""
+
+    def setUp(self) -> None:
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        self.state = Path(raw.name) / "stage_manager.json"
+        path_patch = patch.object(maa_playcover, "stage_manager_state_path", return_value=self.state)
+        path_patch.start()
+        self.addCleanup(path_patch.stop)
+
+    def _with(self, fake: FakeDefaults):
+        return patch.object(maa_playcover.subprocess, "run", side_effect=fake)
+
+    def test_on_is_turned_off_then_restored(self) -> None:
+        fake = FakeDefaults("1")
+        with self._with(fake), patch("sys.stderr", new_callable=io.StringIO):
+            self.assertTrue(maa_playcover.pause_stage_manager({}))
+            self.assertEqual(fake.value, "0")
+            self.assertTrue(self.state.exists())
+            self.assertTrue(maa_playcover.restore_stage_manager())
+        self.assertEqual(fake.value, "1")
+        self.assertEqual(fake.writes, ["false", "true"])
+        self.assertFalse(self.state.exists())
+
+    def test_already_off_is_left_alone(self) -> None:
+        for value in ("0", None):
+            fake = FakeDefaults(value)
+            with self._with(fake):
+                self.assertFalse(maa_playcover.pause_stage_manager({}))
+                self.assertFalse(maa_playcover.restore_stage_manager())
+            self.assertEqual(fake.writes, [])
+            self.assertFalse(self.state.exists())
+
+    def test_the_setting_can_turn_the_whole_thing_off(self) -> None:
+        fake = FakeDefaults("1")
+        with self._with(fake):
+            self.assertFalse(maa_playcover.pause_stage_manager({"disable_stage_manager_during_run": False}))
+        self.assertEqual(fake.writes, [])
+
+    def test_a_leftover_record_is_kept_and_restored(self) -> None:
+        # 上一场关完就被杀：文件还在、开关还是关的。这一场不能把「关」当原状态记下来。
+        self.state.write_text('{"enabled": true}', encoding="utf-8")
+        fake = FakeDefaults("0")
+        with self._with(fake), patch("sys.stderr", new_callable=io.StringIO):
+            self.assertTrue(maa_playcover.pause_stage_manager({}))
+            self.assertEqual(fake.writes, [])
+            self.assertTrue(maa_playcover.restore_stage_manager())
+        self.assertEqual(fake.value, "1")
+        self.assertFalse(self.state.exists())
+
+    def test_a_leftover_record_is_restored_even_when_the_setting_is_off(self) -> None:
+        self.state.write_text('{"enabled": true}', encoding="utf-8")
+        fake = FakeDefaults("0")
+        with self._with(fake), patch("sys.stderr", new_callable=io.StringIO):
+            self.assertFalse(maa_playcover.pause_stage_manager({"disable_stage_manager_during_run": False}))
+        self.assertEqual(fake.value, "1")
+        self.assertFalse(self.state.exists())
+
+    def test_command_failures_never_raise(self) -> None:
+        err = io.StringIO()
+        with patch("sys.stderr", new=err):
+            fake = FakeDefaults("1", fail_read=True)
+            with self._with(fake):
+                self.assertFalse(maa_playcover.pause_stage_manager({}))
+            fake = FakeDefaults("1", fail_write=True)
+            with self._with(fake):
+                self.assertFalse(maa_playcover.pause_stage_manager({}))
+            self.assertFalse(self.state.exists())  # 没关成就不留记录
+            with patch.object(maa_playcover.subprocess, "run", side_effect=OSError("boom")):
+                self.assertFalse(maa_playcover.pause_stage_manager({}))
+        self.assertIn("台前调度", err.getvalue())
+
+    def test_a_failed_restore_keeps_the_record_for_next_time(self) -> None:
+        fake = FakeDefaults("1")
+        with self._with(fake), patch("sys.stderr", new_callable=io.StringIO):
+            self.assertTrue(maa_playcover.pause_stage_manager({}))
+            fake.fail_write = True
+            self.assertFalse(maa_playcover.restore_stage_manager())
+            self.assertTrue(self.state.exists())
+            fake.fail_write = False
+            self.assertTrue(maa_playcover.restore_stage_manager())
+        self.assertEqual(fake.value, "1")
+        self.assertFalse(self.state.exists())
+
+    def test_the_isolation_hook_refuses_the_real_setting(self) -> None:
+        with self.assertRaises(_isolation.RealHomeTouched):
+            subprocess.run(["defaults", "read", "com.apple.WindowManager", "GloballyEnabled"], check=False)
+
+
 class CloseTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fake = FakeMaaTools()

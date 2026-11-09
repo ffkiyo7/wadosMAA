@@ -491,6 +491,40 @@ class CopilotBatchExecutionTests(unittest.TestCase):
             snapshot=snapshots[0] if snapshots else None,
         )
 
+    def _run_with_stage_manager(self, fight, paused=True):
+        order: list[str] = []
+        with patch.object(maa_playcover, "pause_stage_manager",
+                          side_effect=lambda _config: order.append("pause") or paused), \
+             patch.object(maa_playcover, "restore_stage_manager",
+                          side_effect=lambda: order.append("restore") or True):
+            try:
+                self._run([self._entry("SR-5")], fight)
+            except KeyboardInterrupt:
+                order.append("cancelled")
+        return order
+
+    def test_stage_manager_is_paused_before_launch_and_restored(self) -> None:
+        """不变量 #62：成功、失败、取消都要还原台前调度。"""
+        self.assertEqual(
+            self._run_with_stage_manager(lambda *a: ("won", "")),
+            ["pause", "restore"],
+        )
+
+        def boom(*_a):
+            raise RuntimeError("MaaTools 断开")
+
+        self.assertEqual(self._run_with_stage_manager(boom), ["pause", "restore"])
+
+        def cancel(*_a):
+            raise KeyboardInterrupt
+
+        self.assertEqual(
+            self._run_with_stage_manager(cancel), ["pause", "restore", "cancelled"]
+        )
+        self.assertEqual(
+            self._run_with_stage_manager(lambda *a: ("won", ""), paused=False), ["pause"]
+        )
+
     def test_a_prefight_environment_failure_is_marked_on_the_round(self) -> None:
         """2026-10-11：森空岛过期，每轮都在复核时退出、不记账，watcher 每 15 分钟重派。"""
         import maa_copilot_worker as worker

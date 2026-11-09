@@ -37,6 +37,8 @@
 
 **侧边栏缩略图**：台前调度把窗口缩成约 144×149 的缩略图时 `kCGWindowIsOnscreen` 仍是真，`SCRN` 却回 0 字节；进程另挂着几条不在屏的 1920×30 横条和一个 500×500 空窗口。`game_window()` 只滤两边都 < 100 的横条；`window_shelved()`（在屏且宽 < `MIN_GAME_WIDTH`）认缩略图；`window_usable()` = 在屏且不是缩略图。`settle_game_window()` 不挪缩略图，激活后每 0.5 秒看一次、最多 5 秒，一回到屏上就马上挪到虚拟屏并居中；摆不回来时告警里带窗口尺寸、位置、状态和各块屏的位置（`describe_window()`）。
 
+**跑场期间关掉台前调度**（2026-11-09 起，#62）：日常和抄作业开游戏前 `pause_stage_manager()` 把台前调度临时关掉、跑完还原（§4「恢复策略」）。真机确认有效之前，下面的救法照留。
+
 **截不到时怎么救**（`settle_game_window()` 逐级升级，救回来就停；spike 见 `docs/PLAN_SHELVED_WINDOW.md`、[incidents/2026-11-08-am-window-shelved.md](./incidents/2026-11-08-am-window-shelved.md)）：
 
 1. 激活（`launch_game()`）；
@@ -244,6 +246,7 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
 | 游戏没登录上（「获取网络配置失败」） | `never_logged_in()` 三条全满足：StartUp 段撞过 `GameOffline`、紧接的任务链也撞上、没有任何作战 / 掉落 / 基建 / 公招进展 | 等 `offline_retry_delays`（120s、300s）→ 写一行 `conf_probe()` 连通性探测 → `restart_game()` → 摆窗 → 整场重跑，最多 `offline_retry_limit`（2）次。死掉那趟的输出不交给战报。放弃时带 `OFFLINE_GAVE_UP`，补跑跳过（`OFFLINE_SKIP_NOTE`）。登录后才掉线的不重开，只如实报红；撞上 `GameOffline` 的任务一律「❌ 未完成（游戏掉线）」（`offline_tasks()`，#61） |
 | 代理指挥失误 | 掉落项里出现「理智」（`SANITY_REFUND_ITEM`，游戏把返还的理智画成道具）= 失误批次 | `_drop_pairs()` 剔掉「理智」；`fight_wiped_out()`（有失误且零真掉落）时 Fight 翻红、写「实际完成 0 次」、整场 ❌、备注提示手动重打三星刷新录像。**熔断**：`run_maa()` 每 `PROGRESS_INTERVAL_SECONDS` 看末尾**连续**失误批次，达 `proxy_failure_limit`（2）就终止，返回 `PROXY_BREAK_CODE = 125`（中间有真掉落就清零）。**补跑**：`_salvage_run()` 用去掉 Fight 的 `daily.toml` 再跑一趟捞回基建 / 公招 / 商店 / 奖励，剩余预算不足 `proxy_failure_salvage_min_seconds`（300）就跳过，`proxy_failure_salvage: false` 关掉，日志 `runs/<date>-<phase>-salvage.log`。「StartUp 能否从结算页带回主界面」未真机验收 |
 | 主关空跑失败 | `return_code != 0` 且 `fight_failed_dry()`（段里没有 `Fight <关> n times`、没有掉落、`[刷理智·续]` 没跑过） | `_fallback_fight_run()`：`fallback_fight_plan()` 只留 Fight、`annihilation = False`、块名 `FARMING_TASK_NAMES[1]`，剩余不足 `fight_fallback_min_seconds`（300）跳过，`fight_fallback_on_error: false` 关掉，日志 `runs/<date>-<phase>-fallback.log`（复用 `last_run.salvage_log`）。打了几批才 Error 的不补 |
+| 台前调度把游戏收进侧边栏（预防，不是事后救） | 每场都做：拿到 `run.lock` 后、`launch_game()` 前 `pause_stage_manager()` 读 `com.apple.WindowManager GloballyEnabled` | 开着就先把原状态写进 `state/maa/stage_manager.json` 再 `defaults write … -bool false`；`finally` 里关完游戏后 `restore_stage_manager()` 写回开、删文件（成功 / 失败 / `KeyboardInterrupt` 都走）。原本关着不动也不还原；文件是上一场中途被杀留下的就以它为准、本场结束时一并还原；`disable_stage_manager_during_run: false` 时只还原遗留、不关。读写失败只打一行 stderr，不影响跑场（#62）。旧的摆窗救法（§0.5）照留，真机确认有效后再删 |
 
 来由：[2026-08-07](./incidents/2026-08-07-proxy-failure-sanity-refund.md)、[2026-08-08](./incidents/2026-08-08-maatouch-sigsegv.md)、[2026-09-09 早场](./incidents/2026-09-09-am-fight-dry-fallback.md)、[2026-11-08](./incidents/2026-11-08-am-window-shelved.md)、[2026-11-09](./incidents/2026-11-09-am-game-offline.md)；方案见 `PLAN_GAME_OFFLINE.md`。
 
@@ -368,6 +371,7 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
   copilot/auto_pause.json  暂停自动作业开关；copilot/gamedata.json 游戏数据缓存
   run.lock        flock 独占锁（执行）；持有者标记 {holder: daily|copilot|depot|update|gui, detail, pid, since}（K15，§12.2）
   last_run.lock   flock（保护 last_run.json 的跨进程 read-modify-write）
+  stage_manager.json 台前调度原状态 {enabled: true, saved_at}：只在「原本开着、被跑场临时关掉」期间存在，还原后删（#62）
   am/ pm/         空目录，只给 cron 传场次
   runs/<date>-<phase>.{json,log,png}   快照 / 日志 / 截图（14 天）；同天同场次文件名复用，多次 run now 会覆盖 <date>-now.*
 
@@ -412,6 +416,7 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
 | （可改的键） | — | **只有 `maa_settings.FIELDS` 里的能从外面改**（`config set/patch`）：逐项校验、全部合规才写；物品名 / 材料名与渲染器共用 `SAFE_MALL_ITEM_RE`（#51）。路径、可执行文件、MaaTools 地址、运行时缓存、突袭开关不在表里；降级开关永远不许进表（`test_no_downgrade_switch_is_ever_editable`） |
 | `config_meta` | 不在种子里 | `{键: {source: gui\|discord, updated_at}}`（K3）。**记过的键 `deploy.py` 保留线上值** |
 | `game_bundle_id` / `playcover_app_path` / `maatools_address` / `game_display_name` | `com.hypergryph.arknights` / `~/Library/Containers/io.playcover.PlayCover/Applications/com.hypergryph.arknights.app` / `127.0.0.1:1717` / `MAA-Game` | `App Settings/<bundle id>.plist` 的文件名；`open -a` 拉起；`pgrep` / `pkill -f` 用里面可执行文件的完整路径；只接受回环；与 PlayCover、maa-cli profile 三处一致；游戏窗口常驻的虚拟屏名；空串 = 不管 |
+| `disable_stage_manager_during_run` | `true` | 日常和抄作业动游戏期间临时关掉台前调度、跑完还原（#62，§4「恢复策略」）；GUI 标签「跑的时候临时关掉台前调度」 |
 | `game_launch_timeout` / `game_quit_timeout` / `game_probe_timeout` / `maa_run_timeout` | `120` / `30` / `5` / `3000` | 等 MaaTools / 等 `TERM` 后退出 / 「你在玩」探测预算（`0` 关闭探测）；为 Hermes 外层 1 小时上限预留清理时间；重开与补跑共用 |
 | `connect_retry_limit` / `connect_retry_delay` / `offline_retry_limit` / `offline_retry_delays` / `proxy_failure_limit` / `proxy_failure_salvage` / `proxy_failure_salvage_min_seconds` / `fight_fallback_on_error` / `fight_fallback_min_seconds` / `update_wait_minutes` | `2` / `8` / `2` / `[120, 300]` / `2` / `true` / `300` / `true` / `300` / `15` | 连接阶段失败的重开次数与间隔；没登录上时重启重跑的次数和第 n 次前等几秒（不够长用最后一个值）；代理失误熔断与补跑；主关空跑失败改刷后备关；日常等上游更新放锁的上限 |
 | `medicine_expire_days` | `2` | 只吃这个窗口内将过期的理智药 |
@@ -545,6 +550,7 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | 24 | 每条自动链路在拿到锁之后、`launch_game()` 之前探测游戏进程，在跑就跳过并发 Discord、写 `last_run`（日常 `skipped`/`game_busy`；Depot `skipped_busy` 不动 `snapshot_at`；抄作业放回 `scheduled`）。`now` 永不跳过。探测永不抛、预算 `game_probe_timeout`，不复用 `wait_for_game()` / `settle_game_window()`，实现只有一份 | `game_is_online()` + `report_game_busy()` + `AUTO_PHASES` + `test_there_is_exactly_one_probe_implementation` | — |
 | 36 | 每开新一关前查距下一场是否够 `auto_copilot_min_lead_minutes`；三条时间闸门（blackout / Depot 窗口 / 时间预算）只有一份，在 `maa_action.py` | `min_lead_reason()` / `_copilot_blackout_reason()` / `depot_window_reason()` + `CopilotTimeBudgetTests` | — |
 | 60 | 上游更新只有一份（`maa_upstream.run_update()`），全库只有它调 `maa update` / `hot-update` / `brew upgrade`，期间持 `run.lock`。开跑前 `hard_block()` 只在钉住项被改、或上次更新不自洽时拒跑；开发副本只检查不更新 | `run_update()` / `hard_block()` / `update_gate()` + `tests/test_upstream.py` | [2026-08-26](./incidents/2026-08-26-maaresource-out-of-sync.md)、[2026-09-07](./incidents/2026-09-07-hot-update-libgit2-proxy.md) |
+| 62 | 动游戏的流程（日常 `execute()`、抄作业 `_batch_run_locked()`）在拿到 `run.lock` 之后、`launch_game()` 之前 `pause_stage_manager()`，在 `finally` 里**关完游戏之后** `restore_stage_manager()`；成功、失败、`KeyboardInterrupt` 都要还原。关之前必须先把原状态落盘（`state/maa/stage_manager.json`），落盘失败就不关；原本关着就不动也不还原；遗留文件以它为准、不得被覆盖。两个函数永不抛。单测不许真的读写 `com.apple.WindowManager`（`_isolation` 审计钩子拦 `subprocess.Popen`，`guard_devices()` 默认把两个函数桩成空操作） | `pause_stage_manager()` / `restore_stage_manager()` + `StageManagerTests` / `StageManagerExecuteTests` / `test_stage_manager_is_paused_before_launch_and_restored` | [2026-11-08](./incidents/2026-11-08-am-window-shelved.md) |
 
 ### 8.5 部署与状态文件
 | # | 不变量 | 落点 | 来由 |

@@ -910,3 +910,146 @@ def close_game(config: Config) -> list[str]:
             errors.append(term_note)
         errors.append("仍有明日方舟进程存活")
     return errors
+
+
+# ---- 跑场期间临时关掉台前调度（DEV_GUIDE §0.5、不变量 #62）----
+#
+# 台前调度会把游戏窗口收成侧边栏缩略图，`SCRN` 随之回 0 字节（2026-11-08 早场）。
+# 用户的决定是：动游戏的那段时间关掉它，跑完还原。开关是 `com.apple.WindowManager`
+# 域的 `GloballyEnabled`（控制中心那个「台前调度」按钮写的就是它；没有这个键 = 关）。
+# 原状态先落盘再关：进程中途被杀，下一次 `pause` / `restore` 按文件还原，不会让用户的
+# 台前调度从此一直是关的。这里的每一步都不抛：读写失败只打一行 stderr，不拖垮一场。
+
+STAGE_MANAGER_DOMAIN = "com.apple.WindowManager"
+STAGE_MANAGER_KEY = "GloballyEnabled"
+STAGE_MANAGER_STATE_NAME = "stage_manager.json"
+
+
+def stage_manager_state_path() -> Path:
+    """原状态的落盘位置：`state/maa/stage_manager.json`（只在「本来开着、被我们关掉」时存在）。"""
+    from maa_common import STATE_DIR
+
+    return STATE_DIR / STAGE_MANAGER_STATE_NAME
+
+
+def _stage_manager_log(message: str) -> None:
+    print(f"台前调度：{message}", file=sys.stderr, flush=True)
+
+
+def stage_manager_enabled() -> bool | None:
+    """读当前开关：True 开 / False 关（含没有这个键）/ None 读不出来。"""
+    try:
+        result = subprocess.run(
+            ["defaults", "read", STAGE_MANAGER_DOMAIN, STAGE_MANAGER_KEY],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _stage_manager_log(f"读开关失败（{type(exc).__name__}）")
+        return None
+    value = result.stdout.strip()
+    if result.returncode == 0 and value in ("0", "1"):
+        return value == "1"
+    if result.returncode != 0 and "does not exist" in (result.stderr or ""):
+        return False
+    _stage_manager_log(f"读开关得到看不懂的结果（{result.returncode}：{(result.stderr or value).strip()[:120]}）")
+    return None
+
+
+def _write_stage_manager(enabled: bool) -> bool:
+    flag = "true" if enabled else "false"
+    try:
+        result = subprocess.run(
+            ["defaults", "write", STAGE_MANAGER_DOMAIN, STAGE_MANAGER_KEY, "-bool", flag],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _stage_manager_log(f"{'打开' if enabled else '关闭'}失败（{type(exc).__name__}）")
+        return False
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[:120]
+        _stage_manager_log(f"{'打开' if enabled else '关闭'}失败（{detail}）")
+        return False
+    return True
+
+
+def _saved_stage_manager() -> dict[str, Any] | None:
+    path = stage_manager_state_path()
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        _stage_manager_log(f"原状态文件读不了（{type(exc).__name__}），按「原本开着」还原")
+        return {"enabled": True}
+    return saved if isinstance(saved, dict) else {"enabled": True}
+
+
+def _drop_saved_stage_manager() -> None:
+    try:
+        stage_manager_state_path().unlink(missing_ok=True)
+    except OSError as exc:
+        _stage_manager_log(f"原状态文件删不掉（{type(exc).__name__}）")
+
+
+def restore_stage_manager() -> bool:
+    """按落盘的原状态还原台前调度；没有文件就什么都不做。返回 True = 做了还原。
+
+    文件只在「原本开着、被我们关掉」时存在，所以还原就是写回「开」。写成功才删文件，
+    写失败留着文件，下一次 `pause` / `restore` 再还原。永不抛。
+    """
+    saved = _saved_stage_manager()
+    if saved is None:
+        return False
+    if saved.get("enabled") is False:
+        # 不该出现（原本关着就不落盘），不动用户设置，只清掉文件。
+        _drop_saved_stage_manager()
+        return False
+    if not _write_stage_manager(True):
+        return False
+    _drop_saved_stage_manager()
+    _stage_manager_log("已还原为开")
+    return True
+
+
+def pause_stage_manager(config: Config) -> bool:
+    """跑场前调：台前调度开着就先把原状态落盘再关掉。返回 True = 结束时要 `restore_stage_manager()`。
+
+    - `disable_stage_manager_during_run` 为假：不关；有遗留文件就顺手还原。
+    - 有遗留文件（上一场中途被杀）：原状态以文件为准、**不覆盖**，确认是关的就行。
+    - 原本就关着 / 读不出来：什么都不做，也不还原。
+    - 落盘失败就不关（关了以后可能还原不回来）。永不抛。
+    """
+    if not bool(config.get("disable_stage_manager_during_run", True)):
+        restore_stage_manager()
+        return False
+    leftover = _saved_stage_manager()
+    current = stage_manager_enabled()
+    if leftover is not None and leftover.get("enabled") is not False:
+        _stage_manager_log("发现上一场没还原的记录，结束时一并还原")
+        if current is not False:
+            _write_stage_manager(False)
+        return True
+    if current is not True:
+        return False
+    try:
+        from maa_common import atomic_write_json
+
+        atomic_write_json(
+            stage_manager_state_path(),
+            {"enabled": True, "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")},
+        )
+    except OSError as exc:
+        _stage_manager_log(f"原状态没能落盘（{type(exc).__name__}），这一场不关")
+        return False
+    if not _write_stage_manager(False):
+        # 没关成：设置没动，文件也不该留着。
+        _drop_saved_stage_manager()
+        return False
+    _stage_manager_log("已临时关闭，跑完还原")
+    return True

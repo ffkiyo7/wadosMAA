@@ -942,6 +942,8 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
             start_components = [maa_copilot.pause_button_row()]
         except Exception as exc:  # noqa: BLE001 — (c) 暂停按钮注册失败不影响开打
             print(f"pause button register failed: {type(exc).__name__}: {exc}", flush=True)
+    # 不变量 #62：开游戏之前关台前调度，finally 里关完游戏再还原。永不抛。
+    stage_manager_paused = maa_playcover.pause_stage_manager(config)
     try:
         require_executable(config, "maa_bin", "/opt/homebrew/bin/maa", "maa-cli")
         maa_playcover.verify_game_installed(config)
@@ -1076,6 +1078,8 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
                 cleanup_errors = maa_playcover.close_game(config)
             except Exception as exc:  # noqa: BLE001 — (b) 收尾清理不能盖住主错误，异常并入 cleanup_errors
                 cleanup_errors = [f"清理异常：{type(exc).__name__}: {exc}"]
+        if stage_manager_paused:
+            maa_playcover.restore_stage_manager()
 
     won = [r for r in results if r["outcome"] == "won"]
     ok = bool(won) and not stop_reason and not cleanup_errors and all(

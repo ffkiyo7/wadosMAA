@@ -173,6 +173,7 @@ class Config(TypedDict, total=False):
     playcover_settings_dir: str
     maatools_address: str
     game_display_name: str
+    disable_stage_manager_during_run: bool
     game_launch_timeout: int
     game_quit_timeout: int
     game_probe_timeout: int
