@@ -226,7 +226,6 @@ struct RunStateView: View {
 
     @State private var showDetail = false
     @State private var confirmStop: LockHolder?
-    @State private var stopping = false
 
     private enum Fit { case full, medium, compact }
 
@@ -256,13 +255,13 @@ struct RunStateView: View {
                 .frame(width: 340, alignment: .leading)
         }
         .alert(
-            "停止\(confirmStop?.name ?? "")？",
+            StopRunButton.title(confirmStop),
             isPresented: Binding(get: { confirmStop != nil }, set: { if !$0 { confirmStop = nil } })
         ) {
-            Button("停止", role: .destructive) { Task { await stop() } }
+            Button("停止", role: .destructive) { Task { await store.stopRun() } }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("已经打完的不受影响，游戏会被关掉。")
+            Text(StopRunButton.message)
         }
     }
 
@@ -334,7 +333,7 @@ struct RunStateView: View {
                         Label("停止", systemImage: "stop.fill")
                     }
                     .buttonStyle(WMButtonStyle(kind: .danger))
-                    .disabled(stopping)
+                    .disabled(store.stopping)
                     .help("停下正在跑的\(run.name)")
                 }
             } else {
@@ -352,26 +351,7 @@ struct RunStateView: View {
 
     // MARK: 数据
 
-    /// maa-remote 正在跑、可以从这里停下的那一场（日常或抄作业）。
-    private var cancelableRun: LockHolder? {
-        guard let holder = store.lockHolder,
-            ["daily", "copilot"].contains(holder.holder)  // copy-guard: ignore
-        else { return nil }
-        return holder
-    }
-
-    /// `run cancel`：给那一场发停止信号，它自己关游戏、发战报；回执显示出来，再刷新状态。
-    private func stop() async {
-        stopping = true
-        defer { stopping = false }
-        do {
-            let receipt = try await RemoteBridge.run(["run", "cancel"])  // copy-guard: ignore
-            store.post(receipt.ok, receipt.message)
-        } catch {
-            store.post(false, "没能停下，稍后再试。")
-        }
-        await store.reload()
-    }
+    private var cancelableRun: LockHolder? { store.cancelableRun }
 
     private var busyText: String? {
         store.lockHolder?.text

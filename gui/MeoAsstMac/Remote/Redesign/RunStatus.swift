@@ -184,3 +184,39 @@ struct FlowLayout: Layout {
         return rows
     }
 }
+
+/// 「停止」：早场 / 晚场 / 手动日常、抄作业在跑时都显示，点了先确认再 `run cancel`。
+/// 状态条、手动日常卡、今天的日常卡用的是同一个；锁空着或不是能停的那种时不占位置。
+struct StopRunButton: View {
+    @Environment(RemoteStore.self) private var store
+    @State private var confirming: LockHolder?
+
+    static func title(_ run: LockHolder?) -> String { "停止\(run?.name ?? "")？" }
+    static let message = "已经打完的不受影响，游戏会被关掉。"
+
+    var body: some View {
+        if let run = store.cancelableRun {
+            Button {
+                confirming = run
+            } label: {
+                if store.stopping {
+                    ProgressView().controlSize(.mini)
+                } else {
+                    Label("停止", systemImage: "stop.fill")
+                }
+            }
+            .buttonStyle(WMButtonStyle(kind: .danger))
+            .disabled(store.stopping || store.readOnly)
+            .help("停下正在跑的\(run.name)")
+            .alert(
+                Self.title(confirming),
+                isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } })
+            ) {
+                Button("停止", role: .destructive) { Task { await store.stopRun() } }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text(Self.message)
+            }
+        }
+    }
+}

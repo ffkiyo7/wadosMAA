@@ -360,6 +360,32 @@ struct SavedChange: Identifiable, Equatable, Sendable {
         notice = nil
     }
 
+    // MARK: 停止
+
+    /// 正在发停止信号。
+    private(set) var stopping = false
+
+    /// maa-remote 正在跑、可以停下的那一场：早场 / 晚场 / 手动日常、抄作业都持 `daily` / `copilot` 锁。
+    var cancelableRun: LockHolder? {
+        guard let holder = lockHolder, ["daily", "copilot"].contains(holder.holder)  // copy-guard: ignore
+        else { return nil }
+        return holder
+    }
+
+    /// `run cancel`：给那一场发停止信号，它自己关游戏、发战报；回执显示出来，再刷新状态。
+    func stopRun() async {
+        guard !stopping else { return }
+        stopping = true
+        defer { stopping = false }
+        do {
+            let receipt = try await RemoteBridge.run(["run", "cancel"])  // copy-guard: ignore
+            post(receipt.ok, receipt.message)
+        } catch {
+            post(false, "没能停下，稍后再试。")
+        }
+        await reload()
+    }
+
     // MARK: 读
 
     func reload() async {
