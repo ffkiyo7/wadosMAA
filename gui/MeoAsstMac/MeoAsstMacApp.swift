@@ -126,8 +126,39 @@ private struct WindowProbe: NSViewRepresentable {
             center.addObserver(
                 self, selector: #selector(didResize),
                 name: NSWindow.didResizeNotification, object: window)
-            // 窗口恢复上次的大小在这之后，下一轮再量。
-            DispatchQueue.main.async { [weak self] in self?.shrinkIntoScreen() }
+            center.addObserver(
+                self, selector: #selector(saveFrame),
+                name: NSWindow.didMoveNotification, object: window)
+            // SwiftUI 设默认大小在这之后，下一轮再恢复上次的位置大小、再量。
+            DispatchQueue.main.async { [weak self] in
+                self?.restoreFrame()
+                self?.shrinkIntoScreen()
+            }
+        }
+
+        // MARK: 记住窗口位置大小
+        // SwiftUI 自己存的 key 里带私有类型的地址（"unknown context at $…"），每次构建都变，换版本后就恢复不了。
+
+        private static let frameKey = "MainWindowFrame"
+        /// 恢复之前 SwiftUI 设默认大小也会发 didResize，那时不存，免得把上次的记录盖掉。
+        private var frameRestored = false
+
+        private func restoreFrame() {
+            defer { frameRestored = true }
+            guard let window, !window.styleMask.contains(.fullScreen),
+                let saved = UserDefaults.standard.string(forKey: Self.frameKey)
+            else { return }
+            let frame = NSRectFromString(saved)
+            // 记录的位置要还在某块屏幕上（外接屏拔了就不恢复位置），尺寸不能小于最小尺寸。
+            guard frame.width >= window.minSize.width, frame.height >= window.minSize.height,
+                NSScreen.screens.contains(where: { $0.visibleFrame.contains(NSPoint(x: frame.midX, y: frame.midY)) })
+            else { return }
+            window.setFrame(frame, display: true)
+        }
+
+        @objc private func saveFrame() {
+            guard frameRestored, let window, !window.styleMask.contains(.fullScreen) else { return }
+            UserDefaults.standard.set(NSStringFromRect(window.frame), forKey: Self.frameKey)
         }
 
         @objc private func willStartLiveResize() {
@@ -158,6 +189,7 @@ private struct WindowProbe: NSViewRepresentable {
 
         /// 拖边时，宽 / 高各自离不露边尺寸够近就吸过去；只吸这次真在拖的那一维，对边不动。
         @objc private func didResize() {
+            defer { saveFrame() }
             guard let window, window.inLiveResize, let start = resizeStart,
                 let screen = window.screen, let snug = snugSize(on: screen)
             else { return }
