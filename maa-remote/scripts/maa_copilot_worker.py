@@ -192,11 +192,15 @@ def _notice(
     }
     if components:
         payload["components"] = components
+    channel_id = str(config.get("channel_id", "")).strip()
+    if not channel_id.isdigit():
+        print("copilot notice skipped: Discord 频道没配置", flush=True)
+        return
     try:
         discord_request(
             discord_token(),
             "POST",
-            f"/channels/{config.get('channel_id', '')}/messages",
+            f"/channels/{channel_id}/messages",
             payload,
         )
     except Exception as exc:  # noqa: BLE001 — (c) 通知发不出去只打日志
@@ -1690,9 +1694,20 @@ def _fight_one(
 def _post_report(
     config: Config, embed: dict[str, Any], png_path: Path | None
 ) -> None:
-    """战报：有截图就内嵌上传，上传失败退回纯 embed（截图不该带走战报）。"""
-    token_text = discord_token()
-    channel_id = str(config.get("channel_id", ""))
+    """战报：有截图就内嵌上传，上传失败退回纯 embed（截图不该带走战报）。
+
+    Discord 只是出口（不变量 #63）：没频道、读不到 token、发不出去都只打一行日志，
+    调用方接着写 `last_run.json` 终态，绝不能停在 `running`。
+    """
+    channel_id = str(config.get("channel_id", "")).strip()
+    if not channel_id.isdigit():
+        print("copilot report skipped: Discord 频道没配置", flush=True)
+        return
+    try:
+        token_text = discord_token()
+    except Exception as exc:  # noqa: BLE001 — (c) 没有 token 只打日志，战报不发
+        print(f"copilot report skipped: {type(exc).__name__}: {exc}", flush=True)
+        return
     has_shot = bool(png_path and png_path.is_file() and png_path.stat().st_size > 0)
     payload: dict[str, Any] = {"embeds": [embed], "allowed_mentions": {"parse": []}}
     if has_shot and png_path is not None:

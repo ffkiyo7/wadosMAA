@@ -1165,6 +1165,109 @@ def _reader(
     stream.close()
 
 
+def discord_outlet(config: Config) -> tuple[str, str]:
+    """通知出口（不变量 #63）：返回 (token, channel_id)，缺哪样就整个返回空串，永不抛。
+
+    Discord 只是出口之一：没配频道、读不到 token 时本场照跑，战报照样写进
+    `runs/<场>-report.json`（`write_report_file()`），只是不发帖。
+    """
+    channel_id = str(config.get("channel_id", "")).strip()
+    if not channel_id.isdigit():
+        print("Discord 频道没配置，本场不发消息，战报只写文件", file=sys.stderr, flush=True)
+        return "", ""
+    try:
+        token = discord_token()
+    except Exception as exc:  # noqa: BLE001 — (c) 通知出口缺席不能拖垮执行
+        print(f"读不到 Discord token（{exc}），本场不发消息，战报只写文件", file=sys.stderr, flush=True)
+        return "", ""
+    return token, channel_id
+
+
+def notify(token: str, method: str, path: str, payload: dict[str, Any], *, what: str) -> Any:
+    """发一条 Discord 请求；没有出口（token 为空或路径里频道为空）就跳过。
+
+    发送失败（网络、HTTP、token 失效）只打一行日志、返回 None，永不抛（不变量 #63）。
+    """
+    if not token or "/channels//" in path or path.endswith("/channels/"):
+        return None
+    try:
+        return discord_request(token, method, path, payload)
+    except Exception as exc:  # noqa: BLE001 — (c) 通知发不出去只记日志，执行照常
+        print(f"{what}发送失败：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return None
+
+
+def open_thread(
+    token: str, channel_id: str, phase: Phase, plan: Plan, started: datetime
+) -> tuple[str, str]:
+    """发开跑消息、建子区、放进度占位，返回 (thread_id, progress_message_id)。
+
+    任何一步失败都返回已拿到的部分（拿不到子区就两个空串），永不抛：后面的进度
+    更新和战报看到空 id 就跳过发帖，一场照常跑完（不变量 #63）。
+    """
+    if not token or not channel_id:
+        return "", ""
+    opening = notify(
+        token,
+        "POST",
+        f"/channels/{channel_id}/messages",
+        {
+            "content": (
+                f"🌱 MAA 日常·{PHASE_LABELS[phase]}场开始\n"
+                f"🎯 {plan_stage_label(plan)}"
+                + (
+                    ""
+                    if plan.get("farming", True)
+                    else "\n⏭️ " + str(
+                        plan.get("farming_skip_reason")
+                        or "理智不足以刷默认关，本场跳过刷理智。"
+                    )
+                )
+                + (
+                    " · ☄️ 今日剿灭"
+                    if plan.get("annihilation")
+                    else " · ☄️ 本周剿灭已满"
+                    if plan.get("annihilation_skip_reason")
+                    else " · ☄️ 剿灭今日已刷"
+                )
+                + f" · 🧪 {medicine_label(str(plan.get('medicine', '')))}"
+            ),
+            "allowed_mentions": {"parse": []},
+        },
+        what="开跑消息",
+    )
+    if not isinstance(opening, dict) or not opening.get("id"):
+        return "", ""
+    thread_name = f"MAA日常·{PHASE_LABELS[phase]} · {started:%m-%d %H:%M}"
+    try:
+        thread = create_thread(token, channel_id, str(opening["id"]), thread_name)
+        thread_id = str(thread["id"])
+    except Exception as exc:  # noqa: BLE001 — (c) 建子区失败只记日志，本场照跑、不发进度
+        print(f"建子区失败：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return "", ""
+    placeholder = notify(
+        token,
+        "POST",
+        f"/channels/{thread_id}/messages",
+        {"content": progress_content([], plan=plan), "allowed_mentions": {"parse": []}},
+        what="进度占位",
+    )
+    progress_message_id = (
+        str(placeholder["id"]) if isinstance(placeholder, dict) and placeholder.get("id") else ""
+    )
+    return thread_id, progress_message_id
+
+
+def write_report_file(path: Path, payload: dict[str, Any]) -> str:
+    """战报的「只写文件」出口：不管 Discord 发没发出去都写一份。失败返回原因，不抛。"""
+    try:
+        atomic_write_json(path, payload)
+    except Exception as exc:  # noqa: BLE001 — (c) 战报文件写不出只记一条，不影响终态
+        print(f"战报文件写入失败：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
 def report_game_busy(
     config: Config,
     token: str,
@@ -1208,7 +1311,7 @@ def report_upstream_block(
         "summary": f"上游状态不对，本场没开跑：{reason}",
         "finished_at": at.isoformat(),
     })
-    discord_request(
+    notify(
         token,
         "POST",
         f"/channels/{channel_id}/messages",
@@ -1223,6 +1326,7 @@ def report_upstream_block(
             ],
             "allowed_mentions": {"parse": []},
         },
+        what="上游拒跑告警",
     )
 
 
@@ -1394,7 +1498,8 @@ def run_maa(
                             log_handle.write(note + "\n")
                     screencap_failures = failures
                     content = progress_content(prefix + live, plan=plan)
-                    if content != previous:
+                    # 没有子区（Discord 不可用，不变量 #63）就不发进度，只写日志。
+                    if content != previous and thread_id and progress_message_id:
                         try:
                             discord_request(
                                 token,
@@ -1841,7 +1946,7 @@ def send_direct_failure(
     plan: Plan,
     message: str,
 ) -> None:
-    discord_request(
+    notify(
         token,
         "POST",
         f"/channels/{channel_id}/messages",
@@ -1860,6 +1965,7 @@ def send_direct_failure(
             ],
             "allowed_mentions": {"parse": []},
         },
+        what="启动失败直报",
     )
 
 
@@ -1929,27 +2035,26 @@ def report_lock_conflict(
                 "last_lock_conflict_reason": reason,
             }
         )
-    except Exception as exc:  # noqa: BLE001 — (a) 汇报路径：两步各自兜住，错误汇总后抛给调用方
+    except Exception as exc:  # noqa: BLE001 — (a) 汇报路径：状态写入失败汇总后抛给调用方
         errors.append(f"冲突状态写入失败：{type(exc).__name__}: {exc}")
-    try:
-        discord_request(
-            token,
-            "POST",
-            f"/channels/{channel_id}/messages",
-            {
-                "embeds": [
-                    {
-                        "title": f"❌ MAA 日常·{PHASE_LABELS[phase]}未启动",
-                        "description": reason,
-                        "color": 0xED4245,
-                        "timestamp": attempted_at.isoformat(),
-                    }
-                ],
-                "allowed_mentions": {"parse": []},
-            },
-        )
-    except Exception as exc:  # noqa: BLE001 — (a) 汇报路径：两步各自兜住，错误汇总后抛给调用方
-        errors.append(f"冲突告警发送失败：{type(exc).__name__}: {exc}")
+    # 告警发不出去只记日志（不变量 #63）；状态写不进去才抛。
+    notify(
+        token,
+        "POST",
+        f"/channels/{channel_id}/messages",
+        {
+            "embeds": [
+                {
+                    "title": f"❌ MAA 日常·{PHASE_LABELS[phase]}未启动",
+                    "description": reason,
+                    "color": 0xED4245,
+                    "timestamp": attempted_at.isoformat(),
+                }
+            ],
+            "allowed_mentions": {"parse": []},
+        },
+        what="冲突告警",
+    )
     if errors:
         raise RuntimeError("；".join(errors))
 
@@ -2003,7 +2108,7 @@ def apply_local_switches(plan: Plan, request: dict[str, Any]) -> Plan:
 def report_manual_run_mismatch(
     config: Config, token: str, channel_id: str, manual_token: str
 ) -> None:
-    discord_request(
+    notify(
         token,
         "POST",
         f"/channels/{channel_id}/messages",
@@ -2022,16 +2127,15 @@ def report_manual_run_mismatch(
             ],
             "allowed_mentions": {"parse": []},
         },
+        what="手动场对不上告警",
     )
 
 
 def execute(phase: Phase, manual_token: str = "") -> int:
     started = now_beijing()
     config = load_config()
-    channel_id = str(config.get("channel_id", "")).strip()
-    if not channel_id.isdigit():
-        raise RuntimeError("config.json 中尚未配置 Discord channel_id")
-    token = discord_token()
+    # Discord 只是通知出口：缺频道 / token 时两个都是空串，本场照跑（不变量 #63）。
+    token, channel_id = discord_outlet(config)
     last_run_state = check_schema(
         "last_run.json", load_json(LAST_RUN_PATH, {}), LAST_RUN_SCHEMA_VERSION, strict=False
     )
@@ -2062,6 +2166,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
     snapshot_path = RUNS_DIR / f"{run_stem}.json"
     log_path = RUNS_DIR / f"{run_stem}.log"
     screenshot_path = RUNS_DIR / f"{run_stem}.png"
+    report_path = RUNS_DIR / f"{run_stem}-report.json"
 
     # K17：07:50 的上游更新拖过了开跑时间 → 等它跑完（有上限），等掉的时间从本场预算里扣。
     waited = wait_for_update_holder(config)
@@ -2108,12 +2213,13 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 "startup_error": None,
                 "cleanup_errors": [],
                 "summary": "",
+                "report": None,
             },
             new_run=True,
         )
 
         if should_skip(plan, phase):
-            discord_request(
+            notify(
                 token,
                 "POST",
                 f"/channels/{channel_id}/messages",
@@ -2129,6 +2235,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                     ],
                     "allowed_mentions": {"parse": []},
                 },
+                what="跳过通知",
             )
             merge_last_run({"status": "skipped", "finished_at": now_beijing().isoformat()})
             return 0
@@ -2152,6 +2259,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 return 0
 
         game_opened = False
+        session_open = False
         thread_id = ""
         progress_message_id = ""
         stdout_lines: list[str] = []
@@ -2175,53 +2283,19 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             maa_playcover.launch_game(config)
             game_opened = True
             maa_playcover.wait_for_game(config)
-            opening = discord_request(
-                token,
-                "POST",
-                f"/channels/{channel_id}/messages",
-                {
-                    "content": (
-                        f"🌱 MAA 日常·{PHASE_LABELS[phase]}场开始\n"
-                        f"🎯 {plan_stage_label(plan)}"
-                        + (
-                            ""
-                            if plan.get("farming", True)
-                            else "\n⏭️ " + str(
-                                plan.get("farming_skip_reason")
-                                or "理智不足以刷默认关，本场跳过刷理智。"
-                            )
-                        )
-                        + (
-                            " · ☄️ 今日剿灭"
-                            if plan.get("annihilation")
-                            else " · ☄️ 本周剿灭已满"
-                            if plan.get("annihilation_skip_reason")
-                            else " · ☄️ 剿灭今日已刷"
-                        )
-                        + f" · 🧪 {medicine_label(str(plan.get('medicine', '')))}"
-                    ),
-                    "allowed_mentions": {"parse": []},
-                },
+            # 到这里才算「开始干活」：之后的异常进战报，之前的异常走启动失败直报。
+            session_open = True
+            # 开跑消息、子区、进度占位都是尽力而为：Discord 连不上就空着，本场照跑（#63）。
+            thread_id, progress_message_id = open_thread(
+                token, channel_id, phase, plan, started
             )
-            thread_name = f"MAA日常·{PHASE_LABELS[phase]} · {started:%m-%d %H:%M}"
-            thread = create_thread(token, channel_id, str(opening["id"]), thread_name)
-            thread_id = str(thread["id"])
-            placeholder = discord_request(
-                token,
-                "POST",
-                f"/channels/{thread_id}/messages",
-                {
-                    "content": progress_content([], plan=plan),
-                    "allowed_mentions": {"parse": []},
-                },
-            )
-            progress_message_id = str(placeholder["id"])
-            merge_last_run(
-                {
-                    "thread_id": thread_id,
-                    "threads": [{"thread_id": thread_id, "created_at": started.isoformat()}],
-                }
-            )
+            if thread_id:
+                merge_last_run(
+                    {
+                        "thread_id": thread_id,
+                        "threads": [{"thread_id": thread_id, "created_at": started.isoformat()}],
+                    }
+                )
             task_path = Path(str(config.get("maa_config_dir", MAA_CONFIG_DIR))) / "tasks" / "daily.toml"
             atomic_write_text(task_path, render_daily_toml(plan, config))
             # 最后一道门：游戏窗口必须在 MAA-Game 虚拟屏的台前，否则 MaaTools 截图为空、
@@ -2318,7 +2392,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             exception_detail = f"{type(exc).__name__}: {exc}"
             stderr_lines.append(exception_detail)
             return_code = 1
-            if not thread_id:
+            if not session_open:
                 startup_error = exception_detail
                 try:
                     send_direct_failure(token, channel_id, phase, plan, exception_detail)
@@ -2383,28 +2457,32 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 )
             except Exception as exc:  # noqa: BLE001 — (c) 进度消息收尾是尽力而为，最终战报才是硬信号
                 print(f"final progress update failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
-        # Startup failures were already reported directly. All runs that made
-        # a thread get a deterministic battle report, with screenshot if valid.
-        if thread_id:
-            payload = report_payload(
-                ok=ok,
-                phase=phase,
-                plan=plan,
-                duration=duration,
-                summary=summary,
-                screenshot_ok=screenshot_ok,
-                screenshot_error=screenshot_error,
-                cleanup_errors=cleanup_errors,
-                home_verified=home_verified,
-                home_verify_detail=home_verify_detail,
-                proxy_batches=proxy_batches,
-                proxy_refunded=proxy_refunded,
-                connect_retries=connect_retries,
-                inventory_error=inventory_error,
-                offline_retries=offline_retries,
-                offline_gave_up=any(OFFLINE_GAVE_UP in line for line in stderr_lines),
-            )
-            send_report(token, channel_id, payload, screenshot_path, config)
+        # 战报两个出口（不变量 #63）：文件一定写；Discord 只在开始干活之后发
+        # （启动失败已经直报过），发不出去只记日志。
+        payload = report_payload(
+            ok=ok,
+            phase=phase,
+            plan=plan,
+            duration=duration,
+            summary=summary,
+            screenshot_ok=screenshot_ok,
+            screenshot_error=screenshot_error,
+            cleanup_errors=cleanup_errors,
+            home_verified=home_verified,
+            home_verify_detail=home_verify_detail,
+            proxy_batches=proxy_batches,
+            proxy_refunded=proxy_refunded,
+            connect_retries=connect_retries,
+            inventory_error=inventory_error,
+            offline_retries=offline_retries,
+            offline_gave_up=any(OFFLINE_GAVE_UP in line for line in stderr_lines),
+        )
+        report_error = write_report_file(report_path, payload)
+        if session_open and token and channel_id:
+            try:
+                send_report(token, channel_id, payload, screenshot_path, config)
+            except Exception as exc:  # noqa: BLE001 — (c) 战报发不出去只记日志，终态照写
+                print(f"战报发送失败：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         finished: LastRun = {
             "status": "success" if ok else "failed",
             "finished_at": now_beijing().isoformat(),
@@ -2424,6 +2502,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             "connect_retries": connect_retries,
             "offline_retries": offline_retries,
             "inventory_error": inventory_error or None,
+            "report": None if report_error else str(report_path),
         }
         if plan.get("annihilation") and annihilation_consumed(stdout_lines + stderr_lines):
             finished["annihilation_game_day"] = cn_game_day(started)

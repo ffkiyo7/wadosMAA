@@ -36,6 +36,7 @@
    另外，这场快照里的 `plan.stage_source` 是 `discord`，可它其实是 GUI 发起的。
 4. GUI 文档 `docs/SESSION_BRIEF.md` 和 `docs/PLAN_MACGUI.md` 里还写着旧路径（`.claude/worktrees/redesign-ui-60930c`、`forks/maa-remote-dev`）。
 5. 开发副本 `maa-remote-devhome` 没有 `.env`（缺 `DISCORD_BOT_TOKEN`），所以在开发环境里 `run local` 起不来。
+   （已修，不变量 #63：没有 token 时不发 Discord，照跑，战报写 `runs/<场>-report.json`。）
 7. GUI 首页「手动开一场」跑完后还显示「日常·手动（自 17:59）正在用游戏」，「开始这一场」按钮也一直是灰的。
    原因：这行字读的是 `RunData.choices.busy`，也就是 `run choices` 返回的 `busy`。`choices` 只在两个时候加载：Shell 的 `.task`（App 启动时）和 `TodayPage.start()` 末尾。
    点「开始」后那次重新加载时子进程正拿着锁，`busy` 就被缓存下来，之后再也不刷新（`RemoteStore.reload()` 不碰 `RunData`）。

@@ -14,7 +14,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -790,6 +790,32 @@ class CopilotBatchExecutionTests(unittest.TestCase):
                 {"maa_bin": "/bin/maa"}, self._entry("SR-5"), {}, log_path
             )
         self.assertEqual(outcome, "unknown", detail)
+
+
+class CopilotReportOutletTests(unittest.TestCase):
+    """不变量 #63：抄作业战报发不出去不能抛，否则 `last_run.json` 停在 running。"""
+
+    def _post(self, config: dict[str, Any], **kwargs: Any) -> Any:
+        import maa_copilot_worker as worker
+
+        embed = {"title": "t", "fields": []}
+        with patch.object(worker, "discord_token", **kwargs.pop("token", {"return_value": "tk"})), \
+             patch.object(worker, "discord_request", **kwargs) as request, \
+             contextlib.redirect_stdout(io.StringIO()):
+            worker._post_report(cast(maa_common.Config, config), embed, None)
+            worker._notice(cast(maa_common.Config, config), "标题", "正文", 0)
+        return request
+
+    def test_no_channel_sends_nothing(self) -> None:
+        self._post({}).assert_not_called()
+
+    def test_no_token_sends_nothing(self) -> None:
+        request = self._post({"channel_id": "1"}, token={"side_effect": RuntimeError("无 .env")})
+        request.assert_not_called()
+
+    def test_a_failing_send_is_only_logged(self) -> None:
+        request = self._post({"channel_id": "1"}, side_effect=OSError("网断了"))
+        self.assertEqual(request.call_count, 2)
 
 
 class CopilotLogMarkerTests(unittest.TestCase):

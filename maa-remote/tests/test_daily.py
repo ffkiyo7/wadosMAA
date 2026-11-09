@@ -1082,6 +1082,114 @@ class StageManagerExecuteTests(unittest.TestCase):
         self.assertEqual(order, ["pause", "close"])
 
 
+class DiscordOptionalTests(unittest.TestCase):
+    """不变量 #63：Discord 只是通知出口，发不出去一场照常跑完、战报照样写文件。"""
+
+    def setUp(self) -> None:
+        isolate_stage_index(self)
+
+    def _execute(
+        self,
+        config: dict[str, Any],
+        *,
+        token: Any = None,
+        request: Any = None,
+        thread: Any = None,
+    ) -> SimpleNamespace:
+        at = datetime(2026, 11, 9, 22, 0, tzinfo=BEIJING)
+        lock = unittest.mock.MagicMock()
+        lock.__enter__.return_value = True
+        lock.__exit__.return_value = False
+        plan = maa_common.normalize_plan({"stage": "TL-7"})
+        with tempfile.TemporaryDirectory() as raw, contextlib.ExitStack() as stack:
+            def stub(target: Any, name: str, **kwargs: Any) -> unittest.mock.MagicMock:
+                return stack.enter_context(patch.object(target, name, **kwargs))
+
+            stub(maa_daily, "RUNS_DIR", new=Path(raw))
+            stub(maa_daily, "now_beijing", return_value=at)
+            stub(maa_daily, "load_config", return_value={**config, "maa_config_dir": raw})
+            token_stub = stub(maa_daily, "discord_token", side_effect=token or (lambda: "token"))
+            stub(maa_daily, "load_json", return_value={})
+            stub(maa_daily, "effective_plan", return_value=plan)
+            stub(maa_daily, "run_lock", return_value=lock)
+            stub(maa_daily, "cleanup_run_files")
+            stub(maa_daily, "atomic_write_text")
+            stub(maa_daily, "should_skip", return_value=False)
+            stub(maa_daily, "upstream_hard_block", return_value="")
+            stub(maa_playcover, "game_is_online", return_value=(False, ""))
+            merge = stub(maa_daily, "merge_last_run")
+            discord = stub(maa_daily, "discord_request", side_effect=request or (lambda *_a, **_k: {"id": "9"}))
+            create = stub(maa_daily, "create_thread", side_effect=thread or (lambda *_a, **_k: {"id": "7"}))
+            upload = stub(maa_daily, "discord_upload", side_effect=OSError("网断了"))
+            stub(maa_daily.subprocess, "run")
+            stub(maa_daily, "require_executable")
+            stub(maa_playcover, "verify_game_installed")
+            launch = stub(maa_playcover, "launch_game")
+            stub(maa_playcover, "wait_for_game")
+            stub(maa_playcover, "settle_game_window", return_value="")
+            run = stub(maa_daily, "run_maa_resilient", return_value=(0, [], [], 0, 0))
+            stub(maa_daily, "capture_home_screenshot", return_value=(True, "", True, ""))
+            close = stub(maa_playcover, "close_game", return_value=[])
+            report_path = Path(raw) / "2026-11-09-pm-report.json"
+            code = maa_daily.execute("pm")
+            report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else None
+        finished = merge.call_args_list[-1].args[0]
+        return SimpleNamespace(
+            code=code, report=report, finished=finished, merge=merge, discord=discord,
+            create=create, upload=upload, run=run, launch=launch, close=close, token=token_stub,
+        )
+
+    def _assert_ran_through(self, result: SimpleNamespace) -> None:
+        self.assertEqual(result.code, 0)
+        result.launch.assert_called_once()
+        result.run.assert_called_once()
+        result.close.assert_called_once()
+        self.assertEqual(result.finished["status"], "success")
+        self.assertIsNone(result.finished["startup_error"])
+        self.assertTrue(str(result.finished["report"]).endswith("2026-11-09-pm-report.json"))
+        self.assertIsNotNone(result.report)
+        self.assertIn("完成", result.report["embeds"][0]["title"])
+
+    def test_no_token_still_runs_and_writes_the_report_file(self) -> None:
+        result = self._execute({"channel_id": "123"}, token=RuntimeError("定时任务无法读取 DISCORD_BOT_TOKEN"))
+        self._assert_ran_through(result)
+        result.discord.assert_not_called()
+        result.create.assert_not_called()
+        result.upload.assert_not_called()
+        # 进度和战报都没有子区可发：thread_id / 进度消息 id 都是空串。
+        self.assertEqual(result.run.call_args.args[3:5], ("", ""))
+
+    def test_no_channel_still_runs_and_never_reads_the_token(self) -> None:
+        result = self._execute({})
+        self._assert_ran_through(result)
+        result.token.assert_not_called()
+        result.discord.assert_not_called()
+
+    def test_every_send_raising_still_runs_and_writes_the_report_file(self) -> None:
+        result = self._execute({"channel_id": "123"}, request=OSError("Discord 连不上"))
+        self._assert_ran_through(result)
+        result.create.assert_not_called()
+        self.assertNotIn("thread_id", {k for call in result.merge.call_args_list[1:] for k in call.args[0]})
+
+    def test_thread_creation_failing_still_runs_and_reports(self) -> None:
+        result = self._execute({"channel_id": "123"}, thread=RuntimeError("HTTP 403"))
+        self._assert_ran_through(result)
+        self.assertEqual(result.run.call_args.args[3:5], ("", ""))
+        # 子区没建成：战报照样往频道发（这里是上传失败退回纯 embed），只是不写 thread_id。
+        result.upload.assert_called_once()
+        posted = [call.args[2] for call in result.discord.call_args_list]
+        self.assertIn("/channels/123/messages", posted)
+        self.assertFalse(any("thread_id" in call.args[0] for call in result.merge.call_args_list[1:]))
+
+    def test_a_dead_outlet_never_patches_progress(self) -> None:
+        self.assertIsNone(maa_daily.notify("", "POST", "/channels/1/messages", {}, what="x"))
+        with patch.object(maa_daily, "discord_request") as request:
+            self.assertIsNone(maa_daily.notify("t", "PATCH", "/channels//messages/", {}, what="x"))
+            request.assert_not_called()
+            request.side_effect = OSError("boom")
+            self.assertIsNone(maa_daily.notify("t", "POST", "/channels/1/messages", {}, what="x"))
+
+
 class ProxyFailureTests(unittest.TestCase):
     def test_returned_sanity_is_not_a_drop(self) -> None:
         self.assertEqual(maa_daily._drop_pairs(PROXY_WIPEOUT_LOG), [])
@@ -2055,8 +2163,9 @@ class SessionDailyTests(unittest.TestCase):
         morning = self._execute("am")
         evening = self._execute("pm")
         # 早场被跳过前也会先落一份快照，晚场则走默认关。
-        self.assertEqual(morning.snapshot.call_args.args[1]["plan"]["stage"], "CE-6")
-        self.assertEqual(evening.snapshot.call_args.args[1]["plan"]["stage"], "1-7")
+        # 第一笔是快照；之后还会写战报文件（不变量 #63），不能看最后一笔。
+        self.assertEqual(morning.snapshot.call_args_list[0].args[1]["plan"]["stage"], "CE-6")
+        self.assertEqual(evening.snapshot.call_args_list[0].args[1]["plan"]["stage"], "1-7")
 
     def test_should_skip_never_silences_a_manual_run(self) -> None:
         skipped = maa_common.normalize_plan({"skip": True})

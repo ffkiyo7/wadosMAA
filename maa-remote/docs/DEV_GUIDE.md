@@ -209,13 +209,15 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
 ## 4. 链路二：执行一场日常（`maa_daily.py`）
 `execute(phase)`：
 
+0. **通知出口** — `discord_outlet(config)` 取 `(token, channel_id)`：没配频道、读不到 `.env` 都返回两个空串、打一行日志，**不抛**。Discord 只是出口之一，下面所有发帖都走 `notify()` / `open_thread()`：没有出口就跳过，网络 / HTTP / token 失效只记一行 stderr，一场照常跑完（#63）。开发副本（没有 `.env`）的 `run local` 因此也能跑。
+
 1. **定场次** — `select_phase()`：argv（`am|pm|now`）> 工作目录名（`--workdir ~/.hermes/state/maa/am` → `am`）> 按北京时间小时猜。
 2. **抢锁** — `run_lock(blocking=False)`。持有者是 `update` 时先等（上限 `update_wait_minutes`，等掉的时间从 `maa_run_timeout` 里扣，K17）；否则不碰持锁任务的顶层状态，只追加 `last_lock_conflict_*`，发红色告警（写明谁占着）并返回失败（#23）。
 3. 清理 >14 天产物；把**本场实际使用的计划**快照到 `runs/<date>-<phase>.json`（之后改 `plan.json` 不影响本场，#10）；`last_run.json` 用 `merge_last_run(..., new_run=True)` 置 `status=running` 并清掉上一场的字段（§6）。
 4. `plan.skip` 为真**且 `phase != "now"`** → 灰色「已跳过」Embed，`status=skipped`，不开游戏。skip 按场次（D2，#5d）；手动场照跑。
 4.5. **探游戏（只对 `am`/`pm`）** — `maa_playcover.game_is_online()` 命中即「用户正在玩」，`report_game_busy()` 发灰卡、写`status=skipped` / `skip_reason=game_busy`，不开游戏（任何失败路径都会 `close_game()`，等于把用户踢出游戏）。探测预算 5s、失败按离线照常执行（#24）。实现只有一份，日常、抄作业 `run-batch`、Depot 共用（D18）。别和开游戏**之后**的 `settle_game_window()` 混淆。
-5. **预检 → 开游戏** — `require_executable` → `verify_game_installed()` → `launch_game()` → `wait_for_game()`（120s）。任一步失败且还没建子区，`send_direct_failure()` 直接在频道发红色告警。开跑前还过 `maa_upstream.hard_block()`（#60）。
-6. **发开跑消息 → 建子区 → 发进度占位消息**，thread_id 记进 `last_run.threads`。
+5. **预检 → 开游戏** — `require_executable` → `verify_game_installed()` → `launch_game()` → `wait_for_game()`（120s）。任一步失败（`session_open` 还是 False）记 `startup_error`，`send_direct_failure()` 尽力在频道发红色告警。开跑前还过 `maa_upstream.hard_block()`（#60）。
+6. **发开跑消息 → 建子区 → 发进度占位消息**（`open_thread()`，永不抛），建成了才把 thread_id 记进 `last_run.threads`。任何一步失败 `thread_id` / 进度消息 id 就是空串：之后的进度 PATCH 全部跳过，战报照样往频道发（发得出去的话），`last_run.thread_id` 保持 `null`（#63）。
 7. **渲染 `daily.toml`** — `render_daily_toml(plan, config)` 渲染本场快照，`atomic_write_text` 覆盖 `~/.config/maa-cli/tasks/daily.toml`。任务链固定：
 
    `StartUp → [当日第一场 Annihilation] → Fight(缺口第一名) → [Fight(第二名)] → Infrast → Recruit → Mall → Award → Custom(Home)`
@@ -235,7 +237,7 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
 8. **`run_maa_resilient()` → `run_maa()`** — `maa run daily -v --batch`，注入 `MAA_CONFIG_DIR` / `MAA_LOG_PREFIX=Never` /（可选）剔除代理。两个 reader 线程把 stdout+stderr tee 到 `runs/<date>-<phase>.log`；每 5 秒把解析后的中文状态 PATCH 进子区消息，内容无变化不发，Discord 异常一律吞掉。超时 `maa_run_timeout`（3000s，给 Hermes 外层 3600s 留 10 分钟）→ terminate/kill，返回码 **124**；`KeyboardInterrupt` → **130**。重开与补跑见下。
 9. **截图 + 主页校验**（`capture_home_screenshot()`）— 等 `home_screenshot_delay` 秒 → `maa_playcover.capture_screenshot()` → chmod 600 → `ocrbox`核对 `HOME_MARKERS`（终端/编队/采购中心/公开招募/基建/好友/档案/SANITY）命中 ≥ `HOME_MARKER_MIN`（4），不在就重截，最多 `home_screenshot_attempts`（3）次。截图失败不阻断；判定 False 让整场判红并在备注写命中数；无法判定（ocrbox 没部署 / 崩了）记 `None`、不改结论，写 `last_run.home_verify_detail`。这条闸门只挂日常链，抄作业直接 `capture_screenshot()`（#5b）。
 10. **`close_game()`**（在 `finally` 里，只要 `launch_game()` 被调过）：`TERM` → 等退出 → `pkill -f <完整路径>` 兜底 → 首字符加方括号的同一模式 `pgrep -f` 复核。
-11. **判定与上报** — `ok = (return_code == 0 and not cleanup_errors and home_verified is not False)`。最后编辑一次子区消息，往频道发战报 Embed + `attachment://shot.png`；多段上传失败降级成「无图 Embed + `hermes send MEDIA:`」。最后写 `last_run.json`。
+11. **判定与上报** — `ok = (return_code == 0 and not cleanup_errors and home_verified is not False)`。有子区就最后编辑一次子区消息。战报两个出口：**一定**写 `runs/<date>-<phase>-report.json`（战报 Embed 原文，路径记进 `last_run.report`）；开始干活之后（启动失败已直报）再往频道发战报 Embed + `attachment://shot.png`，多段上传失败降级成「无图 Embed + `hermes send MEDIA:`」，整个发送失败只记日志。最后写 `last_run.json`（#63）。
 
 ### 恢复策略
 所有重开、补跑共用同一个 `maa_run_timeout` 预算；124/125/130 是我们自己的返回码，一律不重试。
@@ -541,6 +543,7 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | 14 | 抄作业按钮前缀 `hermes:btn:maa-copilot:`（连字符），计划卡清扫碰不到；过期由 `prune_expired_searches()` 清 | `maa_copilot.BUTTON_PREFIX` | — |
 | 14b | 抄作业卡前缀 `hermes:btn:maa-copilot:card:`，`card.json` 必须在 `copilot/` 而不是 `searches/`；发新卡顺序固定「PATCH 旧卡 → 删旧登记 → 写新登记 → 发卡 → 记 message_id」 | `CARD_BUTTON_PREFIX` / `CARD_PATH` + `copilot_card()` + `CopilotCardTests` | — |
 | 41 | 「已排程」卡只有 ❌ 取消本轮（watcher 的轮另加固定 id 的「⏸️ 暂停自动作业」）；不许再出现 `:raid-` / `:again` / `:confirm` 键；只在 `scheduled` / `queued` 可取消 | `build_scheduled_card()` / `CANCELABLE_STATUSES` + `ButtonRegistryTests` | — |
+| 63 | Discord 只是通知出口，不是执行的前提：没有频道 / token、网络错误、HTTP 错误、建子区失败都只记一行日志，一场照常跑完、写 `last_run.json` 终态和 `runs/<场>-report.json`；没有子区就跳过进度和子区发帖（`thread_id` 为 `null`）。抄作业 `_notice()` / `_post_report()` 同样永不抛。共用的 `report_game_busy()` / `report_lock_conflict()` 只在状态写不进去时抛 | `discord_outlet()` / `notify()` / `open_thread()` / `write_report_file()` + 抄作业 `_post_report()` + `DiscordOptionalTests` / `CopilotReportOutletTests` | REVIEW_2026-11-09 §1.1 |
 
 ### 8.4 锁、闸门与设备
 | # | 不变量 | 落点 | 来由 |

@@ -35,7 +35,7 @@
   接口以 `maa-remote/docs/DEV_GUIDE.md` §12 为准。改接口时两边在同一个提交里改、一起验证。
 - `HERMES_HOME` 有两个：
   - 线上 `~/.hermes`：真实 cron、Discord、游戏。
-  - 开发副本 `~/Developer/forks/maa-remote-devhome`：`scripts` 软链到 `~/Developer/wados-maa/maa-remote/scripts`（也就是 `dev` 的工作区）。没有 `.env`，所以 `run local` 在开发副本里起不来。
+  - 开发副本 `~/Developer/forks/maa-remote-devhome`：`scripts` 软链到 `~/Developer/wados-maa/maa-remote/scripts`（也就是 `dev` 的工作区）。没有 `.env`：`run local` 照跑，只是不发 Discord（战报写进 `state/maa/runs/<场>-report.json`）。
 - App 切环境：「设置 → maa-remote → 环境」，或 `defaults write io.github.ffkiyo7.MaaRemoteGui RemoteHermesHome '~/.hermes'`；删掉这个 key 就回到开发副本。
 
 ## 部署 maa-remote

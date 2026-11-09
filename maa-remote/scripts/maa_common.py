@@ -327,6 +327,7 @@ class LastRun(TypedDict, total=False):
     connect_retries: int
     offline_retries: int
     inventory_error: str | None
+    report: str | None
     thread_id: str | None
     threads: list[LastRunThread]
     annihilation_game_day: str
@@ -359,7 +360,7 @@ RUN_SCOPED_LAST_RUN_KEYS: frozenset[str] = frozenset({
     "screenshot_error", "startup_error", "summary", "skip_reason", "game_probe",
     "emulator_probe", "home_verified", "home_verify_detail", "cleanup_errors",
     "proxy_failure_batches", "proxy_failure_sanity_refunded", "connect_retries",
-    "offline_retries", "inventory_error", "thread_id",
+    "offline_retries", "inventory_error", "thread_id", "report",
 })
 
 
@@ -1179,7 +1180,8 @@ def report_game_busy(
 
     每条自动链路的「已在线」分支都走这里：跳过必须**看得见**，
     静默 return 是 PLAN_CLEARING 护栏 4 明令禁止的（不变量 #24）。
-    两件事各自 try，任一失败都汇总成 RuntimeError 抛给调用方。
+    两件事各自 try。状态写不进去才抛（错误里带上告警那一步）；只是告警发不出去
+    （没有 token / 频道、网络、HTTP）就打一行日志，不抛（不变量 #63）。
     """
     errors: list[str] = []
     try:
@@ -1205,6 +1207,9 @@ def report_game_busy(
             },
         )
     except Exception as exc:  # noqa: BLE001 — (a) 汇报路径：两步各自兜住，错误汇总后抛给调用方
+        if not errors:
+            print(f"跳过告警发送失败：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            return
         errors.append(f"跳过告警发送失败：{type(exc).__name__}: {exc}")
     if errors:
         raise RuntimeError("；".join(errors))
