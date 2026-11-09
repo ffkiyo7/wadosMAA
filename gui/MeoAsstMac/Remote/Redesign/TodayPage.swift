@@ -234,7 +234,7 @@ struct ManualRunCard: View {
                     }
                     .buttonStyle(WMLinkStyle())
                     .font(.system(size: 11.5))
-                    .help("关卡和要做的事回到「日程与默认」里的设置")
+                    .help("关卡和要做的事回到「日常」里的设置")
                 }
                 Spacer(minLength: 0)
             }
@@ -365,7 +365,7 @@ struct StatusStack: View {
             HStack {
                 key("calendar", "今天的日常")
                 Spacer()
-                Button("日程 ›") { go(.schedule) }.buttonStyle(WMLinkStyle()).help("打开「日程与默认」")
+                Button("日常 ›") { go(.daily) }.buttonStyle(WMLinkStyle()).help("打开「日常」")
             }
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 VStack(spacing: 10) {
@@ -478,7 +478,7 @@ struct StatusStack: View {
     private func versionHelp(_ status: UpstreamStatus?) -> String {
         let version = status?.versions.maaCore ?? "未知"
         if status?.verdict == "blocked" {
-            return "游戏资源状态不对，暂时不能开始日常。请稍后再看，或在设置 › 开发者里复制诊断信息。\n版本 \(version)"
+            return "游戏资源状态不对，暂时不能开始日常。请稍后再看，或在设置 › 高级里复制诊断信息。\n版本 \(version)"
         }
         return "版本 \(version)"
     }

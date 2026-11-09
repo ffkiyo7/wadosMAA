@@ -10,6 +10,7 @@
 import SwiftUI
 
 struct CopilotPage: View {
+    @Environment(RemoteStore.self) private var store
     @Environment(RunData.self) private var data
     @Environment(\.wmAccent) private var accent
 
@@ -20,11 +21,15 @@ struct CopilotPage: View {
     @State private var searching = false
     @State private var working = false
     @State private var message: (ok: Bool, text: String)?
+    @State private var showRules = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 PageHeader(title: "自动抄作业", caption: caption) {
+                    Button("规则") { showRules.toggle() }
+                        .buttonStyle(WMButtonStyle())
+                        .popover(isPresented: $showRules, arrowEdge: .bottom) { CopilotRules().environment(store) }
                     Button {
                         Task { await data.loadCopilot() }
                     } label: {
@@ -277,5 +282,44 @@ struct CopilotPage: View {
         } catch {
             message = (false, error.localizedDescription)
         }
+    }
+}
+
+/// 抄作业页右上角「规则」：自动抄作业每天试几次、多久再找、离早晚场多近就不开新的一关。改了就写，可撤销。
+struct CopilotRules: View {
+    @Environment(RemoteStore.self) private var store
+
+    static let keys: Set<String> = [
+        "auto_copilot_max_attempts_per_day", "activity_search_retry_minutes", "auto_copilot_min_lead_minutes",
+        "copilot_blackout_minutes",
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            FormGroup {
+                ConfigFieldRow(key: "auto_copilot_max_attempts_per_day") { value in
+                    Int(value.number ?? 0) == 0 ? "不限次数" : nil
+                }
+                ConfigFieldRow(key: "activity_search_retry_minutes") { value in
+                    "没作业或练度不够时，\(Int(value.number ?? 0)) 分钟后再找"
+                }
+                ConfigFieldRow(key: "auto_copilot_min_lead_minutes") { value in
+                    lead(value, "不自动开新的一关")
+                }
+                ConfigFieldRow(key: "copilot_blackout_minutes") { value in
+                    lead(value, "不能开打")
+                }
+            }
+            .padding(.top, -20)
+        }
+        .padding(16)
+        .frame(width: 460)
+        .disabled(store.readOnly)
+    }
+
+    private func lead(_ value: JSONValue, _ what: String) -> String? {
+        let minutes = Int(value.number ?? 0)
+        guard minutes > 0 else { return "不受早晚场影响" }
+        return SessionLead.windows(store, minutes: minutes).map { "\($0) \(what)" }
     }
 }

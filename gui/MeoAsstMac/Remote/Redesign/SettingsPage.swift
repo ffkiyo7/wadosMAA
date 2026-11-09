@@ -2,8 +2,9 @@
 //  SettingsPage.swift
 //  Wado's MAA
 //
-//  设置：外观（强调色、背景图、玻璃卡片）、日志文件；
-//  底部默认收起的「开发者」：环境、HERMES_HOME、Python、cron（给维护的人用，普通界面不出现这些词）。
+//  设置：外观（强调色、背景图、玻璃卡片）、日志文件、账号（森空岛）、游戏与设备；
+//  底部默认收起的「高级」：日常 / 抄作业页没放的配置项（超时、重试、自动定关参数、日志保留），
+//  再加环境、HERMES_HOME、Python、cron（给维护的人用，普通界面不出现这些词）。
 //
 
 import SwiftUI
@@ -58,8 +59,18 @@ struct SettingsPage: View {
                                 .buttonStyle(WMButtonStyle())
                         }
                     }
+                    FormGroup(title: "账号") {
+                        ConfigFieldRow(key: "skland_roster_refresh_days", title: "森空岛干员练度多久强制刷新")
+                    }
+                    FormGroup(title: "游戏与设备") {
+                        ConfigFieldRow(key: "game_display_name") { value in
+                            (value.string ?? "").isEmpty ? "不挪游戏窗口" : nil
+                        }
+                        ConfigFieldRow(key: "disable_stage_manager_during_run")
+                    }
+                    .disabled(store.readOnly)
                     // copy-guard: developer
-                    DeveloperSection()
+                    AdvancedSection()
                     // copy-guard: end
                 }
                 .frame(maxWidth: 640, alignment: .leading)
@@ -89,8 +100,16 @@ struct SettingsPage: View {
 }
 
 // copy-guard: developer
-/// 开发者区：默认收起，每次进设置页都重新收起。这里的字是给维护的人看的，可以用技术词。
-struct DeveloperSection: View {
+/// 高级：默认收起，每次进设置页都重新收起。先是别的页没放的配置项（按 maa-remote 的分组），
+/// 再是开发者用的（环境、HERMES_HOME、Python、cron、诊断）。这里的字是给维护的人看的，可以用技术词。
+struct AdvancedSection: View {
+    /// 日常页、抄作业规则、设置页上面已经放了的配置项。
+    static let placed: Set<String> = DailyPage.keys.union(CopilotRules.keys).union([
+        "session_schedule", "skland_roster_refresh_days", "game_display_name", "disable_stage_manager_during_run",
+    ])
+    /// 分组排序和显示名：算法参数在前，运行相关在后。
+    static let groupTitles: [(String, String)] = [("自动定关", "自动定关"), ("日常", "代理指挥"), ("运行环境", "运行")]
+
     @Environment(RemoteStore.self) private var store
     @AppStorage(RemoteConfig.hermesHomeKey) private var hermesHome = ""
     @AppStorage(RemoteConfig.pythonKey) private var python = ""
@@ -108,7 +127,7 @@ struct DeveloperSection: View {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 9, weight: .bold))
                         .rotationEffect(.degrees(expanded ? 90 : 0))
-                    Text("开发者")
+                    Text("高级")
                 }
                 .font(.system(size: 11.5, weight: .semibold))
                 .foregroundStyle(WM.f3)
@@ -118,7 +137,15 @@ struct DeveloperSection: View {
             .padding(.leading, 14)
             .padding(.top, 28)
             if expanded {
-                FormGroup {
+                ForEach(groups, id: \.title) { group in
+                    FormGroup(title: group.title) {
+                        ForEach(group.fields) { field in
+                            ConfigFieldControl(field: field)
+                        }
+                    }
+                    .disabled(store.readOnly)
+                }
+                FormGroup(title: "开发者") {
                     FormRow(title: "环境", help: "开发 = 开发副本，不改线上、不发 Discord") {
                         Picker("环境", selection: envBinding) {
                             Text("开发").tag(false)
@@ -150,7 +177,6 @@ struct DeveloperSection: View {
                         Button("复制") { Diagnostics.copy() }.buttonStyle(WMButtonStyle())
                     }
                 }
-                .padding(.top, -12)
             }
         }
         .alert("切到线上？", isPresented: $askLive) {
@@ -158,6 +184,18 @@ struct DeveloperSection: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("之后的改动会写进 \(RemoteConfig.liveHermesHome)，并同步到 Discord。")
+        }
+    }
+
+    /// 没放在别处的配置项，按分组排；认不出的分组排在最后、用原名。
+    private var groups: [(title: String, fields: [ConfigField])] {
+        let rest = (store.config?.fields ?? []).filter { !Self.placed.contains($0.key) }
+        let known = Self.groupTitles.map(\.0)
+        let order = known + (store.config?.groups ?? []).filter { !known.contains($0) }
+        return order.compactMap { group in
+            let fields = rest.filter { $0.group == group }
+            guard !fields.isEmpty else { return nil }
+            return (Self.groupTitles.first { $0.0 == group }?.1 ?? group, fields)
         }
     }
 

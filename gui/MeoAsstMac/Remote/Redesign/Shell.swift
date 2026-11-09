@@ -2,7 +2,7 @@
 //  Shell.swift
 //  Wado's MAA
 //
-//  重设计的窗口外壳：边栏（今天 / 自动抄作业 / 日程与默认 / 日常配置 / 设置）、
+//  重设计的窗口外壳：边栏（今天 / 日常 / 自动抄作业 / 设置，按一场日常从头到尾的顺序）、
 //  顶部状态条（一个胶囊：空闲或运行中 + 做到哪，点开看详情；「日志」按钮）、右侧日志检查器（「本场」卡片 +
 //  本场 / App 两段）、会连游戏的统一确认框（系统 `.confirmationDialog`）。
 //
@@ -10,16 +10,15 @@
 import SwiftUI
 
 enum WMPage: String, CaseIterable, Identifiable, Hashable {
-    case today, copilot, schedule, config, settings
+    case today, daily, copilot, settings
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .today: "今天"
+        case .daily: "日常"
         case .copilot: "自动抄作业"
-        case .schedule: "日程与默认"
-        case .config: "日常配置"
         case .settings: "设置"
         }
     }
@@ -27,9 +26,8 @@ enum WMPage: String, CaseIterable, Identifiable, Hashable {
     var icon: String {
         switch self {
         case .today: "sun.max"
+        case .daily: "calendar"
         case .copilot: "doc.on.doc"
-        case .schedule: "calendar"
-        case .config: "slider.horizontal.3"
         case .settings: "gearshape"
         }
     }
@@ -37,10 +35,9 @@ enum WMPage: String, CaseIterable, Identifiable, Hashable {
     var tip: String {
         switch self {
         case .today: "手动日常、今天的早晚场和状态"
+        case .daily: "早晚场时间、要做的事、刷什么"
         case .copilot: "选关、挑作业、开打"
-        case .schedule: "早晚场时间、默认关卡和要做的事"
-        case .config: "日常怎么刷，改了就生效"
-        case .settings: "外观和日志文件"
+        case .settings: "外观、账号、游戏与设备"
         }
     }
 }
@@ -143,11 +140,8 @@ struct RedesignRoot: View {
     private var sidebar: some View {
         List(selection: $page) {
             row(.today)
+            row(.daily)
             row(.copilot, badge: data.copilotTodo.count)
-            Section("配置") {
-                row(.schedule)
-                row(.config)
-            }
         }
         .safeAreaInset(edge: .bottom) {
             List(selection: $page) { row(.settings) }
@@ -173,9 +167,8 @@ struct RedesignRoot: View {
         Group {
             switch page ?? .today {
             case .today: TodayPage(go: { page = $0 })
+            case .daily: DailyPage()
             case .copilot: CopilotPage()
-            case .schedule: SchedulePage()
-            case .config: ConfigPage()
             case .settings: SettingsPage()
             }
         }

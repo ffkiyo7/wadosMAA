@@ -1,14 +1,15 @@
 //
-//  SchedulePage.swift
+//  DailyPage.swift
 //  Wado's MAA
 //
-//  日程与默认：早场 / 晚场（时间 + 到点自动开始）、默认关卡、每次要做的事。每项改了就写（走 maa_action），写完可撤销。
-//  cron 原文和「对齐」在设置页的开发者区（`DeveloperSection`）。
+//  日常：按一场日常从头到尾排——时间表（早场 / 晚场、到点自动开始、早晚场前不接手动日常）→ 要做的事 →
+//  刷什么（默认关卡）→ 刷理智、剿灭、公招、信用商店、领奖的细项。每项改了就写，写完可撤销。
+//  不常动的（超时、重试、自动定关的参数、日志保留）在设置 › 高级；抄作业的规则在抄作业页右上角。
 //
 
 import SwiftUI
 
-struct SchedulePage: View {
+struct DailyPage: View {
     @Environment(RemoteStore.self) private var store
     @Environment(RunData.self) private var data
 
@@ -16,29 +17,64 @@ struct SchedulePage: View {
         ("fight", "刷理智"), ("infrast", "基建"), ("recruit", "公招"), ("mall", "信用商店"), ("award", "领奖"),
     ]
 
+    /// 这一页放了哪些配置项；没放在任何一页的都进设置 › 高级。
+    static let keys: Set<String> = [
+        "manual_run_blackout_minutes", "medicine_expire_days", "report_drops", "annihilation_sanity",
+        "recruit_times", "mall_buy_first", "mall_blacklist", "mall_reserve_max_credit", "mall_only_buy_discount",
+        "award_orundum", "award_mining", "award_specialaccess",
+    ]
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                PageHeader(title: "日程与默认", caption: store.config?.meta["session_schedule"]?.text)
+                PageHeader(title: "日常", caption: latestMeta)
                 RemoteNotices()
                 VStack(alignment: .leading, spacing: 0) {
-                    FormGroup(title: "每天") {
+                    FormGroup(title: "时间表") {
                         SessionRow(phase: "am")
                         SessionRow(phase: "pm")
-                    }
-                    FormGroup {
-                        FormRow(title: "默认关卡", help: "当天没单独改过时刷这一关") {
-                            stageMenu
+                        ConfigFieldRow(key: "manual_run_blackout_minutes", title: "早晚场前不接手动日常") { value in
+                            let minutes = Int(value.number ?? 0)
+                            guard minutes > 0 else { return "随时都能开始手动日常" }
+                            return SessionLead.windows(store, minutes: minutes).map { "\($0) 不能开始手动日常" }
                         }
                     }
-                    FormGroup(title: "每次要做的事") {
+                    FormGroup(title: "要做的事") {
                         ForEach(Self.taskNames, id: \.0) { key, label in
                             FormRow(title: label) {
                                 Toggle(label, isOn: taskBinding(key))
                                     .toggleStyle(.switch).labelsHidden()
-                                    .help("当天没单独改过时，\(label)")
                             }
                         }
+                    }
+                    FormGroup(title: "刷什么") {
+                        FormRow(title: "默认关卡", sub: autoStageText) {
+                            stageMenu
+                        }
+                    }
+                    FormGroup(title: "刷理智") {
+                        ConfigFieldRow(key: "medicine_expire_days") { value in
+                            let days = Int(value.number ?? 0)
+                            return days > 0 ? "只吃 \(days) 天内过期的理智药" : "一瓶理智药都不吃"
+                        }
+                        ConfigFieldRow(key: "report_drops")
+                    }
+                    FormGroup(title: "剿灭") {
+                        ConfigFieldRow(key: "annihilation_sanity")
+                    }
+                    FormGroup(title: "公招") {
+                        ConfigFieldRow(key: "recruit_times")
+                    }
+                    FormGroup(title: "信用商店") {
+                        ConfigFieldRow(key: "mall_buy_first")
+                        ConfigFieldRow(key: "mall_blacklist")
+                        ConfigFieldRow(key: "mall_reserve_max_credit")
+                        ConfigFieldRow(key: "mall_only_buy_discount")
+                    }
+                    FormGroup(title: "领奖") {
+                        ConfigFieldRow(key: "award_orundum")
+                        ConfigFieldRow(key: "award_mining")
+                        ConfigFieldRow(key: "award_specialaccess")
                     }
                 }
                 .frame(maxWidth: 640, alignment: .leading)
@@ -49,6 +85,21 @@ struct SchedulePage: View {
             .padding(.bottom, 40)
         }
         .task { if data.choices == nil { await data.loadChoices() } }
+    }
+
+    /// 这一页上的设置最后一次是谁、几点改的。
+    private var latestMeta: String? {
+        var metas = (store.config?.meta ?? [:]).filter { Self.keys.contains($0.key) || $0.key == "session_schedule" }
+            .map(\.value)
+        if let defaults = store.defaults?.meta { metas.append(defaults) }
+        return metas.max { ($0.updatedAt ?? "") < ($1.updatedAt ?? "") }?.text
+    }
+
+    /// 「今天自动定关：早场 TL-9、晚场 TL-9」：材料缺口自动定的关会盖过默认关卡。
+    private var autoStageText: String? {
+        let auto = (store.todayPlan?.sessions ?? []).filter { $0.stageSource == "auto" && !$0.stage.isEmpty }
+        guard !auto.isEmpty else { return nil }
+        return "今天自动定关：" + auto.map { "\($0.phase == "am" ? "早场" : "晚场") \($0.stage)" }.joined(separator: "、")
     }
 
     private var stageMenu: some View {
@@ -69,7 +120,7 @@ struct SchedulePage: View {
             Text(current.isEmpty ? "—" : current).fontWeight(.medium)
         }
         .fixedSize()
-        .help(store.defaults?.meta?.text ?? "默认关卡")
+        .help(store.defaults?.meta?.text ?? "当天没单独改过、也没自动定关时刷这一关")
     }
 
     private func taskBinding(_ key: String) -> Binding<Bool> {
@@ -148,5 +199,18 @@ struct SessionRow: View {
             await store.change(["schedule", "set", phase, time], undo: ["schedule", "set", phase, old])
             if let current = store.schedule?.sessions[phase]?.time { reset(to: current) }
         }
+    }
+}
+
+/// 由早晚场时间往前推出来的时段（「07:30–08:00、21:30–22:00」），只算开着的场。
+@MainActor enum SessionLead {
+    static func windows(_ store: RemoteStore, minutes: Int) -> String? {
+        guard let sessions = store.schedule?.sessions else { return nil }
+        let parts = ["am", "pm"].compactMap { key -> String? in
+            guard let session = sessions[key], session.enabled, let date = Beijing.today(at: session.time)
+            else { return nil }
+            return "\(RunLock.beijingClock(date.addingTimeInterval(-Double(minutes) * 60)))–\(session.time)"
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: "、")
     }
 }
