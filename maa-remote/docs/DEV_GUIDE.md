@@ -378,6 +378,7 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
   stage_manager.json 台前调度原状态 {enabled: true, saved_at}：只在「原本开着、被跑场临时关掉」期间存在，还原后删（#62）
   am/ pm/         空目录，只给 cron 传场次
   runs/<date>-<phase>.{json,log,png}   快照 / 日志 / 截图（14 天）；`<date>-<phase>.progress.json` 本场进度（§12.3）；同天同场次文件名复用，多次 run now 会覆盖 <date>-now.*
+  runs/index.jsonl  场次索引：每场结束追加一行（#66，§12.3）；超过 600 行裁到最近 500 行，不跟 14 天清理走；`runs/index.lock` 是它的写锁
 
 ~/.hermes/state/agent-book/
   buttons.json    全局共享按钮登记表（MAA 只碰自己的前缀）
@@ -565,6 +566,7 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | 25 | 由线上进程写回的运行时缓存键必须列入 `PRESERVED_RUNTIME_CACHE_KEYS`（线上有值一律保留，种子只首次兜底）；新增此类键必须同步加 | `deploy_state()` + `test_every_known_runtime_cache_key_is_preserved_on_deploy` | [2026-09-02](./incidents/2026-09-02-deploy-overwrote-activity-stages.md) |
 | 58 | 状态文件读时校验、写时带 `schema_version`（§6.1）；`config` / `plan` / `manual_run` 遇未知更高版本拒跑，`last_run` 告警宽读；所有读取都过 `check_schema()`；`schema_version` 不进 `PRESERVED_RUNTIME_CACHE_KEYS` | `check_schema()` / `*_SCHEMA_VERSION` + `migrate_live_config()` + `tests/test_state_schema.py` | — |
 | 65 | 本场进度文件 `runs/<场>.progress.json`：字段只增不改语义（改语义就升 `schema_version`）；写失败（含解析异常）只打一行 stderr，绝不影响跑场；`RunProgressFile` 的方法永不抛；GUI 只读不写。`notes` 文本只来自 `PROGRESS_NOTES`、步骤名只来自 `PROGRESS_STEPS`，两者都在 `test_ui_copy` 的禁用词扫描里；只在恢复点加 note，不改控制流 | `RunProgressFile` / `run_maa()` / `run_maa_resilient()` / `_execute()` + `ProgressFileTests` / `test_progress_notes_have_no_implementation_words` | REVIEW_2026-11-09 §1.3 |
+| 66 | 场次索引 `runs/index.jsonl` 只追加：日常（含手动场）和抄作业每场结束写一行——成功、失败、停下、计划跳过 / 「你在玩」跳过、上游拒跑都写，锁冲突、手动场请求对不上不算一场、不写；进程被杀写不了就没有。一行一次 `O_APPEND` 写入、持 `runs/index.lock`；超过 `RUN_INDEX_TRIM_AT` 行才在同一把锁里裁到最近 `RUN_INDEX_KEEP` 行；`cleanup_run_files()` 不碰这两个文件。`append_run_index()` 永不抛，写不进去只打一行 stderr；日常一场只写一行（收尾时被打断也不补第二行）。字段只增不改语义（改语义就升 `schema_version`），读的一方跳过坏行和更高版本的行；GUI 只读不写。全库只有 `maa_daily.py` / `maa_copilot_worker.py` 调它 | `append_run_index()` / `read_run_index()` / `record_daily_run()` / `daily_failure()` / `record_copilot_run()` + `tests/test_run_index.py` / `DiscordOptionalTests` / `CancelledRunTests` / `GameProbeTests` / `SessionDailyTests` / `CopilotBatchExecutionTests` | REVIEW_2026-11-09 §1.2 |
 
 ### 8.6 材料推荐与自动定关
 | # | 不变量 | 落点 | 来由 |
@@ -774,6 +776,7 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 | `config.json` | `session_schedule`、`config_meta`、`maa_core_version` / `maa_cli_version`，以及 `config get` 列出的键 |
 | `last_run.json` | `status`、`phase`（`am` / `pm` / `now` / `copilot-<token>`）、`started_at` / `finished_at`、`summary`、`plan.stage` / `plan.tasks`（日常）、`stage`（抄作业）、`resource_update_*`、`log`（本场 maa-cli 日志的绝对路径。日常、手动场、抄作业**开跑那一笔就写上**，运行中逐行追加，GUI 只读新增部分、按 `<Task> Start` 显示当前阶段；文件可能还没建，或者在 maa run 开写前仍是同名旧场的内容——修改时间早于 `started_at` 的当没有，文件变短就从头读）。新一场开跑时只属于上一场的字段会被整批删掉（§6 `new_run`），读不到就当没有；判成败只看 `status`（`running` / `success` / `failed` / `skipped` / `cancelled`），不要读 `ok`。`thread_id` 可能是 `null`（Discord 不可用，#63），`report` 是本场战报文件 `runs/<场>-report.json` 的路径（日常才有）；`progress` 是本场进度文件的路径（日常开跑那一笔就写上；没有这个键 = 旧版 maa-remote 或抄作业，GUI 退回解析 `log`） |
 | `runs/<场>.progress.json` | 见下表。GUI 正在跑时每秒读一次（`state/maa/` 的目录监听收不到 `runs/` 里的改动），跑完再读一次终态 |
+| `runs/index.jsonl` | 场次索引，见下表。GUI 每次重读状态（`last_run.json` 一变）时整份读一遍，首页「最近几场」和「近 N 场成功」用它；文件不在或一行都读不出来就退回只显示 `last_run.json` 那一场 |
 | `plan.json` / `defaults.json` | 本场关卡、跳过；默认关和默认任务 |
 | `upstream.json` | 见下表 |
 
@@ -793,6 +796,26 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 | `eta` | 预计结束时间（ISO）。按 `runs/` 下最近 20 份旧进度文件里每步耗时的中位数推；还没做的步里有一步没历史就是 `null`；结束后是 `null` |
 
 样例：`maa-remote/tests/fixtures/progress_sample.json`（`test_sample_fixture_matches_what_we_write` 守着字段集）。
+
+ETA 仍按旧进度文件里**每一步**的耗时推：`index.jsonl` 只有整场耗时，换过去反而估不准，所以没改。
+
+`runs/index.jsonl`（#66）：每场结束追加一行 JSON，最旧的在前；部署后从零开始积累，不回填旧场。写的时候持 `runs/index.lock`、一行一次 `O_APPEND`，所以读者要么看到整行、要么没有这行；但还是要**逐行解析、跳过解析不了的行**（例如手动改坏的）和 `schema_version` 比自己认识的高的行。行数超过 600 时裁到最近 500 行。正在跑的那一场还没有这一行，看 `last_run.json`。
+
+| 字段 | 含义 |
+|---|---|
+| `schema_version` | 现在是 1 |
+| `id` | `<日期>-<phase>-<HHMMSS>`（开始时间），同一天多次手动场也不重 |
+| `kind` | `daily` / `copilot` |
+| `phase` | 和 `last_run.json` 同一套：`am` / `pm` / `now`（手动日常）/ `copilot-<token>` |
+| `stage` | 日常：本场要刷的关（不刷理智是空串）；抄作业：这一轮的第一关 |
+| `started_at` / `finished_at` / `duration_seconds` | 起止时间（ISO）和整场耗时（秒） |
+| `status` | `success` / `failed` / `cancelled` / `skipped`。成功率只算 `success` 和 `failed` |
+| `failure` | 只在 `failed` 时有值，按先后取第一条：日常 `startup`（游戏没打开）/ `upstream`（上游状态不对，没开游戏）/ `offline` / `screen_lost` / `timeout` / `proxy` / `task_failed` / `not_home` / `cleanup` / `inventory` / `unknown`；抄作业 `prefight` / `stopped` / `cleanup` / `stage_failed` |
+| `skip_reason` | 只在 `skipped` 时有值：`plan`（计划里跳过）/ `game_busy`（你在玩） |
+| `retries` / `restarts` / `window_fixes` | 日常：拿不到画面重开 maa run 的次数 / 没登录上重启游戏的次数 / 画面丢了把窗口摆回来的次数；停在主流程外的那种停下是 `null`。抄作业没有这些计数，都是 `null` |
+| `rescue` | 日常：`salvage`（代理失误后补跑基建等）/ `fallback`（改刷后备关）/ `null` |
+| `won` / `total` | 只有抄作业：通过几项 / 一共几项 |
+| `report` / `progress` / `log` | 战报文件、进度文件、maa-cli 日志的路径（没有就是 `null`；抄作业另有 `snapshot`） |
 
 `upstream.json` 的字段：
 

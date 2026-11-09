@@ -487,10 +487,11 @@ class CopilotBatchExecutionTests(unittest.TestCase):
                 json.loads(path.read_text("utf-8"))
                 for path in Path(raw).glob("*-copilot-*.json")
             ]
+            index = maa_common.read_run_index(Path(raw))
         return SimpleNamespace(
             code=code, ledger=ledger, report=reports[0], state=final,
             results=reports[0]["fields"][0]["value"], settled=settled,
-            snapshot=snapshots[0] if snapshots else None, merge=merge,
+            snapshot=snapshots[0] if snapshots else None, merge=merge, index=index,
         )
 
     def _run_with_stage_manager(self, fight, paused=True):
@@ -541,6 +542,9 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         self.assertEqual(run.merge.call_args_list[-1].args[0]["status"], "cancelled")
         self.assertEqual(run.snapshot["status"], "cancelled")
         self.assertIn("已停止：1/3", run.report["title"])
+        # 场次索引（#66）：停下的一轮也写一行。
+        self.assertEqual([row["status"] for row in run.index], ["cancelled"])
+        self.assertIsNone(run.index[0]["failure"])
 
     def test_a_prefight_environment_failure_is_marked_on_the_round(self) -> None:
         """2026-10-11：森空岛过期，每轮都在复核时退出、不记账，watcher 每 15 分钟重派。"""
@@ -559,6 +563,7 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         self.assertIn("森空岛", result.state["prefight_error"])
         self.assertEqual(result.snapshot["status"], "failed")
         self.assertIn("森空岛", result.snapshot["stop_reason"])
+        self.assertEqual([(row["status"], row["failure"]) for row in result.index], [("failed", "prefight")])
 
     def test_sanity_shortage_is_not_a_prefight_environment_failure(self) -> None:
         result = self._run(
@@ -571,6 +576,22 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         result = self._run([self._entry("SR-5")], lambda *a: ("won", ""))
         self.assertEqual(result.snapshot["status"], "success")
         self.assertIn("finished_at", result.snapshot)
+
+    def test_a_finished_round_appends_one_index_row(self) -> None:
+        """不变量 #66：一轮一行；抄作业拿不到的重开 / 重启 / 摆窗次数写 None，不硬造。"""
+        result = self._run([self._entry("SR-5"), self._entry("SR-6")], lambda *a: ("won", ""))
+        self.assertEqual(len(result.index), 1)
+        row = result.index[0]
+        self.assertEqual(row["schema_version"], maa_common.RUN_INDEX_SCHEMA_VERSION)
+        self.assertEqual((row["kind"], row["phase"], row["stage"]), ("copilot", "copilot-" + "a" * 12, "SR-5"))
+        self.assertEqual((row["status"], row["failure"], row["won"], row["total"]), ("success", None, 2, 2))
+        self.assertEqual((row["retries"], row["restarts"], row["window_fixes"]), (None, None, None))
+        self.assertTrue(row["log"].endswith(".log"))
+        self.assertTrue(row["snapshot"].endswith(".json"))
+
+    def test_a_lost_stage_is_indexed_as_failed(self) -> None:
+        result = self._run([self._entry("SR-5")], lambda *a: ("failed", "没打过"))
+        self.assertEqual([(row["status"], row["failure"]) for row in result.index], [("failed", "stage_failed")])
 
     def test_a_paused_auto_round_stops_before_the_next_stage(self) -> None:
         fought: list[str] = []

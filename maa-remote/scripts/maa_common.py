@@ -1147,12 +1147,86 @@ def delete_channel(token: str, channel_id: str) -> None:
     discord_request(token, "DELETE", f"/channels/{channel_id}")
 
 
+# ---------------------------------------------------------------------------
+# 场次索引 `runs/index.jsonl`（不变量 #66，DEV_GUIDE §12.3）：每场结束追加一行，
+# GUI 首页的「最近几场」和成功率读它。只追加；超过 `RUN_INDEX_TRIM_AT` 行才裁到最近
+# `RUN_INDEX_KEEP` 行。不跟 `retention_days` 走：14 天只有 28 场日常，凑不够近 30 场。
+# ---------------------------------------------------------------------------
+
+RUN_INDEX_NAME = "index.jsonl"
+RUN_INDEX_LOCK_NAME = "index.lock"
+RUN_INDEX_SCHEMA_VERSION = 1
+RUN_INDEX_KEEP = 500
+RUN_INDEX_TRIM_AT = 600
+# `cleanup_run_files()` 按修改时间清 `runs/`，这两个文件不归它管。
+RUN_INDEX_FILES = frozenset({RUN_INDEX_NAME, RUN_INDEX_LOCK_NAME})
+
+
+def append_run_index(runs_dir: Path, row: Mapping[str, Any]) -> bool:
+    """往 `runs_dir/index.jsonl` 追加一行。永不抛（#66）：写不进去只打一行 stderr。
+
+    一行一次 `os.write`（`O_APPEND`），持 `index.lock` 写，裁剪也在同一把锁里，
+    所以并发的两场不会交错、裁剪时也不会丢别人刚追加的那行。
+    """
+    try:
+        record = {"schema_version": RUN_INDEX_SCHEMA_VERSION, **row}
+        line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+        ensure_private_dir(runs_dir)
+        path = runs_dir / RUN_INDEX_NAME
+        lock_fd = os.open(str(runs_dir / RUN_INDEX_LOCK_NAME), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            fd = os.open(str(path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+            try:
+                written = os.write(fd, line)
+            finally:
+                os.close(fd)
+            if written != len(line):
+                raise OSError(f"只写进 {written}/{len(line)} 字节")
+            _trim_run_index(path)
+        finally:
+            os.close(lock_fd)  # 关掉 fd 就放锁
+        return True
+    except Exception as exc:  # noqa: BLE001 — (c) 索引只是统计，写不进去不能拖垮跑场（#66）
+        print(f"场次索引没写成：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return False
+
+
+def _trim_run_index(path: Path) -> None:
+    """超过 `RUN_INDEX_TRIM_AT` 行就只留最近 `RUN_INDEX_KEEP` 行（调用方持 `index.lock`）。"""
+    lines = path.read_bytes().splitlines(keepends=True)
+    if len(lines) <= RUN_INDEX_TRIM_AT:
+        return
+    atomic_write_text(path, b"".join(lines[-RUN_INDEX_KEEP:]).decode("utf-8", errors="replace"))
+
+
+def read_run_index(runs_dir: Path, limit: int | None = None) -> list[dict[str, Any]]:
+    """按追加顺序读出各行（最旧的在前）；坏行、不是对象的行、更高 `schema_version` 的行跳过。"""
+    try:
+        raw = (runs_dir / RUN_INDEX_NAME).read_bytes()
+    except OSError:
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        try:
+            row = json.loads(line.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        version = row.get("schema_version", 1)
+        if not isinstance(version, int) or isinstance(version, bool) or version > RUN_INDEX_SCHEMA_VERSION:
+            continue
+        rows.append(row)
+    return rows[-limit:] if limit else rows
+
+
 def cleanup_run_files(retention_days: int = 14, at: datetime | None = None) -> list[str]:
     ensure_private_dir(RUNS_DIR)
     cutoff = (at or now_beijing()) - timedelta(days=retention_days)
     removed: list[str] = []
     for path in RUNS_DIR.iterdir():
-        if not path.is_file() or path.is_symlink():
+        if not path.is_file() or path.is_symlink() or path.name in RUN_INDEX_FILES:
             continue
         modified = datetime.fromtimestamp(path.stat().st_mtime, tz=BEIJING)
         if modified < cutoff:

@@ -201,10 +201,15 @@ enum LastRunText {
     }
 
     static func kind(_ run: [String: JSONValue]) -> String {
-        switch run["phase"]?.string {
+        kind(phase: run["phase"]?.string)
+    }
+
+    /// `am` / `pm` / `now` / `copilot-<token>`（`last_run.json` 和 `runs/index.jsonl` 同一套）。
+    static func kind(phase: String?) -> String {
+        switch phase {
         case "am": "早场日常"
         case "pm": "晚场日常"
-        case _ where isCopilot(run): "抄作业"
+        case let phase? where phase.hasPrefix("copilot-"): "抄作业"
         default: "手动日常"
         }
     }
@@ -289,6 +294,8 @@ struct SavedChange: Identifiable, Equatable, Sendable {
     /// 正在改计划的那一场（`am` / `pm`）。
     private(set) var planChanging: String?
     private(set) var lastRun: [String: JSONValue] = [:]
+    /// 最近几场（`runs/index.jsonl`），最新的在前；还没有记录就是空。
+    private(set) var recentRuns: [RunRecord] = []
     private(set) var lockHolder: LockHolder?
     private(set) var schemaProblem: String?
     private(set) var loadError: String?
@@ -359,6 +366,7 @@ struct SavedChange: Identifiable, Equatable, Sendable {
         checkSchemas()
         lockHolder = RunLock.currentHolder()
         lastRun = Self.readJSON("last_run.json")
+        recentRuns = RunHistory.read()
         progress.update(run: lastRun)
         noticeFinishedRun()
         do {
@@ -675,6 +683,7 @@ struct SavedChange: Identifiable, Equatable, Sendable {
         todayPlan = nil
         todayPlanError = nil
         lastRun = [:]
+        recentRuns = []
         lockHolder = nil
         loadError = nil
         dismissReport()

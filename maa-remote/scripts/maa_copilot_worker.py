@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ from maa_common import (
     Config,
     atomic_write_json,
     atomic_write_text,
+    append_run_index,
     cleanup_run_files,
     discord_request,
     discord_token,
@@ -887,6 +889,66 @@ def _use_list_path(state: dict[str, Any]) -> bool:
     return bool(str(state.get("activity_key") or ""))
 
 
+def copilot_failure(
+    *, prefight_error: str, stop_reason: str, cleanup_errors: list[str]
+) -> str:
+    """一轮抄作业没成功的主因（场次索引 `failure`，#66）。"""
+    if prefight_error:
+        return "prefight"
+    if stop_reason:
+        return "stopped"
+    if cleanup_errors:
+        return "cleanup"
+    return "stage_failed"
+
+
+def record_copilot_run(
+    *,
+    token: str,
+    at: datetime,
+    status: str,
+    stage: str,
+    log_path: Path | None = None,
+    snapshot: Path | None = None,
+    failure: str | None = None,
+    skip_reason: str | None = None,
+    won: int | None = None,
+    total: int | None = None,
+) -> None:
+    """一轮抄作业结束，往 `runs/index.jsonl` 追加一行（#66）。永不抛。
+
+    抄作业没有重开 / 重启 / 摆窗的计数，这几个键写 None，不硬造。
+    """
+    try:
+        finished = now_beijing()
+        row: dict[str, Any] = {
+            "id": f"{at.date().isoformat()}-copilot-{token}-{at:%H%M%S}",
+            "kind": "copilot",
+            "phase": f"copilot-{token}",
+            "stage": stage,
+            "started_at": at.isoformat(),
+            "finished_at": finished.isoformat(),
+            "duration_seconds": max(0, int((finished - at).total_seconds())),
+            "status": status,
+            "failure": failure if status == "failed" else None,
+            "skip_reason": skip_reason if status == "skipped" else None,
+            "retries": None,
+            "restarts": None,
+            "window_fixes": None,
+            "rescue": None,
+            "won": won,
+            "total": total,
+            "report": None,
+            "progress": None,
+            "log": str(log_path) if log_path is not None else None,
+            "snapshot": str(snapshot) if snapshot is not None else None,
+        }
+    except Exception as exc:  # noqa: BLE001 — (c) 索引只是统计，拼不出来不能拖垮收尾（#66）
+        print(f"场次索引没写成：{type(exc).__name__}: {exc}", flush=True)
+        return
+    append_run_index(RUNS_DIR, row)
+
+
 def _batch_run_locked(state: dict[str, Any]) -> int:
     """锁内连抄。两条路：
 
@@ -920,6 +982,10 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
             "⏸️ 自动作业本轮未启动",
             f"{GAME_BUSY_NOTICE}\n探测：{probe_detail}",
             0x99AAB5,
+        )
+        record_copilot_run(
+            token=token, at=at, status="skipped", skip_reason="game_busy",
+            stage=str(entries[0].get("stage") or "") if entries else "",
         )
         merge_last_run(
             {
@@ -1130,6 +1196,20 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
     _post_report(config, embed, png_path if game_touched else None)
 
     final_status = "cancelled" if cancelled else "success" if ok else "failed"
+    snapshot_path = RUNS_DIR / f"{stem}.json"
+    record_copilot_run(
+        token=token,
+        at=at,
+        status=final_status,
+        stage=str(entries[0].get("stage") or "") if entries else "",
+        log_path=log_path,
+        snapshot=snapshot_path,
+        failure=copilot_failure(
+            prefight_error=prefight_error, stop_reason=stop_reason, cleanup_errors=cleanup_errors
+        ),
+        won=len(won),
+        total=len(entries),
+    )
     merge_last_run(
         {
             "status": final_status,
@@ -1141,7 +1221,6 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
         }
     )
     # 运行快照收到终态：以前一直停在 `running`，排查时分不清是还在跑还是早挂了。
-    snapshot_path = RUNS_DIR / f"{stem}.json"
     snapshot = load_json(snapshot_path, None)
     if isinstance(snapshot, dict):
         snapshot.update(

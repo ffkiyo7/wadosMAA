@@ -40,6 +40,7 @@ from maa_common import (
     atomic_write_json,
     atomic_write_text,
     check_schema,
+    append_run_index,
     cleanup_run_files,
     create_thread,
     discord_request,
@@ -1119,6 +1120,8 @@ class RunProgressFile:
         self.final = False
         self.booting = False
         self.notes: list[dict[str, str]] = []
+        # 每种说明出现过几次：场次索引（#66）的重试 / 摆窗次数、超时、补跑从这里取。
+        self.counts: dict[str, int] = {}
         self.states: dict[str, str] = {key: "pending" for key, *_ in PROGRESS_STEPS}
         self.times: dict[str, dict[str, str | None]] = {
             key: {"started_at": None, "finished_at": None} for key, *_ in PROGRESS_STEPS
@@ -1157,6 +1160,7 @@ class RunProgressFile:
         self.write()
 
     def note(self, kind: str, **values: Any) -> None:
+        self.counts[kind] = self.counts.get(kind, 0) + 1
         try:
             text = PROGRESS_NOTES[kind].format(**values)
             self.notes.append({"at": now_beijing().isoformat(), "text": text})
@@ -2493,17 +2497,106 @@ def report_manual_run_mismatch(
     )
 
 
+def daily_failure(
+    *,
+    startup_error: str,
+    offline_gave_up: bool,
+    connect_gave_up: bool,
+    timed_out: bool,
+    proxy_batches: int,
+    return_code: int,
+    home_verified: bool | None,
+    cleanup_errors: list[str],
+    inventory_error: str,
+) -> str:
+    """一场日常没成功的主因（场次索引 `failure`，#66）：按下面的先后取第一条。"""
+    if startup_error:
+        return "startup"
+    if offline_gave_up:
+        return "offline"
+    if connect_gave_up:
+        return "screen_lost"
+    if timed_out:
+        return "timeout"
+    if proxy_batches:
+        return "proxy"
+    if return_code != 0:
+        return "task_failed"
+    if home_verified is False:
+        return "not_home"
+    if cleanup_errors:
+        return "cleanup"
+    if inventory_error:
+        return "inventory"
+    return "unknown"
+
+
+def record_daily_run(
+    *,
+    phase: str,
+    started: datetime,
+    plan: Plan,
+    status: str,
+    progress: RunProgressFile | None = None,
+    log_path: Path | None = None,
+    report: str | None = None,
+    failure: str | None = None,
+    skip_reason: str | None = None,
+    retries: int | None = None,
+    restarts: int | None = None,
+) -> None:
+    """一场日常结束，往 `runs/index.jsonl` 追加一行（#66）。永不抛。
+
+    `retries` / `restarts` 拿不到就是 None；`window_fixes` / `rescue` 来自进度文件的说明计数。
+    """
+    try:
+        finished = now_beijing()
+        counts = progress.counts if progress is not None else None
+        rescue = None
+        if counts and counts.get("salvage"):
+            rescue = "salvage"
+        elif counts and counts.get("fallback"):
+            rescue = "fallback"
+        fight_on = bool((plan.get("tasks") or {}).get("fight", True))
+        row: dict[str, Any] = {
+            "id": f"{started.date().isoformat()}-{phase}-{started:%H%M%S}",
+            "kind": "daily",
+            "phase": phase,
+            "stage": str(plan.get("stage") or "") if fight_on else "",
+            "started_at": started.isoformat(),
+            "finished_at": finished.isoformat(),
+            "duration_seconds": max(0, int((finished - started).total_seconds())),
+            "status": status,
+            "failure": failure if status == "failed" else None,
+            "skip_reason": skip_reason if status == "skipped" else None,
+            "retries": retries,
+            "restarts": restarts,
+            "window_fixes": counts.get("screen_lost", 0) if counts is not None else None,
+            "rescue": rescue,
+            "report": report,
+            "progress": str(progress.path) if progress is not None else None,
+            "log": str(log_path) if log_path is not None else None,
+        }
+    except Exception as exc:  # noqa: BLE001 — (c) 索引只是统计，拼不出来不能拖垮跑场（#66）
+        print(f"场次索引没写成：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return
+    append_run_index(RUNS_DIR, row)
+
+
 def execute(phase: Phase, manual_token: str = "") -> int:
     """跑一场。`run cancel` 的 SIGINT（不变量 #64）：只有第一次打断，主流程里收到就照常
     关游戏、还原台前调度、发战报，`last_run.status = cancelled`；落在主流程之外（拿到
     锁之后、开游戏之前，或者收尾时）也补写 `cancelled`。返回 130。
     """
-    marks: dict[str, Any] = {"locked": False, "finished": False, "progress": None}
+    marks: dict[str, Any] = {"locked": False, "finished": False, "progress": None, "record": None}
     with interrupt_once():
         try:
             return _execute(phase, manual_token, marks)
         except KeyboardInterrupt:
             if marks["locked"] and not marks["finished"]:
+                # 索引先写：GUI 靠 `last_run.json` 的改动重读，那时这一行要已经在了（#66）。
+                if marks["record"] is not None:
+                    marks["record"]("cancelled")
                 merge_last_run({
                     "status": "cancelled",
                     "finished_at": now_beijing().isoformat(),
@@ -2582,6 +2675,18 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
             progress_path, phase=phase, plan=plan, config=config, started=started
         )
         marks["progress"] = progress
+
+        def record(status: str, **extra: Any) -> None:
+            """场次索引一场只写一行（#66）：收尾时被打断也不会再补一行。"""
+            if marks.get("indexed"):
+                return
+            marks["indexed"] = True
+            record_daily_run(
+                phase=phase, started=started, plan=plan, status=status,
+                progress=progress, log_path=log_path, **extra,
+            )
+
+        marks["record"] = record
         merge_last_run(
             {
                 "status": "running",
@@ -2629,6 +2734,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
                 },
                 what="跳过通知",
             )
+            record("skipped", skip_reason="plan", retries=0, restarts=0)
             merge_last_run({"status": "skipped", "finished_at": now_beijing().isoformat()})
             progress.finish("skipped")
             return 0
@@ -2637,6 +2743,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
         # 自动场和手动场都查；其余（不新鲜、上游有新版）只显示，不挡跑。
         blocked = upstream_hard_block(config)
         if blocked:
+            record("failed", failure="upstream", retries=0, restarts=0)
             report_upstream_block(token, channel_id, phase, blocked, now_beijing())
             progress.finish("failed")
             return 1
@@ -2647,6 +2754,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
         if phase in AUTO_PHASES:
             online, probe_detail = maa_playcover.game_is_online(config)
             if online:
+                record("skipped", skip_reason="game_busy", retries=0, restarts=0)
                 report_game_busy(
                     config, token, channel_id, phase, probe_detail, now_beijing()
                 )
@@ -2938,6 +3046,23 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
         if plan.get("annihilation") and annihilation_consumed(stdout_lines + stderr_lines):
             finished["annihilation_game_day"] = cn_game_day(started)
             finished["annihilation_finished_at"] = now_beijing().isoformat()
+        record(
+            finished["status"],
+            report=finished["report"],
+            failure=daily_failure(
+                startup_error=startup_error,
+                offline_gave_up=any(OFFLINE_GAVE_UP in line for line in stderr_lines),
+                connect_gave_up=any(CONNECT_GAVE_UP in line for line in stderr_lines),
+                timed_out=bool(progress.counts.get("timeout")),
+                proxy_batches=proxy_batches,
+                return_code=return_code,
+                home_verified=home_verified,
+                cleanup_errors=cleanup_errors,
+                inventory_error=inventory_error,
+            ),
+            retries=connect_retries,
+            restarts=offline_retries,
+        )
         merge_last_run(finished)
         marks["finished"] = True
         return CANCEL_EXIT_CODE if cancelled else 0 if ok else 1

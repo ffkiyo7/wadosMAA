@@ -4,7 +4,8 @@
 //
 //  首页「今天」：左边是要操作的「手动日常」（原一键长草的「这一次」，K12），右边是早场 / 晚场的
 //  计划（`plan today`，点了就改：`plan set-stage` / `skip-today` / `fight`）和游戏资源；
-//  下面是自动抄作业的关卡和最近一次。开始走 `run local`，和 Discord「现在跑」同一条路。
+//  下面是自动抄作业的关卡和最近几场（`runs/index.jsonl`，没有记录时退回 `last_run.json` 的最近一次）。
+//  开始走 `run local`，和 Discord「现在跑」同一条路。
 //
 
 import SwiftUI
@@ -614,7 +615,7 @@ struct SessionPlanView: View {
     }
 }
 
-// MARK: - 自动抄作业 / 最近一次
+// MARK: - 自动抄作业 / 最近几场
 
 struct CopilotPreviewSection: View {
     let go: (WMPage) -> Void
@@ -707,20 +708,76 @@ enum CopilotText {
 struct RecentRunsSection: View {
     @Environment(RemoteStore.self) private var store
 
+    /// 正在跑的那一场还没进索引，先放在最上面。
+    private var running: Bool {
+        LastRunText.ongoing.contains(store.lastRun["status"]?.string ?? "") && store.lastRun["status"] != nil
+    }
+
     var body: some View {
+        let runs = Array(store.recentRuns.prefix(RunHistory.shown))
         VStack(alignment: .leading, spacing: 0) {
-            SectionTitle(title: "最近一次")
+            if runs.isEmpty {
+                SectionTitle(title: "最近一次")
+            } else {
+                SectionTitle(title: "最近几场") { rateText }
+            }
             VStack(spacing: 0) {
-                if store.lastRun["status"] == nil {
-                    Text("还没有记录").foregroundStyle(WM.f2)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16).padding(.vertical, 12)
+                if runs.isEmpty {
+                    if store.lastRun["status"] == nil {
+                        Text("还没有记录").foregroundStyle(WM.f2)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16).padding(.vertical, 12)
+                    } else {
+                        lastRunRow
+                    }
                 } else {
-                    lastRunRow
+                    if running {
+                        lastRunRow
+                        RowDivider()
+                    }
+                    ForEach(Array(runs.enumerated()), id: \.element.id) { index, run in
+                        if index > 0 { RowDivider() }
+                        recordRow(run)
+                    }
                 }
             }
             .wmCard()
         }
+    }
+
+    @ViewBuilder private var rateText: some View {
+        if let rate = RunHistory.successRate(store.recentRuns) {
+            Text("近 \(rate.total) 场成功 \(rate.ok * 100 / rate.total)%")
+                .font(.system(size: 12)).foregroundStyle(WM.f2).monospacedDigit()
+                .help("\(rate.total) 场里成功 \(rate.ok) 场，跳过和停下的不算")
+        }
+    }
+
+    private func recordRow(_ run: RunRecord) -> some View {
+        var when = run.startedAt.map { "\(Beijing.monthDay($0)) \(RunLock.beijingClock($0))" } ?? ""
+        if let seconds = run.durationSeconds, run.status != "skipped" {
+            when += (when.isEmpty ? "" : " · ") + RunHistory.durationText(seconds)
+        }
+        return HStack(spacing: 12) {
+            Swatch(code: run.stage, size: 24, radius: 6)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(run.title).fontWeight(.semibold)
+                Text(when).font(.system(size: 11.5)).foregroundStyle(WM.f2).monospacedDigit().lineLimit(1)
+            }
+            Spacer()
+            Text(LastRunText.statusWord(run.status))
+                .font(.system(size: 12))
+                .foregroundStyle(Self.statusColor(run.status))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .help(run.reason)
+    }
+
+    static func statusColor(_ status: String) -> Color {
+        status == "success" ? WM.ok
+            : status == "skipped" || status == "cancelled" ? WM.f3
+            : LastRunText.ongoing.contains(status) ? WM.game : WM.danger
     }
 
     private var lastRunRow: some View {
@@ -749,10 +806,7 @@ struct RecentRunsSection: View {
             }
             Text(LastRunText.statusWord(status))
                 .font(.system(size: 12))
-                .foregroundStyle(
-                    status == "success" ? WM.ok
-                        : status == "skipped" ? WM.f3
-                        : LastRunText.ongoing.contains(status) ? WM.game : WM.danger)
+                .foregroundStyle(Self.statusColor(status))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

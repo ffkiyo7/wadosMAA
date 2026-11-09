@@ -1097,6 +1097,7 @@ class DiscordOptionalTests(unittest.TestCase):
         request: Any = None,
         thread: Any = None,
         progress_path: Path | None = None,
+        run_result: Any = (0, [], [], 0, 0),
     ) -> SimpleNamespace:
         at = datetime(2026, 11, 9, 22, 0, tzinfo=BEIJING)
         lock = unittest.mock.MagicMock()
@@ -1129,7 +1130,7 @@ class DiscordOptionalTests(unittest.TestCase):
             launch = stub(maa_playcover, "launch_game")
             stub(maa_playcover, "wait_for_game")
             stub(maa_playcover, "settle_game_window", return_value="")
-            run = stub(maa_daily, "run_maa_resilient", return_value=(0, [], [], 0, 0))
+            run = stub(maa_daily, "run_maa_resilient", return_value=run_result)
             stub(maa_daily, "capture_home_screenshot", return_value=(True, "", True, ""))
             close = stub(maa_playcover, "close_game", return_value=[])
             if progress_path is not None:
@@ -1139,10 +1140,11 @@ class DiscordOptionalTests(unittest.TestCase):
             report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else None
             progress_file = Path(raw) / "2026-11-09-pm.progress.json"
             progress = json.loads(progress_file.read_text("utf-8")) if progress_file.is_file() else None
+            index = maa_common.read_run_index(Path(raw))
         finished = merge.call_args_list[-1].args[0]
         return SimpleNamespace(
             code=code, report=report, finished=finished, merge=merge, discord=discord, progress=progress,
-            create=create, upload=upload, run=run, launch=launch, close=close, token=token_stub,
+            create=create, upload=upload, run=run, launch=launch, close=close, token=token_stub, index=index,
         )
 
     def _assert_ran_through(self, result: SimpleNamespace) -> None:
@@ -1186,6 +1188,30 @@ class DiscordOptionalTests(unittest.TestCase):
         posted = [call.args[2] for call in result.discord.call_args_list]
         self.assertIn("/channels/123/messages", posted)
         self.assertFalse(any("thread_id" in call.args[0] for call in result.merge.call_args_list[1:]))
+
+    def test_a_finished_run_appends_one_index_row(self) -> None:
+        """不变量 #66：跑完一场追加一行，带战报 / 进度路径和重试计数。"""
+        result = self._execute({})
+        self.assertEqual(len(result.index), 1)
+        row = result.index[0]
+        self.assertEqual(row["schema_version"], maa_common.RUN_INDEX_SCHEMA_VERSION)
+        self.assertEqual(row["id"], "2026-11-09-pm-220000")
+        self.assertEqual((row["kind"], row["phase"], row["stage"]), ("daily", "pm", "TL-7"))
+        self.assertEqual((row["status"], row["failure"], row["skip_reason"]), ("success", None, None))
+        self.assertEqual((row["retries"], row["restarts"], row["window_fixes"], row["rescue"]), (0, 0, 0, None))
+        self.assertEqual(row["report"], result.finished["report"])
+        self.assertTrue(row["progress"].endswith("2026-11-09-pm.progress.json"))
+        self.assertTrue(row["log"].endswith("2026-11-09-pm.log"))
+        self.assertEqual(row["duration_seconds"], 0)
+
+    def test_a_failed_run_is_indexed_with_its_cause_and_counts(self) -> None:
+        result = self._execute(
+            {}, run_result=(1, [], ["游戏画面没拿到"], 2, 1),
+        )
+        self.assertEqual(result.finished["status"], "failed")
+        row = result.index[-1]
+        self.assertEqual((row["status"], row["failure"]), ("failed", "task_failed"))
+        self.assertEqual((row["retries"], row["restarts"]), (2, 1))
 
     def test_a_dead_outlet_never_patches_progress(self) -> None:
         self.assertIsNone(maa_daily.notify("", "POST", "/channels/1/messages", {}, what="x"))
@@ -1247,8 +1273,9 @@ class CancelledRunTests(unittest.TestCase):
             saved = json.loads(report_file.read_text("utf-8")) if report_file.is_file() else None
             progress_file = Path(raw) / "2026-11-09-am.progress.json"
             progress = json.loads(progress_file.read_text("utf-8")) if progress_file.is_file() else None
+            index = maa_common.read_run_index(Path(raw))
         return SimpleNamespace(
-            progress=progress,
+            progress=progress, index=index,
             code=code, finished=merge.call_args_list[-1].args[0], merge=merge, fallback=fallback,
             salvage=salvage, shot=shot, close=close, report=report, direct=direct, saved=saved,
         )
@@ -1282,6 +1309,22 @@ class CancelledRunTests(unittest.TestCase):
         self.assertEqual(result.code, maa_common.CANCEL_EXIT_CODE)
         self.assertEqual(result.finished["status"], "cancelled")
         result.close.assert_not_called()
+        # 不变量 #66：落在主流程外的停下也补一行，而且只有一行。
+        self.assertEqual([(row["status"], row["retries"]) for row in result.index], [("cancelled", None)])
+
+    def test_every_cancel_path_indexes_exactly_one_row(self) -> None:
+        for overrides in ({}, {"wait": {"side_effect": KeyboardInterrupt()}}):
+            with self.subTest(overrides=list(overrides)):
+                result = self._execute(**overrides)
+                self.assertEqual([row["status"] for row in result.index], ["cancelled"])
+                self.assertIsNone(result.index[0]["failure"])
+
+    def test_an_upstream_block_is_indexed_as_failed(self) -> None:
+        result = self._execute(block={"return_value": "钉住项被改了"})
+        self.assertEqual(result.code, 1)
+        self.assertEqual(
+            [(row["status"], row["failure"]) for row in result.index], [("failed", "upstream")]
+        )
 
     def test_only_the_first_interrupt_counts(self) -> None:
         import signal
@@ -2170,6 +2213,9 @@ class GameProbeTests(unittest.TestCase):
         ), patch.object(maa_daily, "run_lock", return_value=lock), patch.object(
             maa_daily, "cleanup_run_files"
         ), patch.object(maa_daily, "atomic_write_json"), patch.object(
+            # 进度文件桩掉了，场次索引（#66）也别落到共享 HOME 里。
+            maa_daily, "append_run_index"
+        ) as index, patch.object(
             maa_daily, "should_skip", return_value=False
         ), patch.object(
             maa_playcover, "game_is_online", probe
@@ -2195,7 +2241,7 @@ class GameProbeTests(unittest.TestCase):
         merge.call_args_list = merge.call_args_list + common_merge.call_args_list  # pyright: ignore[reportAttributeAccessIssue]  # 合并两处桩的调用记录
         request.call_args_list = request.call_args_list + common_request.call_args_list  # pyright: ignore[reportAttributeAccessIssue]  # 合并两处桩的调用记录
         return SimpleNamespace(
-            code=code, merge=merge, request=request, opened=opened, probe=probe
+            code=code, merge=merge, request=request, opened=opened, probe=probe, index=index
         )
 
     def test_automatic_phase_skips_loudly_when_the_emulator_is_busy(self) -> None:
@@ -2231,6 +2277,10 @@ class GameProbeTests(unittest.TestCase):
                 # The way out matters: otherwise a forgotten emulator means the
                 # daily can never run again.
                 self.assertIn("现在跑", embed["description"])
+                # 不变量 #66：探测跳过也写一行索引。
+                result.index.assert_called_once()
+                row = result.index.call_args.args[1]
+                self.assertEqual((row["status"], row["skip_reason"], row["phase"]), ("skipped", "game_busy", phase))
 
     def test_automatic_phase_runs_normally_when_the_emulator_is_offline(self) -> None:
         result = self._execute("am", online=False)
@@ -2316,6 +2366,8 @@ class SessionDailyTests(unittest.TestCase):
         ), patch.object(maa_daily, "run_lock", return_value=lock), patch.object(
             maa_daily, "cleanup_run_files"
         ), patch.object(maa_daily, "atomic_write_json") as snapshot, patch.object(
+            maa_daily, "append_run_index"
+        ) as index, patch.object(
             maa_playcover, "game_is_online", return_value=(False, "离线")
         ), patch.object(maa_daily, "merge_last_run"), patch.object(
             maa_daily, "discord_request"
@@ -2326,7 +2378,7 @@ class SessionDailyTests(unittest.TestCase):
         ) as opened, patch.object(maa_daily, "send_direct_failure"):
             code = maa_daily.execute(phase)
         return SimpleNamespace(
-            code=code, opened=opened, request=request, snapshot=snapshot
+            code=code, opened=opened, request=request, snapshot=snapshot, index=index
         )
 
     def test_a_skipped_morning_does_not_silence_the_evening_or_a_manual_run(self) -> None:
@@ -2338,10 +2390,17 @@ class SessionDailyTests(unittest.TestCase):
             if call.args[1] == "POST"
         ]
         self.assertTrue(any("已跳过" in title for title in titles))
+        # 不变量 #66：计划里跳过的一场也写一行索引。
+        (_dir, row), _ = morning.index.call_args
+        self.assertEqual((row["status"], row["skip_reason"], row["failure"]), ("skipped", "plan", None))
+        morning.index.assert_called_once()
         for phase in ("pm", "now"):
             with self.subTest(phase=phase):
                 other = self._execute(phase)
                 other.opened.assert_called_once()
+                # 开游戏那一步炸了：启动失败也写一行。
+                (_dir, row), _ = other.index.call_args
+                self.assertEqual((row["status"], row["failure"]), ("failed", "startup"))
 
     def test_each_phase_snapshots_its_own_stage(self) -> None:
         morning = self._execute("am")
@@ -2419,6 +2478,8 @@ class EmulatorProbeSharedTests(unittest.TestCase):
                 worker, "_notice",
                 side_effect=lambda c, t, b, col: notices.append((t, b)),
             ), patch.object(worker, "merge_last_run") as merge, patch.object(
+                worker, "RUNS_DIR", Path(raw)
+            ), patch.object(
                 worker, "_fight_one"
             ) as fight, patch.object(maa_playcover, "launch_game") as launch_game:
                 code = worker._batch_run_locked(queued)
