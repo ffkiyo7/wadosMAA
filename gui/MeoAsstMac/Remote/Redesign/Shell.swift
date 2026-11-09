@@ -39,7 +39,7 @@ enum WMPage: String, CaseIterable, Identifiable, Hashable {
         case .today: "手动日常、今天的早晚场和状态"
         case .copilot: "选关、挑作业、开打"
         case .schedule: "早晚场时间、默认关卡和要做的事"
-        case .config: "日常怎么刷，整页保存"
+        case .config: "日常怎么刷，改了就生效"
         case .settings: "外观和日志文件"
         }
     }
@@ -191,6 +191,15 @@ struct RedesignRoot: View {
             }
         }
         .animation(.snappy, value: store.runReport)
+        // 改完设置的「已保存 · 撤销」，哪一页改的都在底部出。
+        .overlay(alignment: .bottom) {
+            if let saved = store.saved {
+                SavedToast(change: saved)
+                    .padding(.bottom, 18)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.snappy, value: store.saved)
     }
 
     // MARK: 状态条

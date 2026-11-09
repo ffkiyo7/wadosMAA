@@ -260,6 +260,13 @@ struct RunReport: Identifiable, Equatable, Sendable {
     }
 }
 
+/// 刚写完的一项设置：回执上写什么、点「撤销」时跑哪条命令。
+struct SavedChange: Identifiable, Equatable, Sendable {
+    let id = UUID()
+    let text: String
+    let undo: [String]?
+}
+
 // MARK: - Store
 
 @MainActor @Observable final class RemoteStore {
@@ -268,6 +275,8 @@ struct RunReport: Identifiable, Equatable, Sendable {
     static let knownSchemaVersion = 1
     /// 成功回执停留多久。
     static let noticeLifetime: Duration = .seconds(5)
+    /// 「已保存 · 撤销」停留多久。
+    static let savedLifetime: Duration = .seconds(6)
     static let checkedFiles = ["config.json", "plan.json", "defaults.json", "last_run.json", "upstream.json"]
 
     private(set) var config: ConfigSnapshot?
@@ -287,6 +296,10 @@ struct RunReport: Identifiable, Equatable, Sendable {
     /// 刚才那次操作的回执。用 `post` / `clearNotice` 改，别直接赋值。
     private(set) var notice: (ok: Bool, text: String)?
     private(set) var busy = false
+    /// 刚改完的那项设置（底部「已保存 · 撤销」）。
+    private(set) var saved: SavedChange?
+    /// 正在写的设置的新值（见 `pendingValue`）。
+    private var pending: [String: JSONValue] = [:]
 
     var upstream: UpstreamStatus? { upstreamStatus }
     private(set) var upstreamStatus: UpstreamStatus?
@@ -311,6 +324,9 @@ struct RunReport: Identifiable, Equatable, Sendable {
     @ObservationIgnored private var lockPoll: Task<Void, Never>?
     @ObservationIgnored private var noticeTimer: Task<Void, Never>?
     @ObservationIgnored private var reportTimer: Task<Void, Never>?
+    @ObservationIgnored private var savedTimer: Task<Void, Never>?
+    @ObservationIgnored private var writeChain: Task<Void, Never>?
+    @ObservationIgnored private var queuedWrites = 0
     /// 上一次读到的那一场（phase、起止时间、status）；nil 表示这个环境还没读过。
     @ObservationIgnored private var seenRunKey: String?
     /// 这之前就结束的场次不报。切环境时重置。
@@ -498,8 +514,85 @@ struct RunReport: Identifiable, Equatable, Sendable {
         await loadTodayPlan()
     }
 
-    func setConfig(_ key: String, _ value: JSONValue) async {
-        await perform(["config", "set", key, value.jsonText])
+    // MARK: 设置：即时生效 + 撤销
+
+    /// 改一项设置，马上写（`config set` / `schedule set|enable|disable` / `defaults set`）。
+    /// 写成功后底部出「已保存 · 撤销」，`undo` 是把旧值写回去的那条命令（nil = 不给撤销）。
+    /// `pendingKey`：写完、重读之前界面先显示 `pendingValue`，开关不会先弹回去再跳过来。
+    /// 几次改动排队一个个写，不同时写 `config.json`；排队的都写完才重读一次。
+    func change(_ args: [String], undo: [String]?, pendingKey: String? = nil, pendingValue: JSONValue? = nil) async {
+        guard !readOnly else {
+            post(false, schemaProblem ?? "只读")
+            return
+        }
+        if let pendingKey, let pendingValue { pending[pendingKey] = pendingValue }
+        await enqueueWrite(args, undo: undo, undone: false)
+        if let pendingKey, pending[pendingKey] == pendingValue { pending[pendingKey] = nil }
+    }
+
+    /// 点了「撤销」：用旧值再写一次。撤销本身不能再撤销。
+    func undoSaved() async {
+        guard let undo = saved?.undo else { return }
+        dismissSaved()
+        await enqueueWrite(undo, undo: nil, undone: true)
+    }
+
+    func dismissSaved() {
+        savedTimer?.cancel()
+        savedTimer = nil
+        saved = nil
+    }
+
+    /// 写到一半、还没重读时界面上先显示的值。键：`config.<键>`、`schedule.<场>.enabled`、`defaults.stage`、`defaults.task.<名>`。
+    func pendingValue(_ key: String) -> JSONValue? { pending[key] }
+
+    /// 这一项现在的值：正在写的 → `config get` 读到的 → 默认。
+    func configValue(_ field: ConfigField) -> JSONValue {
+        pending["config.\(field.key)"] ?? config?.values[field.key] ?? field.default ?? .null
+    }
+
+    func configField(_ key: String) -> ConfigField? {
+        config?.fields.first { $0.key == key }
+    }
+
+    private func enqueueWrite(_ args: [String], undo: [String]?, undone: Bool) async {
+        let previous = writeChain
+        queuedWrites += 1
+        let task = Task { [weak self] in
+            await previous?.value
+            await self?.write(args, undo: undo, undone: undone)
+        }
+        writeChain = task
+        await task.value
+    }
+
+    private func write(_ args: [String], undo: [String]?, undone: Bool) async {
+        clearNotice()
+        do {
+            let receipt = try await RemoteBridge.run(args)
+            if receipt.ok {
+                AppLog.shared.add(true, receipt.message)
+                showSaved(SavedChange(text: undone ? "已撤销" : "已保存", undo: undo))
+            } else {
+                dismissSaved()
+                post(false, receipt.message)
+            }
+        } catch {
+            dismissSaved()
+            post(false, error.localizedDescription)
+        }
+        queuedWrites -= 1
+        if queuedWrites == 0 { await reload() }
+    }
+
+    private func showSaved(_ change: SavedChange) {
+        savedTimer?.cancel()
+        saved = change
+        savedTimer = Task { [weak self] in
+            try? await Task.sleep(for: Self.savedLifetime)
+            guard !Task.isCancelled else { return }
+            self?.saved = nil
+        }
     }
 
     // MARK: 监听
@@ -585,6 +678,8 @@ struct RunReport: Identifiable, Equatable, Sendable {
         lockHolder = nil
         loadError = nil
         dismissReport()
+        dismissSaved()
+        pending = [:]
         seenRunKey = nil
         watchingSince = Date()
         homeGeneration += 1

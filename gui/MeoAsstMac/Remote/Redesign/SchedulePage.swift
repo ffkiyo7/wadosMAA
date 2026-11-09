@@ -2,7 +2,7 @@
 //  SchedulePage.swift
 //  Wado's MAA
 //
-//  日程与默认：早场 / 晚场（时间 + 到点自动开始）、默认关卡、每次要做的事。每项改了就写（走 maa_action）。
+//  日程与默认：早场 / 晚场（时间 + 到点自动开始）、默认关卡、每次要做的事。每项改了就写（走 maa_action），写完可撤销。
 //  cron 原文和「对齐」在设置页的开发者区（`DeveloperSection`）。
 //
 
@@ -42,7 +42,7 @@ struct SchedulePage: View {
                     }
                 }
                 .frame(maxWidth: 640, alignment: .leading)
-                .disabled(store.busy || store.readOnly)
+                .disabled(store.readOnly)
             }
             .padding(.horizontal, 28)
             .padding(.top, 22)
@@ -52,11 +52,17 @@ struct SchedulePage: View {
     }
 
     private var stageMenu: some View {
-        let current = store.defaults?.stage ?? ""
+        let current = store.pendingValue("defaults.stage")?.string ?? store.defaults?.stage ?? ""
         return Menu {
             ForEach((data.choices?.choices ?? []).filter { !$0.stage.isEmpty }, id: \.self) { choice in
                 Button(choice.label) {
-                    Task { await store.perform(["defaults", "set", "stage", choice.stage]) }
+                    guard choice.stage != current else { return }
+                    Task {
+                        await store.change(
+                            ["defaults", "set", "stage", choice.stage],
+                            undo: ["defaults", "set", "stage", current],
+                            pendingKey: "defaults.stage", pendingValue: .string(choice.stage))
+                    }
                 }
             }
         } label: {
@@ -67,17 +73,26 @@ struct SchedulePage: View {
     }
 
     private func taskBinding(_ key: String) -> Binding<Bool> {
-        Binding(
-            get: { store.defaults?.tasks?[key] ?? true },
-            set: { value in Task { await store.perform(["defaults", "set", "task", key, value ? "on" : "off"]) } })
+        let id = "defaults.task.\(key)"
+        return Binding(
+            get: { store.pendingValue(id)?.bool ?? store.defaults?.tasks?[key] ?? true },
+            set: { value in
+                Task {
+                    await store.change(
+                        ["defaults", "set", "task", key, value ? "on" : "off"],
+                        undo: ["defaults", "set", "task", key, value ? "off" : "on"],
+                        pendingKey: id, pendingValue: .bool(value))
+                }
+            })
     }
 }
 
-/// 早场或晚场：时间（改了出「保存」）+ 到点自动开始。
+/// 早场或晚场：时间（停手 1 秒后写）+ 到点自动开始。
 struct SessionRow: View {
     @Environment(RemoteStore.self) private var store
     let phase: String
     @State private var draft = Date()
+    @State private var commitTask: Task<Void, Never>?
 
     private var session: ScheduleReport.Session? { store.schedule?.sessions[phase] }
     private var title: String { phase == "am" ? "早场" : "晚场" }
@@ -86,19 +101,23 @@ struct SessionRow: View {
     var body: some View {
         FormRow(title: title, help: "可选 \(window)（北京时间）") {
             if let session {
-                if RunLock.beijingClock(draft) != session.time {
-                    Button("保存") { Task { await store.perform(["schedule", "set", phase, RunLock.beijingClock(draft)]) } }
-                        .buttonStyle(WMButtonStyle(kind: .accent))
-                }
                 DatePicker("开始时间", selection: $draft, displayedComponents: .hourAndMinute)
                     .labelsHidden()
                     .environment(\.timeZone, RunLock.beijing)
                     .help("开始时间（北京时间）")
+                    .onChange(of: draft) { scheduleTimeCommit(old: session.time) }
                 Toggle(
                     "到点自动开始",
                     isOn: Binding(
-                        get: { session.enabled },
-                        set: { value in Task { await store.perform(["schedule", value ? "enable" : "disable", phase]) } })
+                        get: { store.pendingValue(enabledKey)?.bool ?? session.enabled },
+                        set: { value in
+                            Task {
+                                await store.change(
+                                    ["schedule", value ? "enable" : "disable", phase],
+                                    undo: ["schedule", value ? "disable" : "enable", phase],
+                                    pendingKey: enabledKey, pendingValue: .bool(value))
+                            }
+                        })
                 )
                 .toggleStyle(.switch)
                 .font(.system(size: 12))
@@ -108,7 +127,26 @@ struct SessionRow: View {
             }
         }
         .onChange(of: session?.time, initial: true) { _, time in
-            if let time, let date = Beijing.today(at: time) { draft = date }
+            if let time { reset(to: time) }
+        }
+    }
+
+    private var enabledKey: String { "schedule.\(phase).enabled" }
+
+    private func reset(to time: String) {
+        if let date = Beijing.today(at: time), RunLock.beijingClock(date) != RunLock.beijingClock(draft) { draft = date }
+    }
+
+    /// 时间是一位一位敲的：停手 1 秒再写，不然敲到一半（例如 0 点几分）就写进去了。写失败（超出可选范围）就退回原来的时间。
+    private func scheduleTimeCommit(old: String) {
+        commitTask?.cancel()
+        let time = RunLock.beijingClock(draft)
+        guard time != old else { return }
+        commitTask = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            await store.change(["schedule", "set", phase, time], undo: ["schedule", "set", phase, old])
+            if let current = store.schedule?.sessions[phase]?.time { reset(to: current) }
         }
     }
 }
