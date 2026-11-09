@@ -184,6 +184,8 @@ class Config(TypedDict, total=False):
     maa_disable_proxy: bool
     connect_retry_limit: int
     connect_retry_delay: int
+    offline_retry_limit: int
+    offline_retry_delays: list[int]
     maa_run_timeout: int
     cleanup_verify_timeout: int
     home_screenshot_delay: int
@@ -322,6 +324,7 @@ class LastRun(TypedDict, total=False):
     proxy_failure_batches: int
     proxy_failure_sanity_refunded: int
     connect_retries: int
+    offline_retries: int
     inventory_error: str | None
     thread_id: str | None
     threads: list[LastRunThread]
@@ -355,7 +358,7 @@ RUN_SCOPED_LAST_RUN_KEYS: frozenset[str] = frozenset({
     "screenshot_error", "startup_error", "summary", "skip_reason", "game_probe",
     "emulator_probe", "home_verified", "home_verify_detail", "cleanup_errors",
     "proxy_failure_batches", "proxy_failure_sanity_refunded", "connect_retries",
-    "inventory_error", "thread_id",
+    "offline_retries", "inventory_error", "thread_id",
 })
 
 

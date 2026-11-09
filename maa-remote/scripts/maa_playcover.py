@@ -405,6 +405,22 @@ def launch_game(config: Config) -> None:
     raise RuntimeError(f"无法启动明日方舟：{last[-200:]}")
 
 
+def restart_game(config: Config) -> list[str]:
+    """关掉游戏再拉起来，等 MaaTools 就绪。返回告警（空 = 顺利）；拉不起来照常抛。
+
+    重启的**唯一**实现：窗口救不回来（`settle_game_window()` 第 3 级）和游戏没登录上
+    （`maa_daily.run_maa_resilient()`）都走这里。只能在一个键都没点过的时候用。
+    窗口摆位交给调用方（`settle_game_window()`）。
+    """
+    warnings: list[str] = []
+    cleanup = close_game(config)
+    if cleanup:
+        warnings.append("重启游戏时没关干净：" + "；".join(cleanup))
+    launch_game(config)
+    wait_for_game(config)
+    return warnings
+
+
 def wait_for_game(config: Config) -> None:
     timeout = max(5, int(config.get("game_launch_timeout", 120)))
     deadline = time.monotonic() + timeout
@@ -664,9 +680,9 @@ def settle_game_window(
     2. **切走再切回**：游戏**已经是前台**还被收进侧边栏时（2026-11-08 早场），再激活
        什么也不会发生。先 `front_finder()`，再激活游戏——spike 证实游戏不在前台时任何
        激活都能把它请回来。这一级是推断，那种状态没能真机复现。
-    3. **重启游戏**（只在 `allow_restart` 时）：`close_game()` → `launch_game()` →
-       `wait_for_game()`，窗口恢复让它开回 MAA-Game（spike 实测约 36 秒）。只能在
-       一个键都没点过的时候用：开跑前、连接失败重开前。
+    3. **重启游戏**（只在 `allow_restart` 时）：`restart_game()`（关 → 开 → 等 MaaTools），
+       窗口恢复让它开回 MAA-Game（spike 实测约 36 秒）。只能在一个键都没点过的时候用：
+       开跑前、连接失败重开前。
 
     每一级之后窗口一回到屏上就**马上**再挪一次虚拟屏：激活后它多半回到当前活动的那块屏，
     一点别的窗口就又被收走（2026-11-05 晚场连续 7 次都这样）。AX `kAXRaiseAction`
@@ -725,11 +741,7 @@ def settle_game_window(
             return " ".join(warnings)
 
         if allow_restart:
-            cleanup = close_game(config)
-            if cleanup:
-                warnings.append("重启游戏时没关干净：" + "；".join(cleanup))
-            launch_game(config)
-            wait_for_game(config)
+            warnings.extend(restart_game(config))
             window = game_window(config)
             if window and not window_shelved(window):
                 window = move(window)

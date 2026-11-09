@@ -116,6 +116,8 @@ FIELDS: tuple[Field, ...] = (
     _f("update_wait_minutes", "运行环境", "日常等上游更新跑完的上限（分钟）", "int", 15, 0, 30,
        "从一场日常的上限里扣"),
     _f("connect_retry_limit", "运行环境", "连接阶段崩溃重开次数", "int", 2, 0, 5),
+    _f("offline_retry_limit", "运行环境", "没登录上时重启游戏次数", "int", 2, 0, 5,
+       "游戏弹「获取网络配置失败」时等一会儿、重启游戏、整场重跑"),
     _f("retention_days", "运行环境", "本地日志 / 截图保留天数", "int", 14, 1, 90),
     _f("resource_update_timeout", "运行环境", "资源更新超时（秒）", "int", 300, 60, 1800),
     _f("maa_cli_update_timeout", "运行环境", "maa-cli 升级超时（秒）", "int", 180, 60, 1800),

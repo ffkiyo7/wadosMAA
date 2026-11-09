@@ -580,6 +580,21 @@ class SettleTests(unittest.TestCase):
         self.assertIn("照常开跑", warning)
         self.assertIn("出错 RuntimeError", trail[-1])
 
+    def test_there_is_exactly_one_restart_implementation(self) -> None:
+        # 窗口救不回来和游戏没登录上（maa_daily）共用 restart_game()，不许各写一份
+        # 「关 → 开 → 等」。
+        import inspect
+
+        import maa_daily
+
+        self.assertIn("restart_game(config)", inspect.getsource(maa_playcover.settle_game_window))
+        for source in (
+            inspect.getsource(maa_playcover.settle_game_window),
+            inspect.getsource(maa_daily.run_maa_resilient),
+        ):
+            self.assertNotIn("close_game(", source)
+        self.assertIn("restart_game(config)", inspect.getsource(maa_daily.run_maa_resilient))
+
     def test_a_usable_window_needs_no_trail_beyond_the_first_look(self) -> None:
         trail: list[str] = []
         self._settle(_win(True), trail=trail)

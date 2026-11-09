@@ -126,7 +126,8 @@ winmove 要调用方有**辅助功能**权限，线上是 Hermes gateway 那个 
 2. 切走再切回：`front_finder()` 用 `winmove --front <访达 pid>` 把访达设成前台，再激活游戏。
    不用 `open -b com.apple.finder`，因为访达没窗口时它会新开一个，可能正好开在 MAA-Game 上。
    这一级是从 spike 推断的，没有实测；
-3. 重启游戏（`allow_restart=True` 才做）：`close_game()` → `launch_game()` → `wait_for_game()`。
+3. 重启游戏（`allow_restart=True` 才做）：`restart_game()`（`close_game()` → `launch_game()` →
+   `wait_for_game()`，全库**只有这一份**，没登录上的重开也用它）。
    只在一个键都没点过的时候放行：开跑前，以及 `run_maa_resilient()` 重开前。
 
 `trail` 参数收集每一步做了什么、窗口变成什么样（`摆窗：<步骤> → <尺寸 @ 位置 状态>（耗时）`），
@@ -143,6 +144,17 @@ winmove 要调用方有**辅助功能**权限，线上是 Hermes gateway 那个 
    `never_saw_the_game()` 白名单里的行（截图失败、任务起止、收尾汇总、`SCREENCAP_SETTLE_NOTE`），
    说明一帧画面都没拿到，这句话就不算跑过。放弃重开时说明里带 `CONNECT_GAVE_UP`，
    `execute()` 据此跳过补跑（熔断补跑、后备关补跑都跳），只记一句 `SCREEN_LOST_SKIP_NOTE`。
+
+**游戏没登录上**（2026-11-09 早场，`PLAN_GAME_OFFLINE.md`）是另一类，窗口和截图都正常：
+游戏一开就弹「获取网络配置失败，请重新登录」，maa-cli 每认出一次弹窗打一行 `GameOffline`。
+MaaCore 的 StartUp 点确认 6 次仍报 Completed，其余任务撞上弹窗就 `Stop`（Mall / Award 照样报
+Completed）。点确认不会让游戏重新拉配置，只有重启进程才会。`never_logged_in()` 三条都满足
+（StartUp 段撞过弹窗、紧接着的那条任务链也撞上、日志里没有任何作战 / 掉落 / 基建 / 公招进展）时，
+`run_maa_resilient()` 等 `offline_retry_delays`（默认 120s、300s）→ 写一行 `conf_probe()` 连通性
+探测 → `restart_game()` → 摆窗 → 整场重跑，默认最多 `offline_retry_limit` 2 次。死掉那一趟的输出
+**不交给战报**（只留我们自己的说明，现场在日志文件里）。放弃时说明里带 `OFFLINE_GAVE_UP`，补跑跳过
+（`OFFLINE_SKIP_NOTE`）。战报里撞上 `GameOffline` 的任务一律「❌ 未完成（游戏掉线）」
+（`offline_tasks()`，流式段按顺序和汇总的 `[名字]` 配对）；登录后才掉线的不重开，只如实报红。
 
 **没用 MacSCK**：MaaCore 的 `config = "MacSCK"`（ScreenCaptureKit 截图）在 maa-cli 里会撞
 `CGS_REQUIRE_INIT` 断言（进程没初始化 CoreGraphics 会话就调 SCK），要 DYLD 注入一个先调
@@ -1179,6 +1191,7 @@ result = normalize_plan(result)             ← 再规范化一次
 | `game_launch_timeout` / `game_quit_timeout` | `120` / `30` | 等 MaaTools 就绪 / 等 `TERM` 后进程退出的秒数，后者超时才 `pkill` |
 | `maa_run_timeout` | `3000`（50 分钟） | 为 Hermes 外层 1 小时上限预留清理时间 |
 | `connect_retry_limit` | `2` | 连接阶段崩溃的重开次数，共用同一个超时预算 |
+| `offline_retry_limit` / `offline_retry_delays` | `2` / `[120, 300]` | 游戏没登录上（「获取网络配置失败」）时重启游戏整场重跑的次数，和第 n 次重启前等几秒（不够长时用最后一个值补）。共用同一个超时预算 |
 | `medicine_expire_days` | `2` | 只吃这个窗口内即将过期的理智药 |
 | `game_probe_timeout` | `5` | 开游戏前那次「你是不是在玩」探测的总预算（秒）；设 `0` 关闭探测 |
 | `maa_activity_cache` | 不在种子里 | 覆盖 `StageActivityV2.json` 的路径（默认 `~/Library/Caches/com.loong.maa/StageActivityV2.json`），只用于卡片上的「活动截止」 |
@@ -1477,6 +1490,7 @@ cron 表达式是 **UTC**（`config.yaml: timezone: Etc/UTC`），所以 Depot �
 | 58 | **状态文件读时校验 `schema_version`、写时带上**（§6.1）：缺字段视作 1；会驱动动作的 `config` / `plan` / `manual_run` 读到未知更高版本**拒跑**，只用于汇报的 `last_run` 告警后宽读。读 `config` / `plan` / `manual_run` / `last_run` 的每个地方都过 `check_schema()`，不许直接拿 `load_json()` 的结果用。`config.json` 的版本号随种子走，迁移只在 `deploy_state()`，`schema_version` 不得进 `PRESERVED_RUNTIME_CACHE_KEYS` | `maa_common.check_schema()` / `*_SCHEMA_VERSION` + `deploy.migrate_live_config()` / `CONFIG_MIGRATIONS` + `tests/test_state_schema.py` |
 | 59 | **主页入口永不切界面主题，纯源石兑换弹窗只点 ✗**：用户资源层 9 个 `<入口>-Entry` 的 `onErrorNext` 不得含 `SwitchTheme`；`OriginiteExchangeCancel` 的 `specificRect` 必须整个落在弹窗左半边（x ≤ 940，✓ 从 958 起）；`<入口>Sanrio` 必须带 `rectMove` 把点击收进模板中间、离边至少 1/5（终端离上沿 ≥ 25px） | `config/maa-cli/resource/tasks/tasks.json` + `test_sanrio_theme_entries_never_switch_theme_and_ship_their_templates` / `test_originite_exchange_popup_is_only_ever_cancelled` |
 | 60 | **上游更新只有一份，在 `maa_upstream.py`**：07:50 早场卡和 Wado's MAA 共用 `run_update()`；全库只有这个文件会调 `maa update` / `maa hot-update` / `brew upgrade`。**更新期间持有 `run.lock`**（持有者 `update`）。开跑前（自动场和手动场都算）离线调 `hard_block()`，只在两种情况下拒跑：`cli.toml` 的钉住项被改；上次更新换了 Core 却没让 MaaResource 跟上，或者半路断了。不新鲜、检查失败、maa-cli 那步失败**都不挡跑**（spike §6(c) 方案 B）。开发副本（`HERMES_HOME` ≠ `~/.hermes`）只检查、不更新 | `maa_upstream.run_update()` / `hard_block()` / `update_gate()` + `maa_daily.execute()` + `tests/test_upstream.py`（`SingleImplementationTests` 用 grep 守「只有一份」） |
+| 61 | **掉线后的自动重启只在「从没登录上」时做**（`never_logged_in()` 三条全满足：StartUp 段撞过 `GameOffline`、紧接着的那条任务链也撞上、日志里没有任何作战批次 / 掉落 / 基建 / 公招进展）；登录之后才掉线的不重启、不整场重跑，只如实报红。撞上 `GameOffline` 的任务**不得判成完成**，哪怕 MaaCore 报了 Completed。死掉那一趟的输出不交给战报。重开共用 `maa_run_timeout` 预算；重启只有 `maa_playcover.restart_game()` 一份 | `maa_daily.never_logged_in()` / `offline_tasks()` / `run_maa_resilient()` + `GameOfflineTests` / `OfflineRetryTests` / `OfflineExecuteTests` + `test_playcover.SettleTests.test_there_is_exactly_one_restart_implementation` |
 
 ---
 
@@ -1693,6 +1707,7 @@ action 一律钉 commit SHA（行尾注释写 tag），升级时 SHA 和注释�
 | 场次不到 1 秒就 `return_code=1`，`runs/` 里连 `.log` 都没生成 | 失败发生在 `require_executable()`，比 `launch_game()` 还早 → `ls -l` 一下 `config.json` 的 `maa_bin`；或 `verify_game_installed()` 拒了（PlayCover 里 MaaTools 被关掉 / 端口改了） |
 | 频道有开跑消息，子区进度不动 | `runs/<date>-<phase>.log` 尾部；多半卡在客户端更新/登录页，50 分钟后会以 124 终止并告警 |
 | 场次很快就红，日志里一串 `ScreencapFailed` / `ConnectFailed` | 游戏窗口不在台前（被挤进台前调度侧边栏、被最小化、MAA-Game 虚拟屏没了）或 MaaTools 没开 → §0.5。`BetterDisplay get -nameLike=MAA -connected` 看虚拟屏在不在；看 `last_run.connect_retries` 确认重试有没有接上。日志里「摆回台前」那行的 `[窗口 …；屏：…]` 写着窗口当时在哪、是不是侧边栏缩略图（§0.5） |
+| 场次很快就红，日志里一串 `GameOffline`，截图停在「获取网络配置失败，请重新登录」 | 游戏没登录上（§0.5 末尾）。看 `last_run.offline_retries` 和日志里的「连通性探测」行；`~/Library/Application Support/sparkle/logs/core-<日期>.log` 里看游戏连 `game-config` / `ak-conf` / `as.hypergryph.com` 走的哪条线、有没有报错（正常登录会连到 `as`）。重启到底都没恢复多半是鹰角那头的短时故障，稍后手动跑一场 |
 | 战报 ❌ 但任务都是 ✅ | `cleanup_errors` 非空也会判失败——看 Embed 备注栏和 `last_run.cleanup_errors` |
 | 点按钮/下拉没反应或报未登记 | 卡片过期（07:50 与 21:50 各清一次 `hermes:btn:maa:` 前缀并重写，所以 21:50 之后早场卡必然点不动）；或 gateway 没重启；或 `buttons.json` 被别的写入方覆盖 |
 | 早场改的关晚上也生效了 / 改一场把另一场也改了 | 看 `plan.json` 的 `sessions`：是不是被写成了旧的顶层 `stage`。写路径只有 `maa_action._save_override(phase, …)` 和 `maa_plan_card.apply_auto_stage(result, phase)` 两处 |

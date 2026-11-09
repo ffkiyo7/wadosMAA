@@ -16,6 +16,8 @@
   "maa_disable_proxy": true,
   "connect_retry_limit": 2,
   "connect_retry_delay": 8,
+  "offline_retry_limit": 2,
+  "offline_retry_delays": [120, 300],
   "maa_run_timeout": 3000,
   "cleanup_verify_timeout": 10,
   "home_screenshot_delay": 1,

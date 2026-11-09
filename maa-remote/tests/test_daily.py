@@ -13,10 +13,11 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -605,7 +606,8 @@ class ConnectRetryTests(unittest.TestCase):
                 )
             self.runner, self.settle, self.wait = runner, settle, wait
             self.log_text = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
-        return result
+        self.offline_retries = result[4]
+        return result[:4]
 
     def test_a_connect_crash_is_retried_and_the_second_attempt_stands(self) -> None:
         code, out, err, retries = self._resilient(
@@ -696,6 +698,316 @@ class ConnectRetryTests(unittest.TestCase):
         )
         carried = self.runner.call_args_list[1].kwargs["carry_lines"]
         self.assertIn("TouchModeNotAvailable", carried)
+
+
+# 2026-11-09 早场原样：游戏一开就弹「获取网络配置失败，请重新登录」，StartUp 点确认 6 次
+# 仍报 Completed，之后每条任务撞弹窗就停，信用商店 / 领取奖励照样 Completed。
+OFFLINE_LOG = [
+    "Updating hot update files...",
+    "Hot update completed successfully",
+    "Detected connection with PlayTools",
+    "Using platform diff resource: iOS",
+    "Game is already running!",
+    "StartUp Start",
+    *["GameOffline"] * 7,
+    "StartUp Completed",
+    "Fight Start",
+    "GameOffline",
+    "Fight Error",
+    "Infrast Start",
+    "GameOffline",
+    "GameOffline",
+    "Infrast Error",
+    "Recruit Start",
+    *["GameOffline"] * 4,
+    "Recruit Error",
+    "Mall Start",
+    "GameOffline",
+    "GameOffline",
+    "Mall Completed",
+    "Award Start",
+    *["GameOffline"] * 5,
+    "Award Completed",
+    "Custom Start",
+    "Custom Error",
+    "AllTasksCompleted",
+    "Summary",
+    "----------------------------------------",
+    "Error: Some error occurred during running task!",
+    "[启动国服] 08:01:10 - 08:01:45 (35s) Completed",
+    "----------------------------------------",
+    "[刷理智] 08:01:45 - 08:02:06 (20s) Error",
+    "----------------------------------------",
+    "[基建换班] 08:02:07 - 08:02:14 (7s) Error",
+    "----------------------------------------",
+    "[公开招募] 08:02:15 - 08:02:28 (12s) Error",
+    "----------------------------------------",
+    "[信用商店] 08:02:29 - 08:02:34 (4s) Completed",
+    "----------------------------------------",
+    "[领取奖励] 08:02:34 - 08:02:44 (9s) Completed",
+    "----------------------------------------",
+    "[返回主界面] 08:02:44 - 08:02:59 (14s) Error",
+]
+OFFLINE_FALLBACK_LOG = [
+    "Game is already running!",
+    "StartUp Start",
+    *["GameOffline"] * 7,
+    "StartUp Completed",
+    "Fight Start",
+    "GameOffline",
+    "Fight Error",
+    "Custom Start",
+    "Custom Error",
+    "AllTasksCompleted",
+    "Summary",
+    "----------------------------------------",
+    "Error: Some error occurred during running task!",
+    "[启动国服] 08:03:02 - 08:03:30 (28s) Completed",
+    "----------------------------------------",
+    "[刷理智·续] 08:03:31 - 08:03:52 (21s) Error",
+    "----------------------------------------",
+    "[返回主界面] 08:03:53 - 08:04:09 (15s) Error",
+]
+HEALTHY_LOG = [
+    "StartUp Start",
+    "StartUp Completed",
+    "Fight Start",
+    "Fight TL-7 2 times, drops:",
+    "Fight Completed",
+    "Mall Start",
+    "Mall Completed",
+    "Custom Start",
+    "Custom Completed",
+    "Summary",
+    "[启动国服] 08:31:10 - 08:31:45 (35s) Completed",
+    "[刷理智] 08:31:45 - 08:36:06 (4m 21s) Completed",
+    "[信用商店] 08:36:29 - 08:36:34 (5s) Completed",
+    "[返回主界面] 08:36:44 - 08:36:59 (15s) Completed",
+]
+
+
+class GameOfflineTests(unittest.TestCase):
+    def test_the_2026_11_09_morning_never_logged_in(self) -> None:
+        self.assertTrue(maa_daily.never_logged_in(OFFLINE_LOG))
+        self.assertTrue(maa_daily.never_logged_in(OFFLINE_FALLBACK_LOG))
+        # 它不是连接失败：MaaTools 连着、截图也有。
+        self.assertEqual(maa_daily.connect_failed(OFFLINE_LOG, 1), "")
+
+    def test_a_reconnect_that_worked_is_not_never_logged_in(self) -> None:
+        # StartUp 撞过弹窗、点确认后登录上了，后面的任务正常跑 → 不重开。
+        lines = ["StartUp Start", "GameOffline", "StartUp Completed", "Fight Start", "Fight Completed"]
+        self.assertFalse(maa_daily.never_logged_in(lines))
+
+    def test_offline_after_real_progress_is_never_a_restart(self) -> None:
+        # 安全闸门：哪怕两段都撞上弹窗，只要日志里有一批作战就不整场重跑。
+        lines = ["StartUp Start", "GameOffline", "StartUp Completed", "Fight Start",
+                 "Fight TL-7 1 times, drops:", "GameOffline", "Fight Error"]
+        self.assertFalse(maa_daily.never_logged_in(lines))
+        for extra in ("EnterFacility Mfg 1", "Recruited 2 times", "RecruitTagsRefreshed: 1 times"):
+            with self.subTest(extra=extra):
+                self.assertFalse(maa_daily.never_logged_in(OFFLINE_LOG[:20] + [extra] + OFFLINE_LOG[20:]))
+
+    def test_offline_mid_run_only_turns_that_task_red(self) -> None:
+        lines = ["StartUp Start", "StartUp Completed", "Mall Start", "GameOffline", "Mall Completed",
+                 "Summary", "[启动国服] 08:01:10 - 08:01:45 (35s) Completed",
+                 "[信用商店] 08:02:29 - 08:02:34 (4s) Completed"]
+        self.assertFalse(maa_daily.never_logged_in(lines))
+        self.assertEqual(maa_daily.offline_tasks(lines), {"Mall"})
+
+    def test_offline_tasks_pair_fight_blocks_with_the_summary(self) -> None:
+        self.assertEqual(maa_daily.offline_tasks(OFFLINE_FALLBACK_LOG), {"Fight2"})
+        self.assertEqual(
+            maa_daily.offline_tasks(OFFLINE_LOG), {"Fight", "Infrast", "Recruit", "Mall", "Award"}
+        )
+
+    def test_without_a_summary_only_unambiguous_tasks_are_named(self) -> None:
+        lines = [line for line in OFFLINE_LOG if not line.startswith("[")]
+        self.assertEqual(maa_daily.offline_tasks(lines), {"Infrast", "Recruit", "Mall", "Award"})
+
+    def test_the_summary_no_longer_reports_fake_completions(self) -> None:
+        plan = maa_common.normalize_plan({"stage": "TL-7"})
+        summary = maa_daily.extract_summary(OFFLINE_LOG, [], plan=plan, ok=False)
+        self.assertIn("🚀 登录与首登领取：❌ 未完成（没登录上，获取网络配置失败）", summary)
+        self.assertIn("🛒 信用商店：❌ 未完成（游戏掉线）", summary)
+        self.assertIn("🎁 领取奖励：❌ 未完成（游戏掉线）", summary)
+        self.assertNotIn("✅ 完成", summary)
+        progress = maa_daily.progress_content(OFFLINE_LOG, plan=plan, final="❌ 结束")
+        self.assertIn("❌ 🛒 信用商店：未完成（游戏掉线）", progress)
+        self.assertNotIn("✅", progress.split("\n", 1)[1])
+
+    def test_a_healthy_run_is_untouched(self) -> None:
+        self.assertFalse(maa_daily.never_logged_in(HEALTHY_LOG))
+        self.assertEqual(maa_daily.offline_tasks(HEALTHY_LOG), set())
+
+    def test_retry_delays_fall_back_and_extend(self) -> None:
+        self.assertEqual(maa_daily.offline_retry_delays({}), [120, 300])
+        for bad in ("120", [], ["x"], [True]):
+            with self.subTest(bad=bad):
+                self.assertEqual(
+                    maa_daily.offline_retry_delays(cast(maa_common.Config, {"offline_retry_delays": bad})),
+                    [120, 300],
+                )
+        self.assertEqual(
+            maa_daily.offline_retry_delays(cast(maa_common.Config, {"offline_retry_delays": [30, -5]})),
+            [30, 0],
+        )
+
+    def test_the_report_note_says_what_happened(self) -> None:
+        def note(**kwargs: Any) -> str:
+            payload = maa_daily.report_payload(
+                ok=False, phase="am", plan=maa_common.normalize_plan({"stage": "TL-7"}),
+                duration=900, summary="", screenshot_ok=True, screenshot_error="",
+                cleanup_errors=[], home_verified=True, **kwargs,
+            )
+            return next(f for f in payload["embeds"][0]["fields"] if f["name"] == "备注")["value"]
+
+        self.assertIn("重启游戏 1 次后登录成功", note(offline_retries=1))
+        self.assertIn("重启游戏 2 次都没恢复", note(offline_retries=2, offline_gave_up=True))
+
+    def test_the_probe_never_raises(self) -> None:
+        with patch.object(urllib.request.OpenerDirector, "open", side_effect=OSError("no route")):
+            self.assertIn("连不上（OSError", maa_daily.conf_probe())
+
+
+class OfflineRetryTests(unittest.TestCase):
+    def _resilient(self, attempts: list[tuple[int, list[str], list[str]]], config: dict[str, Any]):
+        with tempfile.TemporaryDirectory() as raw:
+            log_path = Path(raw) / "run.log"
+            with (
+                patch.object(maa_daily, "run_maa", side_effect=attempts) as runner,
+                patch.object(maa_daily.time, "sleep") as sleep,
+                patch.object(maa_daily, "conf_probe", return_value="连通性探测：桩") as probe,
+                patch.object(maa_playcover, "restart_game", return_value=[]) as restart,
+                patch.object(maa_playcover, "settle_game_window", return_value="") as settle,
+                patch.object(maa_playcover, "wait_for_game"),
+            ):
+                result = maa_daily.run_maa_resilient(
+                    cast(maa_common.Config, {"maa_run_timeout": 3000, **config}),
+                    log_path, "token", "1", "2",
+                    maa_common.normalize_plan({"stage": "TL-7"}),
+                )
+            self.runner, self.sleep, self.probe = runner, sleep, probe
+            self.restart, self.settle = restart, settle
+            self.log_text = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+        return result
+
+    def test_restart_then_the_second_attempt_alone_stands(self) -> None:
+        code, out, err, retries, offline = self._resilient(
+            [(1, OFFLINE_LOG, []), (0, HEALTHY_LOG, [])], {}
+        )
+        self.assertEqual((code, retries, offline), (0, 0, 1))
+        # 死掉那一趟的输出不交回去：它的「[信用商店] … Completed」是假的。
+        self.assertEqual(out, HEALTHY_LOG)
+        self.assertNotIn("GameOffline", err)
+        self.assertIn("重跑第 1 趟", "".join(err))
+        self.sleep.assert_called_once_with(120)
+        self.restart.assert_called_once()
+        # 重启后摆窗，但摆窗自己不再重启一次。
+        self.assertFalse(self.settle.call_args.kwargs.get("allow_restart", False))
+        self.probe.assert_called_once()
+        self.assertIn("连通性探测：桩", self.log_text)
+        self.assertTrue(self.runner.call_args_list[1].kwargs["append"])
+        # 下一趟的进度消息不能带着上一趟的假 Completed。
+        self.assertNotIn("Mall Completed", self.runner.call_args_list[1].kwargs["carry_lines"])
+
+    def test_gives_up_at_the_limit_and_says_so(self) -> None:
+        code, _out, err, _retries, offline = self._resilient([(1, OFFLINE_LOG, [])] * 3, {})
+        self.assertEqual((code, offline), (1, 2))
+        self.assertEqual(self.runner.call_count, 3)
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [120, 300])
+        self.assertIn(f"重启游戏 2 次{maa_daily.OFFLINE_GAVE_UP}", "".join(err))
+
+    def test_the_last_delay_repeats_and_zero_turns_it_off(self) -> None:
+        self._resilient(
+            [(1, OFFLINE_LOG, [])] * 4, {"offline_retry_limit": 3, "offline_retry_delays": [10]}
+        )
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [10, 10, 10])
+        _code, _out, err, _retries, offline = self._resilient(
+            [(1, OFFLINE_LOG, [])], {"offline_retry_limit": 0}
+        )
+        self.assertEqual(offline, 0)
+        self.restart.assert_not_called()
+        self.assertIn(maa_daily.OFFLINE_GAVE_UP, "".join(err))
+
+    def test_no_restart_when_the_budget_cannot_fit_the_wait(self) -> None:
+        _code, _out, err, _retries, offline = self._resilient(
+            # 250 - 等 120 - 重启 90 = 40s，塞不下一趟。
+            [(1, OFFLINE_LOG, [])], {"maa_run_timeout": 250}
+        )
+        self.assertEqual(offline, 0)
+        self.restart.assert_not_called()
+        self.assertIn(maa_daily.OFFLINE_GAVE_UP, "".join(err))
+
+    def test_our_own_return_codes_and_success_are_never_restarted(self) -> None:
+        for code in (0, 124, maa_daily.PROXY_BREAK_CODE, 130):
+            with self.subTest(code=code):
+                self._resilient([(code, OFFLINE_LOG, [])], {})
+                self.restart.assert_not_called()
+
+    def test_a_failed_restart_still_runs_the_next_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, (
+            patch.object(maa_daily, "run_maa", side_effect=[(1, OFFLINE_LOG, []), (0, HEALTHY_LOG, [])])
+        ), patch.object(maa_daily.time, "sleep"), patch.object(
+            maa_daily, "conf_probe", return_value=""
+        ), patch.object(maa_playcover, "restart_game", side_effect=RuntimeError("等 MaaTools 超时")):
+            code, _out, err, _retries, offline = maa_daily.run_maa_resilient(
+                cast(maa_common.Config, {"maa_run_timeout": 3000}), Path(raw) / "run.log",
+                "token", "1", "2",
+            )
+        self.assertEqual((code, offline), (0, 1))
+        self.assertIn("重启游戏失败：等 MaaTools 超时", "".join(err))
+
+
+class OfflineExecuteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        isolate_stage_index(self)
+
+    def test_no_fallback_run_after_giving_up_on_the_login(self) -> None:
+        at = datetime(2026, 11, 9, 8, 0, tzinfo=BEIJING)
+        lock = unittest.mock.MagicMock()
+        lock.__enter__.return_value = True
+        lock.__exit__.return_value = False
+        plan = maa_common.normalize_plan({"stage": "TL-7"})
+        plan["farming_fallback_stage"] = "TL-9"
+        gave_up = [f"游戏没登录上（获取网络配置失败），重启游戏 2 次{maa_daily.OFFLINE_GAVE_UP}。"]
+        with tempfile.TemporaryDirectory() as raw, contextlib.ExitStack() as stack:
+            def stub(target: Any, name: str, **kwargs: Any) -> unittest.mock.MagicMock:
+                return stack.enter_context(patch.object(target, name, **kwargs))
+
+            stub(maa_daily, "RUNS_DIR", new=Path(raw))
+            stub(maa_daily, "now_beijing", return_value=at)
+            stub(maa_daily, "load_config", return_value={"channel_id": "123", "maa_config_dir": raw})
+            stub(maa_daily, "discord_token", return_value="token")
+            stub(maa_daily, "load_json", return_value={})
+            stub(maa_daily, "effective_plan", return_value=plan)
+            stub(maa_daily, "run_lock", return_value=lock)
+            stub(maa_daily, "cleanup_run_files")
+            stub(maa_daily, "atomic_write_json")
+            stub(maa_daily, "atomic_write_text")
+            stub(maa_daily, "should_skip", return_value=False)
+            stub(maa_playcover, "game_is_online", return_value=(False, ""))
+            merge = stub(maa_daily, "merge_last_run")
+            stub(maa_daily, "discord_request", return_value={"id": "9"})
+            stub(maa_daily, "create_thread", return_value={"id": "7"})
+            stub(maa_daily, "require_executable")
+            stub(maa_playcover, "verify_game_installed")
+            stub(maa_playcover, "launch_game")
+            stub(maa_playcover, "wait_for_game")
+            stub(maa_playcover, "settle_game_window", return_value="")
+            stub(maa_daily, "run_maa_resilient", return_value=(1, OFFLINE_LOG, gave_up, 0, 2))
+            fallback = stub(maa_daily, "_fallback_fight_run")
+            stub(maa_daily, "capture_home_screenshot", return_value=(True, "", False, "识别到 0/9 个主页标识"))
+            stub(maa_playcover, "close_game", return_value=[])
+            report = stub(maa_daily, "send_report")
+            code = maa_daily.execute("am")
+        self.assertEqual(code, 1)
+        fallback.assert_not_called()
+        finished = merge.call_args_list[-1].args[0]
+        self.assertEqual(finished["offline_retries"], 2)
+        self.assertIn("没登录上", finished["summary"])
+        embed = report.call_args.args[2]["embeds"][0]
+        notes = next(f for f in embed["fields"] if f["name"] == "备注")["value"]
+        self.assertIn("重启游戏 2 次都没恢复", notes)
 
 
 class ProxyFailureTests(unittest.TestCase):

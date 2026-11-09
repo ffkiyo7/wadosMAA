@@ -9,6 +9,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -164,6 +166,20 @@ SCREENCAP_SETTLE_NOTE = "截图失败，已尝试把游戏窗口摆回台前。"
 # `run_maa_resilient()` 放弃重开时说明里的固定词，调用方据此判断「游戏画面一直拿不到」。
 CONNECT_GAVE_UP = "仍未连上"
 SCREEN_LOST_SKIP_NOTE = "游戏画面一直拿不到，补跑跳过。"
+# maa-cli 认出掉线弹窗（`OfflineConfirm`：「获取网络配置失败，请重新登录」等）时打的行。
+# MaaCore v6.22 起 StartUp 以外的任务撞上它就 `Stop`，被停的任务照样报 Completed；
+# StartUp 点确认 6 次后也报 Completed（2026-11-09 早场）。点确认不会让游戏重新拉网络
+# 配置，只有重启游戏进程才会。
+GAME_OFFLINE_MARKER = "GameOffline"
+# `run_maa_resilient()` 放弃「没登录上」重开时说明里的固定词，调用方据此跳过补跑。
+OFFLINE_GAVE_UP = "仍未登录上"
+OFFLINE_SKIP_NOTE = "游戏一直没登录上，补跑跳过。"
+# 重启游戏本身要的时间（TERM 退出约 30s + 拉起 + 等 MaaTools），算预算时一并扣掉。
+RESTART_ALLOWANCE_SECONDS = 90
+# 重启前的连通性探测：只说明「连得上」，连上了却拿不到配置（11-09 就是这样）照样显示通，
+# 只当排障线索写进运行日志，不当闸门。
+CONF_PROBE_URL = "https://ak-conf.hypergryph.com/"
+CONF_PROBE_TIMEOUT = 5
 # 这几个返回码是本脚本自己写上去的，不是「没连上」——重开一趟只会重复同一件事。
 SELF_ASSIGNED_CODES = (124, PROXY_BREAK_CODE, 130)
 # 进度消息的编辑节流，同时也是熔断的采样间隔——扫一遍全部日志行不便宜，
@@ -831,6 +847,113 @@ def connect_failed(lines: list[str], return_code: int) -> str:
     return ""
 
 
+# maa-cli 流式输出里一条任务链的起止行：`Fight Start` / `Mall Completed` / `Recruit Error`。
+_TASK_EVENT_RE = re.compile(r"(\w+) (Start|Completed|Error|Stopped)")
+# maa-cli 收尾汇总里每条任务链的首行：`[信用商店] 08:02:29 - 08:02:34 (4s) Completed`。
+_SUMMARY_HEAD_RE = re.compile(r"\[([^\]]+)\] \d{2}:\d{2}:\d{2} - ")
+# 汇总里的任务名（`daily.toml` 的 `name`）→ `TASK_STEPS` 的 key。
+_TASK_KEY_BY_NAME = {
+    "启动国服": "StartUp",
+    **{name: "Annihilation" for name in ANNIHILATION_TASK_NAMES},
+    **{label: key for key, _emoji, label, _running in TASK_STEPS if key not in ("StartUp", "Annihilation")},
+}
+# 流式输出里能直接对上 key 的 MaaCore 任务类型；Fight 有剿灭和两个刷理智块，对不上。
+_UNAMBIGUOUS_TASK_TYPES = frozenset({"StartUp", "Infrast", "Recruit", "Mall", "Award", "Custom"})
+
+
+def _stream_segments(lines: list[str]) -> list[tuple[str, list[str]]]:
+    """按 `<Task> Start` … `<Task> Completed|Error|Stopped` 切出每条任务链的流式段。"""
+    segments: list[tuple[str, list[str]]] = []
+    current: tuple[str, list[str]] | None = None
+    for raw in lines:
+        line = raw.strip()
+        event = _TASK_EVENT_RE.fullmatch(line)
+        if event and event.group(2) == "Start":
+            current = (event.group(1), [])
+            segments.append(current)
+        elif current is not None:
+            if event and event.group(1) == current[0]:
+                current = None
+            else:
+                current[1].append(line)
+    return segments
+
+
+def offline_tasks(lines: list[str]) -> set[str]:
+    """撞上掉线弹窗、被 MaaCore 停掉的任务（`TASK_STEPS` 的 key），不管它报没报 Completed。
+
+    流式段按顺序和收尾汇总的 `[名字]` 配对；条数对不上（超时、被掐，没有汇总）时只认
+    `_UNAMBIGUOUS_TASK_TYPES`。StartUp 不算：它会点确认重连，撞过弹窗也可能登录成功，
+    登没登录上由 `never_logged_in()` 判。
+    """
+    segments = _stream_segments(lines)
+    names = [match.group(1) for line in lines if (match := _SUMMARY_HEAD_RE.match(line.strip()))]
+    if len(names) == len(segments):
+        keys = [_TASK_KEY_BY_NAME.get(name, "") for name in names]
+    else:
+        keys = [kind if kind in _UNAMBIGUOUS_TASK_TYPES else "" for kind, _body in segments]
+    return {
+        key
+        for key, (_kind, body) in zip(keys, segments)
+        if key and key != "StartUp" and GAME_OFFLINE_MARKER in body
+    }
+
+
+def _made_progress(lines: list[str]) -> bool:
+    """日志里有没有任何一件真做成的事：作战批次、掉落、进过基建设施、公招。"""
+    return bool(
+        _fight_times(lines)
+        or _drop_pairs(lines)
+        or any("EnterFacility" in line or "RecruitTagsRefreshed" in line for line in lines)
+        or _last_match(lines, r"Recruited\s+\d+\s+times")
+    )
+
+
+def _offline_keys(lines: list[str]) -> set[str]:
+    """战报要判红的掉线任务：`offline_tasks()`，没登录上时再加 StartUp。"""
+    keys = offline_tasks(lines)
+    if never_logged_in(lines):
+        keys.add("StartUp")
+    return keys
+
+
+def _offline_reason(key: str) -> str:
+    return "没登录上，获取网络配置失败" if key == "StartUp" else "游戏掉线"
+
+
+def never_logged_in(lines: list[str]) -> bool:
+    """这一趟从头到尾没登录上（2026-11-09 早场：「获取网络配置失败，请重新登录」）。
+
+    三条缺一不可：StartUp 段里撞过掉线弹窗；StartUp 之后的第一条任务链也撞上它
+    （StartUp 点确认用完次数仍停在弹窗上）；日志里没有任何真实进展。第三条是安全
+    闸门——判据万一被新版输出骗了，有一点进展就不整场重跑，免得重复做完的事。
+    """
+    segments = _stream_segments(lines)
+    index = next((i for i, (kind, _body) in enumerate(segments) if kind == "StartUp"), None)
+    if index is None or index + 1 >= len(segments):
+        return False
+    if GAME_OFFLINE_MARKER not in segments[index][1]:
+        return False
+    if GAME_OFFLINE_MARKER not in segments[index + 1][1]:
+        return False
+    return not _made_progress(lines)
+
+
+def conf_probe() -> str:
+    """直连探一下鹰角的配置服务器，返回一行给运行日志看的结果。永不抛。"""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    host = CONF_PROBE_URL.split("/")[2]
+    started = time.monotonic()
+    try:
+        with opener.open(CONF_PROBE_URL, timeout=CONF_PROBE_TIMEOUT) as response:
+            status = f"HTTP {response.status}"
+    except urllib.error.HTTPError as exc:
+        status = f"HTTP {exc.code}"
+    except Exception as exc:  # noqa: BLE001 — (c) 只是排障线索，什么错都不能拖垮重开
+        status = f"连不上（{type(exc).__name__}: {str(exc)[:120]}）"
+    return f"连通性探测：{host} {status}，{time.monotonic() - started:.1f}s"
+
+
 def progress_content(
     lines: list[str],
     *,
@@ -840,9 +963,12 @@ def progress_content(
     clean = [_clean_line(line, 300) for line in lines if line.strip()]
     heading = final or "🌱 MAA 正在执行"
     status_lines: list[str] = []
+    offline = _offline_keys(clean)
     for key, emoji, label, running_text in TASK_STEPS:
         state = _task_state(clean, key, label)
-        if state == "completed":
+        if key in offline and state != "running":
+            status_lines.append(f"❌ {emoji} {label}：未完成（{_offline_reason(key)}）")
+        elif state == "completed":
             status_lines.append(f"✅ {emoji} {label}：完成")
         elif state == "failed":
             status_lines.append(f"❌ {emoji} {label}：未完成")
@@ -910,6 +1036,7 @@ def extract_summary(
         "Custom": True,
     }
     result = [f"🌟 总体：{'✅ 成功' if ok is not False else '❌ 未完成'}"]
+    offline = _offline_keys(lines)
     for key, emoji, label, _running_text in TASK_STEPS:
         if not enabled[key]:
             if key == "Annihilation" and annihilation_planned is False:
@@ -919,7 +1046,12 @@ def extract_summary(
         state = _task_state(lines, key, label)
         status = {"completed": "✅ 完成", "failed": "❌ 未完成", "running": "❌ 中断", "pending": "⏸️ 未执行"}[state]
         details: list[str] = []
-        if key == "StartUp" and state != "completed":
+        if key in offline:
+            # MaaCore 撞上掉线弹窗就 Stop，被停的任务照样报 Completed（2026-11-09 早场
+            # 信用商店 / 领取奖励都「✅」了，其实什么都没做）。
+            status = "❌ 未完成"
+            details.append(_offline_reason(key))
+        if key == "StartUp" and state != "completed" and key not in offline:
             # 「启动游戏 ❌ 中断」看着像游戏那头的事，其实多半是 MaaTools 没连上或截图
             # 拿不到（窗口被台前调度收走）。把 MaaCore 的原始标记摊开，省得去翻 asst.log。
             marker = next(
@@ -1327,15 +1459,20 @@ def run_maa_resilient(
     timeout: int | None = None,
     carry_lines: list[str] | None = None,
     log_preamble: list[str] | None = None,
-) -> tuple[int, list[str], list[str], int]:
-    """跑 maa run；在连接阶段就崩掉的那种失败上重开。末位返回重试次数。
+) -> tuple[int, list[str], list[str], int, int]:
+    """跑 maa run；一个键都没点成的两类失败上重开。末两位是（连接重开, 掉线重开）次数。
 
-    只重试 `connect_failed()` 认定的那一类：MaaTools 没连上或截图拿不到，没有任何
-    任务跑到 Completed、一批理智都没花。每趟重开前先把游戏窗口摆回 MAA-Game 台前
-    （激活救不回来就重启游戏——这时一个键都没点过）、等 MaaTools 就绪。所有重试共用
-    同一个超时预算，绝不额外撑长 Hermes 那一小时；日志追加进同一个文件，不覆盖上一趟
-    的现场。`log_preamble` 先写进日志开头（开跑前的摆窗留痕）。
-    放弃重开时的说明里一定带 `CONNECT_GAVE_UP`，调用方据此跳过补跑。
+    1. **连接失败**（`connect_failed()`）：MaaTools 没连上或截图拿不到，没有任何任务
+       跑到 Completed。等 `connect_retry_delay` 秒，把游戏窗口摆回 MAA-Game 台前（激活
+       救不回来就重启游戏）、等 MaaTools 就绪再重开。几趟的输出拼在一起交回去。
+    2. **没登录上**（`never_logged_in()`，2026-11-09 早场）：游戏弹「获取网络配置失败」，
+       点确认救不回来。等 `offline_retry_delays` 里对应的秒数给故障留时间恢复，然后
+       **一律重启游戏**、摆窗、整场重跑。死掉那一趟的输出**不交回去**（它的 Mall /
+       Award 会假报 Completed），只留我们自己写的说明；完整现场在日志文件里。
+
+    所有重开共用同一个超时预算，绝不额外撑长 Hermes 那一小时；日志追加进同一个文件，
+    不覆盖上一趟的现场。`log_preamble` 先写进日志开头（开跑前的摆窗留痕）。
+    放弃时的说明里一定带 `CONNECT_GAVE_UP` / `OFFLINE_GAVE_UP`，调用方据此跳过补跑。
     """
     if log_preamble:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1343,10 +1480,22 @@ def run_maa_resilient(
     budget = int(config.get("maa_run_timeout", 3000) if timeout is None else timeout)
     limit = max(0, int(config.get("connect_retry_limit", 2)))
     delay = max(0, int(config.get("connect_retry_delay", 8)))
+    offline_limit = max(0, int(config.get("offline_retry_limit", 2)))
+    offline_delays = offline_retry_delays(config)
     started = time.monotonic()
     stdout_all: list[str] = []
     stderr_all: list[str] = []
+    # 我们自己写进 stderr 的说明：掉线重开丢掉死掉那一趟的输出时，只留这些。
+    notes: list[str] = []
     retries = 0
+    offline_retries = 0
+    attempts = 0
+
+    def say(message: str) -> None:
+        notes.append(message)
+        stderr_all.append(message)
+        _append_log(log_path, message)
+
     while True:
         remaining = budget - int(time.monotonic() - started)
         code, out, err = run_maa(
@@ -1358,38 +1507,83 @@ def run_maa_resilient(
             plan,
             timeout=remaining,
             carry_lines=list(carry_lines or []) + stdout_all + stderr_all,
-            append=retries > 0 or bool(log_preamble),
+            append=attempts > 0 or bool(log_preamble),
         )
+        attempts += 1
         stdout_all += out
         stderr_all += err
-        marker = connect_failed(out + err, code)
-        if not marker:
-            return code, stdout_all, stderr_all, retries
         spent = int(time.monotonic() - started)
-        if retries >= limit or budget - spent - delay < MIN_RUN_TIMEOUT_SECONDS:
-            note = f"游戏连接失败（{marker}），重试 {retries} 次{CONNECT_GAVE_UP}。"
-            stderr_all.append(note)
-            _append_log(log_path, note)
-            return code, stdout_all, stderr_all, retries
-        retries += 1
-        note = (
-            f"游戏连接失败（{marker}）：MaaTools 没连上或截图为空，没有任务跑完。"
-            f"等 {delay}s、把游戏窗口摆回台前后重开第 {retries} 趟。"
-        )
-        stderr_all.append(note)
-        _append_log(log_path, note)
-        time.sleep(delay)
-        trail: list[str] = []
-        try:
-            warning = maa_playcover.settle_game_window(config, allow_restart=True, trail=trail)
-            maa_playcover.wait_for_game(config)
-        except Exception as exc:  # noqa: BLE001 — (c) 重开前准备尽力而为，下一趟 maa run 自己会再报连接失败
-            warning = f"重开前准备游戏失败：{exc}"
-        for step in trail:
-            _append_log(log_path, step)
-        if warning:
-            stderr_all.append(warning)
-            _append_log(log_path, warning)
+        marker = connect_failed(out + err, code)
+        if marker:
+            if retries >= limit or budget - spent - delay < MIN_RUN_TIMEOUT_SECONDS:
+                say(f"游戏连接失败（{marker}），重试 {retries} 次{CONNECT_GAVE_UP}。")
+                return code, stdout_all, stderr_all, retries, offline_retries
+            retries += 1
+            say(
+                f"游戏连接失败（{marker}）：MaaTools 没连上或截图为空，没有任务跑完。"
+                f"等 {delay}s、把游戏窗口摆回台前后重开第 {retries} 趟。"
+            )
+            time.sleep(delay)
+            trail: list[str] = []
+            try:
+                warning = maa_playcover.settle_game_window(config, allow_restart=True, trail=trail)
+                maa_playcover.wait_for_game(config)
+            except Exception as exc:  # noqa: BLE001 — (c) 重开前准备尽力而为，下一趟 maa run 自己会再报连接失败
+                warning = f"重开前准备游戏失败：{exc}"
+            for step in trail:
+                _append_log(log_path, step)
+            if warning:
+                say(warning)
+            continue
+        if code != 0 and code not in SELF_ASSIGNED_CODES and never_logged_in(out + err):
+            wait = offline_delays[min(offline_retries, len(offline_delays) - 1)]
+            if (
+                offline_retries >= offline_limit
+                or budget - spent - wait - RESTART_ALLOWANCE_SECONDS < MIN_RUN_TIMEOUT_SECONDS
+            ):
+                say(f"游戏没登录上（获取网络配置失败），重启游戏 {offline_retries} 次{OFFLINE_GAVE_UP}。")
+                return code, stdout_all, stderr_all, retries, offline_retries
+            offline_retries += 1
+            say(
+                f"游戏没登录上（{GAME_OFFLINE_MARKER}：获取网络配置失败），点确认救不回来。"
+                f"等 {wait}s 后重启游戏、整场重跑第 {offline_retries} 趟。"
+            )
+            time.sleep(wait)
+            _append_log(log_path, conf_probe())
+            trail = []
+            try:
+                warnings = maa_playcover.restart_game(config)
+                settled = maa_playcover.settle_game_window(config, trail=trail)
+                warning = "；".join([*warnings, *([settled] if settled else [])])
+            except Exception as exc:  # noqa: BLE001 — (c) 重启尽力而为，下一趟 maa run 自己会报连接失败
+                warning = f"重启游戏失败：{exc}"
+            for step in trail:
+                _append_log(log_path, step)
+            if warning:
+                say(warning)
+            # 死掉那一趟什么都没做成（never_logged_in 的第三条），它的输出只会让战报
+            # 读到假 Completed；现场在日志文件里。
+            stdout_all = []
+            stderr_all = list(notes)
+            continue
+        return code, stdout_all, stderr_all, retries, offline_retries
+
+
+DEFAULT_OFFLINE_RETRY_DELAYS = (120, 300)
+
+
+def offline_retry_delays(config: Config) -> list[int]:
+    """`offline_retry_delays`：第 n 次重启前等几秒。比次数短时用最后一个值补；写歪了用默认。"""
+    raw = config.get("offline_retry_delays")
+    if isinstance(raw, list):
+        values = [
+            max(0, int(item))
+            for item in cast(list[Any], raw)
+            if isinstance(item, int) and not isinstance(item, bool)
+        ]
+        if values:
+            return values
+    return list(DEFAULT_OFFLINE_RETRY_DELAYS)
 
 
 def _append_log(log_path: Path, message: str) -> None:
@@ -1545,9 +1739,18 @@ def report_payload(
     proxy_refunded: int = 0,
     connect_retries: int = 0,
     inventory_error: str = "",
+    offline_retries: int = 0,
+    offline_gave_up: bool = False,
 ) -> dict[str, Any]:
     label = PHASE_LABELS[phase]
     notes: list[str] = []
+    if offline_gave_up:
+        notes.append(
+            f"游戏一直没登录上（获取网络配置失败），重启游戏 {offline_retries} 次都没恢复。"
+            "多半是鹰角服务器或线路的短时故障，稍后手动跑一场。"
+        )
+    elif offline_retries:
+        notes.append(f"游戏没登录上（获取网络配置失败），重启游戏 {offline_retries} 次后登录成功。")
     if connect_retries:
         notes.append(
             f"游戏连接失败（MaaTools 没连上或截图为空），已重开 {connect_retries} 趟 maa run。"
@@ -1962,6 +2165,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
         inventory_error = ""
         salvage_log_path: Path | None = None
         connect_retries = 0
+        offline_retries = 0
         startup_error = ""
         try:
             require_executable(config, "maa_bin", "/opt/homebrew/bin/maa", "maa-cli")
@@ -2028,7 +2232,13 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             if settle_warning:
                 stderr_lines.append(settle_warning)
             prior_errors = list(stderr_lines)
-            return_code, stdout_lines, run_errors, connect_retries = run_maa_resilient(
+            (
+                return_code,
+                stdout_lines,
+                run_errors,
+                connect_retries,
+                offline_retries,
+            ) = run_maa_resilient(
                 config,
                 log_path,
                 token,
@@ -2039,13 +2249,19 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 log_preamble=settle_trail,
             )
             stderr_lines = prior_errors + run_errors
-            # 重开到底还是拿不到游戏画面：补跑只是换个关卡 / 换条链，救不了截图，跳过。
-            screen_lost = any(CONNECT_GAVE_UP in line for line in run_errors)
+            # 重开到底还是拿不到游戏画面 / 登录不上：补跑只是换个关卡 / 换条链，在同一个
+            # 死掉的游戏上救不回来，跳过（2026-11-09 早场的后备关补跑就是白跑）。
+            if any(CONNECT_GAVE_UP in line for line in run_errors):
+                lost_note = SCREEN_LOST_SKIP_NOTE
+            elif any(OFFLINE_GAVE_UP in line for line in run_errors):
+                lost_note = OFFLINE_SKIP_NOTE
+            else:
+                lost_note = ""
             # 125 也可能是 maa 自己的退出码，所以还要确认日志里真有代理失误，
             # 免得凭一个数字就多跑一趟。
-            if screen_lost:
+            if lost_note:
                 if return_code == PROXY_BREAK_CODE or fight_failed_dry(stdout_lines + stderr_lines):
-                    stderr_lines.append(SCREEN_LOST_SKIP_NOTE)
+                    stderr_lines.append(lost_note)
             elif return_code == PROXY_BREAK_CODE and fight_wiped_out(stdout_lines + stderr_lines)[0]:
                 # 熔断掐掉的是整条 maa run，基建/公招/商店/奖励也一起没了。补跑一趟
                 # 去掉 Fight 的链条把它们捞回来——StartUp 会顺手把卡在结算页的游戏
@@ -2181,6 +2397,8 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                 proxy_refunded=proxy_refunded,
                 connect_retries=connect_retries,
                 inventory_error=inventory_error,
+                offline_retries=offline_retries,
+                offline_gave_up=any(OFFLINE_GAVE_UP in line for line in stderr_lines),
             )
             send_report(token, channel_id, payload, screenshot_path, config)
         finished: LastRun = {
@@ -2200,6 +2418,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
             "proxy_failure_batches": proxy_batches,
             "proxy_failure_sanity_refunded": proxy_refunded,
             "connect_retries": connect_retries,
+            "offline_retries": offline_retries,
             "inventory_error": inventory_error or None,
         }
         if plan.get("annihilation") and annihilation_consumed(stdout_lines + stderr_lines):
