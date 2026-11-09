@@ -24,7 +24,7 @@
     "algorithm": "JustReturn",
     "action": "DoNothing",
     "crop_doc": {
-      "roi": [300, 550, 128, 41],
+      "roi": [305, 553, 115, 36],
       "mask": []
     },
     "next": ["FriendsDefault", "FriendsSanrio"],
@@ -33,7 +33,7 @@
   "FriendsSanrio": {
     "baseTask": "FriendsDefault",
     "template": "Sanrio/Friends.png",
-    "rectMove": [26, 8, 52, 17]
+    "rectMove": [29, 9, 57, 18]
   },
   "FriendsOriginiteExchangeCancel": {
     "baseTask": "OriginiteExchangeCancel",
@@ -43,7 +43,7 @@
     "algorithm": "JustReturn",
     "action": "DoNothing",
     "crop_doc": {
-      "roi": [822, 457, 86, 71],
+      "roi": [831, 425, 70, 28],
       "mask": []
     },
     "next": ["MallDefault", "MallSanrio"],
@@ -52,7 +52,7 @@
   "MallSanrio": {
     "baseTask": "MallDefault",
     "template": "Sanrio/Mall.png",
-    "rectMove": [10, 5, 20, 10]
+    "rectMove": [18, 7, 34, 14]
   },
   "MallOriginiteExchangeCancel": {
     "baseTask": "OriginiteExchangeCancel",
@@ -62,7 +62,7 @@
     "algorithm": "JustReturn",
     "action": "DoNothing",
     "crop_doc": {
-      "roi": [720, 553, 75, 70],
+      "roi": [830, 594, 70, 44],
       "mask": []
     },
     "next": ["TaskDefault", "TaskSanrio"],
@@ -71,7 +71,7 @@
   "TaskSanrio": {
     "baseTask": "TaskDefault",
     "template": "Sanrio/Task.png",
-    "rectMove": [17, 8, 35, 17]
+    "rectMove": [18, 11, 34, 22]
   },
   "TaskOriginiteExchangeCancel": {
     "baseTask": "OriginiteExchangeCancel",
@@ -82,7 +82,7 @@
     "action": "DoNothing",
     "crop_doc": {
       "doc": "Heads up: YostarEN needs 133 of 'y' instead of 120",
-      "roi": [903, 120, 97, 58],
+      "roi": [906, 110, 100, 58],
       "mask": []
     },
     "next": ["TerminalDefault", "TerminalSanrio"],
@@ -91,7 +91,7 @@
   "TerminalSanrio": {
     "baseTask": "TerminalDefault",
     "template": "Sanrio/Terminal.png",
-    "rectMove": [24, 28, 48, 24]
+    "rectMove": [25, 26, 50, 20]
   },
   "TerminalOriginiteExchangeCancel": {
     "baseTask": "OriginiteExchangeCancel",
@@ -101,8 +101,8 @@
     "algorithm": "JustReturn",
     "action": "DoNothing",
     "crop_doc": {
-      "roi": [935, 480, 145, 61],
-      "mask": [125, 0, 25, 20]
+      "roi": [952, 478, 120, 52],
+      "mask": []
     },
     "next": ["RecruitDefault", "RecruitSanrio"],
     "onErrorNext": ["RecruitOriginiteExchangeCancel"]
@@ -110,7 +110,7 @@
   "RecruitSanrio": {
     "baseTask": "RecruitDefault",
     "template": "Sanrio/Recruit.png",
-    "rectMove": [36, 15, 72, 30]
+    "rectMove": [30, 13, 60, 26]
   },
   "RecruitOriginiteExchangeCancel": {
     "baseTask": "OriginiteExchangeCancel",
@@ -120,7 +120,7 @@
     "algorithm": "JustReturn",
     "action": "DoNothing",
     "crop_doc": {
-      "roi": [935, 570, 85, 75],
+      "roi": [1057, 624, 66, 46],
       "mask": []
     },
     "next": ["InfrastDefault", "InfrastSanrio"],
@@ -129,7 +129,7 @@
   "InfrastSanrio": {
     "baseTask": "InfrastDefault",
     "template": "Sanrio/EnterInfrast.png",
-    "rectMove": [12, 6, 25, 12]
+    "rectMove": [17, 12, 32, 22]
   },
   "InfrastOriginiteExchangeCancel": {
     "baseTask": "OriginiteExchangeCancel",
@@ -139,7 +139,7 @@
     "algorithm": "JustReturn",
     "action": "DoNothing",
     "crop_doc": {
-      "roi": [1153, 606, 77, 79],
+      "roi": [1194, 678, 56, 28],
       "mask": []
     },
     "next": ["DepotDefault", "DepotSanrio"],
@@ -148,7 +148,7 @@
   "DepotSanrio": {
     "baseTask": "DepotDefault",
     "template": "Sanrio/DepotEnter.png",
-    "rectMove": [19, 19, 38, 39]
+    "rectMove": [14, 7, 28, 14]
   },
   "DepotOriginiteExchangeCancel": {
     "baseTask": "OriginiteExchangeCancel",
@@ -158,7 +158,7 @@
     "algorithm": "JustReturn",
     "action": "DoNothing",
     "crop_doc": {
-      "roi": [945, 301, 85, 78],
+      "roi": [1055, 333, 125, 52],
       "mask": []
     },
     "next": ["OperBoxDefault", "OperBoxSanrio"],
@@ -167,7 +167,7 @@
   "OperBoxSanrio": {
     "baseTask": "OperBoxDefault",
     "template": "Sanrio/OperBoxEnter.png",
-    "rectMove": [12, 6, 25, 12]
+    "rectMove": [32, 13, 61, 26]
   },
   "OperBoxOriginiteExchangeCancel": {
     "baseTask": "OriginiteExchangeCancel",
@@ -177,7 +177,7 @@
     "algorithm": "JustReturn",
     "action": "DoNothing",
     "crop_doc": {
-      "roi": [1095, 497, 167, 56],
+      "roi": [1098, 498, 150, 44],
       "mask": []
     },
     "next": ["GachaDefault", "GachaSanrio"],
@@ -186,7 +186,7 @@
   "GachaSanrio": {
     "baseTask": "GachaDefault",
     "template": "Sanrio/GachaEnter.png",
-    "rectMove": [41, 14, 83, 28]
+    "rectMove": [38, 11, 74, 22]
   },
   "GachaOriginiteExchangeCancel": {
     "baseTask": "OriginiteExchangeCancel",
