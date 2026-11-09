@@ -1096,6 +1096,7 @@ class DiscordOptionalTests(unittest.TestCase):
         token: Any = None,
         request: Any = None,
         thread: Any = None,
+        progress_path: Path | None = None,
     ) -> SimpleNamespace:
         at = datetime(2026, 11, 9, 22, 0, tzinfo=BEIJING)
         lock = unittest.mock.MagicMock()
@@ -1131,12 +1132,16 @@ class DiscordOptionalTests(unittest.TestCase):
             run = stub(maa_daily, "run_maa_resilient", return_value=(0, [], [], 0, 0))
             stub(maa_daily, "capture_home_screenshot", return_value=(True, "", True, ""))
             close = stub(maa_playcover, "close_game", return_value=[])
+            if progress_path is not None:
+                stub(maa_daily, "progress_path_for", return_value=progress_path)
             report_path = Path(raw) / "2026-11-09-pm-report.json"
             code = maa_daily.execute("pm")
             report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else None
+            progress_file = Path(raw) / "2026-11-09-pm.progress.json"
+            progress = json.loads(progress_file.read_text("utf-8")) if progress_file.is_file() else None
         finished = merge.call_args_list[-1].args[0]
         return SimpleNamespace(
-            code=code, report=report, finished=finished, merge=merge, discord=discord,
+            code=code, report=report, finished=finished, merge=merge, discord=discord, progress=progress,
             create=create, upload=upload, run=run, launch=launch, close=close, token=token_stub,
         )
 
@@ -1240,7 +1245,10 @@ class CancelledRunTests(unittest.TestCase):
             code = maa_daily.execute("am")
             report_file = Path(raw) / "2026-11-09-am-report.json"
             saved = json.loads(report_file.read_text("utf-8")) if report_file.is_file() else None
+            progress_file = Path(raw) / "2026-11-09-am.progress.json"
+            progress = json.loads(progress_file.read_text("utf-8")) if progress_file.is_file() else None
         return SimpleNamespace(
+            progress=progress,
             code=code, finished=merge.call_args_list[-1].args[0], merge=merge, fallback=fallback,
             salvage=salvage, shot=shot, close=close, report=report, direct=direct, saved=saved,
         )
@@ -2710,6 +2718,136 @@ class AwardAndMallOptionTests(unittest.TestCase):
         block = self._mall({**self.config, "mall_buy_first": "招聘许可"})  # pyright: ignore[reportArgumentType]  # 故意传坏值
         self.assertIn("buy_first = []", block)
 
+
+
+
+
+class ProgressFileTests(unittest.TestCase):
+    """不变量 #65：`runs/<场>.progress.json` 跟着同一个 5 秒循环写，写失败不影响跑场。"""
+
+    PLAN = cast(maa_common.Plan, {**maa_common.normalize_plan({"stage": "1-7"}), "annihilation": True})
+    STREAM = [
+        "StartUp Start", "StartUp Completed",
+        "Fight Start", "Fight Completed",          # 剿灭
+        "Fight Start", "Current sanity: 120/207",  # 刷理智
+        "Mission started (6 times, use 36 sanity)",
+        "Drops: 固源岩: 8, 龙门币: 432",
+    ]
+
+    def setUp(self) -> None:
+        isolate_stage_index(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+
+    def _tracker(self, plan: maa_common.Plan | None = None) -> maa_daily.RunProgressFile:
+        return maa_daily.RunProgressFile(
+            self.dir / "2026-11-09-am.progress.json", phase="am", plan=plan or self.PLAN,
+            config=cast(maa_common.Config, {}), started=datetime(2026, 11, 9, 8, 0, tzinfo=BEIJING),
+        )
+
+    def _read(self) -> dict[str, Any]:
+        return json.loads((self.dir / "2026-11-09-am.progress.json").read_text("utf-8"))
+
+    def test_a_normal_run_tracks_steps_fight_and_final_state(self) -> None:
+        tracker = self._tracker()
+        self.assertEqual(self._read()["status"], "running")
+        tracker.boot()
+        self.assertEqual(self._read()["current"], "startup")
+        with patch.object(maa_daily, "_stage_ap_cost", return_value=6):
+            tracker.update(self.STREAM, live=self.STREAM)
+        data = self._read()
+        states = {step["key"]: step["state"] for step in data["steps"]}
+        self.assertEqual(states["startup"], "done")
+        self.assertEqual(states["annihilation"], "done")
+        self.assertEqual(states["fight"], "running")
+        self.assertEqual(data["current"], "fight")
+        self.assertEqual(data["fight"]["done"], 6)
+        self.assertEqual(data["fight"]["estimate"], 6 + 120 // 6)
+        self.assertEqual(data["fight"]["sanity"], {"current": 120, "max": 207})
+        self.assertIn({"name": "固源岩", "count": 8}, data["fight"]["drops"])
+        self.assertIsNone(data["eta"])  # 没有历史
+        rest = ["Fight Completed", "Infrast Start", "Infrast Completed", "Recruit Start",
+                "Recruit Completed", "Mall Start", "Mall Completed", "Award Start", "Award Completed"]
+        tracker.finish("success", self.STREAM + rest)
+        data = self._read()
+        self.assertEqual(data["status"], "success")
+        self.assertIsNone(data["current"])
+        self.assertTrue(all(step["state"] == "done" for step in data["steps"]), data["steps"])
+        self.assertTrue(all(step["finished_at"] for step in data["steps"]))
+        # 下一场就有历史可算 ETA。
+        nxt = maa_daily.RunProgressFile(
+            self.dir / "2026-11-09-pm.progress.json", phase="pm", plan=self.PLAN,
+            config=cast(maa_common.Config, {}), started=datetime(2026, 11, 9, 22, 0, tzinfo=BEIJING),
+        )
+        self.assertEqual(set(nxt.history), {key for key, *_ in maa_daily.PROGRESS_STEPS})
+        self.assertIsNotNone(nxt.payload()["eta"])
+
+    def test_skipped_steps_and_unfinished_steps_on_failure(self) -> None:
+        plan = cast(maa_common.Plan, {**self.PLAN, "annihilation": False,
+                                      "tasks": {**self.PLAN["tasks"], "mall": False}})
+        tracker = self._tracker(plan)
+        tracker.update(["StartUp Start", "StartUp Completed", "Fight Start"], live=None)
+        tracker.finish("failed")
+        states = {step["key"]: step["state"] for step in self._read()["steps"]}
+        self.assertEqual(states["annihilation"], "skipped")
+        self.assertEqual(states["mall"], "skipped")
+        self.assertEqual(states["fight"], "failed")
+        self.assertEqual(states["award"], "skipped")
+
+    def test_offline_restart_writes_a_note_in_plain_words(self) -> None:
+        tracker = self._tracker()
+        with patch.object(
+            maa_daily, "run_maa", side_effect=[(1, OFFLINE_LOG, []), (0, HEALTHY_LOG, [])]
+        ), patch.object(maa_daily.time, "sleep"), patch.object(
+            maa_daily, "conf_probe", return_value=""
+        ), patch.object(maa_playcover, "restart_game", return_value=[]), patch.object(
+            maa_playcover, "settle_game_window", return_value=""
+        ):
+            code, *_rest = maa_daily.run_maa_resilient(
+                cast(maa_common.Config, {"maa_run_timeout": 3000}), self.dir / "run.log",
+                "token", "1", "2", progress=tracker,
+            )
+        self.assertEqual(code, 0)
+        notes = [note["text"] for note in self._read()["notes"]]
+        self.assertEqual(notes, ["游戏没登录上，2 分钟后重启（1/2）"])
+
+    def test_cancelled_run_writes_the_final_state(self) -> None:
+        result = CancelledRunTests._execute(cast(Any, self))
+        self.assertEqual(result.progress["status"], "cancelled")
+        self.assertIsNone(result.progress["current"])
+        self.assertIn("已按你的要求停下", [note["text"] for note in result.progress["notes"]])
+        self.assertTrue(str(result.merge.call_args_list[0].args[0]["progress"]).endswith(
+            "2026-11-09-am.progress.json"))
+
+    def test_a_failing_write_never_touches_the_run(self) -> None:
+        blocker = self.dir / "not-a-dir"
+        blocker.write_text("x", encoding="utf-8")
+        with contextlib.redirect_stderr(io.StringIO()):
+            tracker = maa_daily.RunProgressFile(
+                blocker / "x.progress.json", phase="am", plan=self.PLAN,
+                config=cast(maa_common.Config, {}), started=datetime(2026, 11, 9, 8, 0, tzinfo=BEIJING),
+            )
+            tracker.boot()
+            tracker.update(["garbage"])
+            tracker.note("no_such_kind")
+            tracker.finish("success", [])
+        with contextlib.redirect_stderr(io.StringIO()):
+            result = DiscordOptionalTests._execute(
+                cast(Any, self), {}, progress_path=blocker / "pm.progress.json"
+            )
+        self.assertEqual(result.code, 0)
+        self.assertEqual(result.finished["status"], "success")
+
+    def test_sample_fixture_matches_what_we_write(self) -> None:
+        sample = json.loads((Path(__file__).parent / "fixtures" / "progress_sample.json").read_text("utf-8"))
+        written = self._tracker().payload()
+        self.assertEqual(set(sample), set(written))
+        self.assertEqual(set(sample["fight"]), set(written["fight"]))
+        self.assertEqual(set(sample["steps"][0]), set(written["steps"][0]))
+        self.assertEqual(set(sample["notes"][0]), {"at", "text"})
+        self.assertEqual([s["key"] for s in sample["steps"]], [s["key"] for s in written["steps"]])
+        self.assertEqual(sample["schema_version"], maa_daily.PROGRESS_SCHEMA_VERSION)
 
 
 if __name__ == "__main__":

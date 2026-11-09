@@ -3,7 +3,7 @@
 //  Wado's MAA
 //
 //  本场进度的几块小视图：步骤条（✅ 启动游戏  ⏳ 刷理智 3/≈7  ○ 基建 …）、
-//  日志检查器顶部的「本场」卡片。数据都来自 `RunProgress`（`plan.tasks` + maa-cli 日志）。
+//  日志检查器顶部的「本场」卡片。数据都来自 `RunProgress`（maa-remote 的 progress.json；旧版退回日志）。
 //
 
 import AppKit
@@ -62,6 +62,8 @@ struct RunSessionSummary: View {
     let progress: RunProgress
     /// 没有步骤条时（抄作业、清点仓库……）显示的「现在在做什么」。
     var doing: String?
+    /// 步骤条下面列最近几条重试 / 重启之类的说明（「本场」卡片用）。
+    var noteLimit = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -72,7 +74,9 @@ struct RunSessionSummary: View {
                         .foregroundStyle(outcome == "success" ? WM.ok : outcome == "skipped" ? WM.f2 : WM.danger)
                 }
                 Spacer(minLength: 0)
-                if let started = progress.startedAt {
+                if let eta = progress.eta, progress.outcome == nil {
+                    Text("约 \(RunLock.beijingClock(eta)) 结束").foregroundStyle(WM.f3).monospacedDigit()
+                } else if let started = progress.startedAt {
                     Text("\(RunLock.beijingClock(started)) 开始").foregroundStyle(WM.f3).monospacedDigit()
                 }
             }
@@ -80,6 +84,19 @@ struct RunSessionSummary: View {
                 RunStepsView(progress: progress)
             } else if let doing {
                 Text(doing).foregroundStyle(WM.f2)
+            }
+            if noteLimit > 0, !progress.notes.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(progress.notes.suffix(noteLimit)) { note in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            if let date = note.date {
+                                Text(RunLock.beijingClock(date)).foregroundStyle(WM.f3).monospacedDigit()
+                            }
+                            Text(note.text).foregroundStyle(WM.game)
+                        }
+                    }
+                }
+                .font(.system(size: 11.5))
             }
             if let fraction = progress.fraction {
                 ProgressView(value: fraction)
@@ -97,7 +114,7 @@ struct RunSessionCard: View {
     var body: some View {
         let progress = store.progress
         VStack(alignment: .leading, spacing: 10) {
-            RunSessionSummary(progress: progress, doing: progress.outcome == nil ? progress.current?.label : nil)
+            RunSessionSummary(progress: progress, doing: progress.outcome == nil ? progress.current?.label : nil, noteLimit: 3)
             if let log = progress.logURL {
                 Button {
                     NSWorkspace.shared.activateFileViewerSelecting([log])

@@ -3,7 +3,8 @@
 扫两处给人看的字：
 - `gui/MeoAsstMac/Remote/**/*.swift` 里的字符串字面量：含中文的全部算，外加 `Text(` / `Label(` /
   `Button(` / `.help(` / `title:` / `help:` / `sub:` / `rows:` 等界面调用那一行上的英文字面量；
-- `maa_action.py` 里 `dispatch_gui` 会走到的回执 `message`（Wado's MAA 原样显示，Discord 也用）。
+- `maa_action.py` 里 `dispatch_gui` 会走到的回执 `message`（Wado's MAA 原样显示，Discord 也用）；
+- `maa_daily.py` 写进 `runs/<场>.progress.json` 的步骤名和恢复说明（`PROGRESS_STEPS` / `PROGRESS_NOTES`，GUI 原样显示）。
 
 命中禁用词就红，报出「文件:行号 词 原文」。开发者区、诊断信息用注释圈起来跳过：
 
@@ -30,6 +31,9 @@ import _isolation  # noqa: E402
 REPO = Path(__file__).resolve().parents[2]
 SWIFT_ROOT = REPO / "gui" / "MeoAsstMac" / "Remote"
 ACTION = REPO / "maa-remote" / "scripts" / "maa_action.py"
+DAILY = REPO / "maa-remote" / "scripts" / "maa_daily.py"
+# 进度文件里给人看的字：这些模块级常量里的每个字符串字面量都算。
+PROGRESS_CONSTANTS = ("PROGRESS_STEPS", "PROGRESS_NOTES")
 
 BANNED = (
     "锁", "派发", "闸门", "上游", "cron", "Hermes", "HERMES", "maa-remote", "maa-cli", "MaaCore",
@@ -186,6 +190,33 @@ def scan_action() -> list[str]:
     return problems
 
 
+def scan_progress() -> list[str]:
+    tree = ast.parse(DAILY.read_text(encoding="utf-8"))
+    problems: list[str] = []
+    found: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names = [node.target.id]
+        else:
+            continue
+        name = next((n for n in names if n in PROGRESS_CONSTANTS), None)
+        if name is None or node.value is None:
+            continue
+        found.add(name)
+        for lineno, text in _strings(node.value):
+            # PROGRESS_STEPS 里的 TASK_STEPS key（StartUp / Fight2…）和步骤 key 不上界面。
+            if text.isascii():
+                continue
+            for word in banned_in(text):
+                problems.append(f"maa_daily.py:{lineno} {name} 「{word}」 {text!r}")
+    missing = set(PROGRESS_CONSTANTS) - found
+    if missing:
+        problems.append(f"maa_daily.py 里找不到 {sorted(missing)}")
+    return problems
+
+
 def tearDownModule() -> None:
     # 这里只读源码，不碰 HOME；照全套测试的规矩（test_isolation）也查一遍。
     _isolation.assert_shared_home_clean()
@@ -216,6 +247,10 @@ class UiCopyTests(unittest.TestCase):
     def test_gui_copy_has_no_implementation_words(self) -> None:
         problems = scan_swift()
         self.assertEqual(problems, [], "界面上出现了实现层的词：\n" + "\n".join(problems))
+
+    def test_progress_notes_have_no_implementation_words(self) -> None:
+        problems = scan_progress()
+        self.assertEqual(problems, [], "进度文件的文案里出现了实现层的词：\n" + "\n".join(problems))
 
     def test_gui_receipts_have_no_implementation_words(self) -> None:
         problems = scan_action()

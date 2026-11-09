@@ -1001,6 +1001,327 @@ def progress_content(
     return (heading + "\n" + "\n".join(status_lines))[:1990]
 
 
+# ---- 本场进度文件 `runs/<场>.progress.json`（DEV_GUIDE §12.3，不变量 #65） ----
+# 和 Discord 进度消息同一个 5 秒循环、同一套解析（`_task_state` / `_offline_keys` /
+# `_fight_times` / `_drop_pairs`），GUI 只渲染它。字段只增不改语义；写失败只打一行 stderr。
+PROGRESS_SCHEMA_VERSION = 1
+# (key, 界面上的词, 对应的 TASK_STEPS key)。顺序就是执行顺序。
+PROGRESS_STEPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("startup", "启动游戏", ("StartUp",)),
+    ("annihilation", "剿灭", ("Annihilation",)),
+    ("fight", "刷理智", ("Fight", "Fight2")),
+    ("infrast", "基建", ("Infrast",)),
+    ("recruit", "公招", ("Recruit",)),
+    ("mall", "商店", ("Mall",)),
+    ("award", "领奖", ("Award",)),
+)
+# 恢复动作的说明（`notes[].text`）。界面原样显示，受 tests/test_ui_copy.py 的禁用词守门。
+PROGRESS_NOTES = {
+    "stage_manager": "已临时关掉台前调度，跑完再打开",
+    "window": "游戏窗口没摆好，照常开始",
+    "screen_lost": "游戏画面丢了，已把游戏窗口摆回来",
+    "connect_retry": "游戏画面没拿到，{wait}后摆好窗口再试（{n}/{limit}）",
+    "connect_gave_up": "游戏画面一直拿不到，不再重试",
+    "offline_retry": "游戏没登录上，{wait}后重启（{n}/{limit}）",
+    "offline_gave_up": "游戏一直没登录上，不再重启",
+    "proxy_break": "代理指挥连着失误 {n} 次，先停下刷理智",
+    "salvage": "补跑基建、公招、商店和领奖",
+    "fallback": "{stage} 没打成，改刷后备关 {spare}",
+    "no_time": "剩下的时间不够，不再补跑",
+    "timeout": "超时了，已停下",
+    "cancelled": "已按你的要求停下",
+}
+# 算 ETA 时最多看最近这么多份旧进度文件。
+PROGRESS_HISTORY_FILES = 20
+_PROGRESS_STATE = {"completed": "done", "failed": "failed", "running": "running", "pending": "pending"}
+_TASK_LABELS = {key: label for key, _emoji, label, _running in TASK_STEPS}
+
+
+def _wait_text(seconds: int) -> str:
+    return f"{seconds // 60} 分钟" if seconds >= 60 else f"{seconds} 秒"
+
+
+def progress_path_for(log_path: Path) -> Path:
+    """`runs/<场>.log` → `runs/<场>.progress.json`（和日志、快照同名）。"""
+    return log_path.with_name(log_path.stem + ".progress.json")
+
+
+def _stage_ap_cost(stage: str, config: Config) -> int | None:
+    import maa_copilot
+
+    index = maa_copilot.load_stage_index(config)
+    resolved = maa_copilot.resolve_copilot_stage(stage, index)
+    return maa_copilot.stage_sanity_cost(resolved[0], resolved[1], config) if resolved else None
+
+
+def _fight_stream_states(lines: list[str]) -> list[str]:
+    """这一趟流式输出里每个 Fight 段的状态（还没有收尾汇总时用来分剿灭和刷理智）。"""
+    states: list[str] = []
+    for raw in lines:
+        event = _TASK_EVENT_RE.fullmatch(raw.strip())
+        if not event or event.group(1) != "Fight":
+            continue
+        if event.group(2) == "Start":
+            states.append("running")
+        elif states:
+            states[-1] = "done" if event.group(2) == "Completed" else "failed"
+    return states
+
+
+def progress_history(runs_dir: Path, exclude: Path) -> dict[str, float]:
+    """以前各场进度文件里每一步的耗时中位数（秒）。读不到就是空。"""
+    import statistics
+
+    samples: dict[str, list[float]] = {}
+    try:
+        files = sorted(runs_dir.glob("*.progress.json"))
+    except OSError:
+        return {}
+    for path in [p for p in files if p != exclude][-PROGRESS_HISTORY_FILES:]:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            for step in data.get("steps") or []:
+                if step.get("state") != "done" or not step.get("started_at") or not step.get("finished_at"):
+                    continue
+                seconds = (
+                    datetime.fromisoformat(step["finished_at"]) - datetime.fromisoformat(step["started_at"])
+                ).total_seconds()
+                if seconds >= 0:
+                    samples.setdefault(str(step.get("key")), []).append(seconds)
+        except Exception:  # noqa: BLE001 — (c) 旧文件坏了就不算它，ETA 只是参考
+            continue
+    return {key: statistics.median(values) for key, values in samples.items()}
+
+
+class RunProgressFile:
+    """一场的进度文件。所有方法永不抛（不变量 #65）：写不进去只打一行 stderr，跑场照常。
+
+    `kind` 先只有 `daily`；抄作业以后写 `copilot`，`steps` 换成一关一格即可，其余字段不变。
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        phase: str,
+        plan: Plan,
+        config: Config,
+        started: datetime,
+        kind: str = "daily",
+    ) -> None:
+        self.path = path
+        self.phase = phase
+        self.plan = plan
+        self.config = config
+        self.started = started
+        self.kind = kind
+        self.status = "running"
+        self.final = False
+        self.booting = False
+        self.notes: list[dict[str, str]] = []
+        self.states: dict[str, str] = {key: "pending" for key, *_ in PROGRESS_STEPS}
+        self.times: dict[str, dict[str, str | None]] = {
+            key: {"started_at": None, "finished_at": None} for key, *_ in PROGRESS_STEPS
+        }
+        self.fight: dict[str, Any] = {"done": 0, "estimate": None, "sanity": None, "ap_cost": None, "drops": []}
+        self._ap_cost: int | None = None
+        self._ap_cost_known = False
+        self._warned = False
+        try:
+            self.history = progress_history(path.parent, path)
+        except Exception:  # noqa: BLE001 — (c) 没历史就不给 ETA
+            self.history = {}
+        self.write()
+
+    # -- 计划里有哪些事 --
+    def planned(self, key: str) -> bool:
+        tasks = self.plan.get("tasks") or {}
+        if key == "startup":
+            return True
+        if key == "annihilation":
+            return bool(tasks.get("fight", True)) and bool(self.plan.get("annihilation", True))
+        if key == "fight":
+            return bool(tasks.get("fight", True)) and bool(self.plan.get("farming", True))
+        return bool(tasks.get(key, True))
+
+    def _warn(self, exc: BaseException) -> None:
+        if not self._warned:
+            self._warned = True
+            print(f"进度文件没写成：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    # -- 对外 --
+    def boot(self) -> None:
+        """开始拉起游戏：日志还没有 StartUp 之前，启动游戏这一格算「进行中」。"""
+        self.booting = True
+        self._set("startup", "running" if self.states["startup"] == "pending" else self.states["startup"])
+        self.write()
+
+    def note(self, kind: str, **values: Any) -> None:
+        try:
+            text = PROGRESS_NOTES[kind].format(**values)
+            self.notes.append({"at": now_beijing().isoformat(), "text": text})
+        except Exception as exc:  # noqa: BLE001 — (c) 进度文件不能拖垮跑场（#65）
+            self._warn(exc)
+        self.write()
+
+    def update(self, lines: list[str], *, live: list[str] | None = None, plan: Plan | None = None) -> None:
+        if self.final:
+            return
+        try:
+            self._compute(lines, live if live is not None else lines, plan or self.plan)
+        except Exception as exc:  # noqa: BLE001 — (c) 解析出错不能拖垮跑场（#65）
+            self._warn(exc)
+        self.write()
+
+    def finish(self, status: str, lines: list[str] | None = None) -> None:
+        if self.final:
+            return
+        if lines is not None:
+            try:
+                self._compute(lines, [], self.plan)
+            except Exception as exc:  # noqa: BLE001 — (c) 同上
+                self._warn(exc)
+        self.status = status
+        for key, *_ in PROGRESS_STEPS:
+            state = self.states[key]
+            if state == "running":
+                self._set(key, "done" if status == "success" else "failed")
+            elif state == "pending" and self.planned(key):
+                self._set(key, "skipped")
+        if self.states["fight"] == "done":
+            self.fight["estimate"] = self.fight["done"]
+        self.final = True
+        self.write()
+
+    # -- 计算 --
+    def _set(self, key: str, state: str) -> None:
+        if not self.planned(key):
+            state = "skipped"
+        previous = self.states[key]
+        if state == previous:
+            return
+        stamp = now_beijing().isoformat()
+        times = self.times[key]
+        if state == "pending":
+            times["started_at"] = times["finished_at"] = None
+        elif state == "running":
+            times["started_at"] = times["started_at"] or stamp
+            times["finished_at"] = None
+        elif state in ("done", "failed"):
+            times["started_at"] = times["started_at"] or stamp
+            times["finished_at"] = stamp
+        self.states[key] = state
+
+    def _compute(self, lines: list[str], live: list[str], plan: Plan) -> None:
+        clean = [_clean_line(line, 300) for line in lines if line.strip()]
+        offline = _offline_keys(clean)
+
+        def one(task_key: str) -> str:
+            state = _task_state(clean, task_key, _TASK_LABELS[task_key])
+            if task_key in offline and state != "running":
+                return "failed"
+            return _PROGRESS_STATE[state]
+
+        states = {"startup": one("StartUp"), "annihilation": one("Annihilation")}
+        first, second = one("Fight"), one("Fight2")
+        if "running" in (first, second):
+            states["fight"] = "running"
+        elif second == "done" or (first == "done" and second != "failed"):
+            states["fight"] = "done"
+        elif "failed" in (first, second):
+            states["fight"] = "failed"
+        else:
+            states["fight"] = "pending"
+        # 收尾汇总出来之前，剿灭和刷理智在流式输出里都是 `Fight`：按这一趟的计划分开。
+        live_clean = [_clean_line(line, 300) for line in live if line.strip()]
+        stream = _fight_stream_states(live_clean)
+        if stream and not any(_SUMMARY_HEAD_RE.match(line) for line in live_clean):
+            tasks = plan.get("tasks") or {}
+            if bool(tasks.get("fight", True)) and bool(plan.get("annihilation", True)) and not plan.get("fallback_run"):
+                states["annihilation"], stream = stream[0], stream[1:]
+            if stream:
+                states["fight"] = "running" if "running" in stream else stream[-1]
+            elif states["fight"] == "running":
+                states["fight"] = "pending"
+        for key in ("infrast", "recruit", "mall", "award"):
+            states[key] = one(key.capitalize())
+        if self.booting and states["startup"] == "pending" and not any(
+            state != "pending" for key, state in states.items() if key != "startup"
+        ):
+            states["startup"] = "running"
+        # 做完的事不倒回「没开始」（收尾时只有汇总、没有流式段）；整份输出都没有任务起止
+        # 才是真的从头来（没登录上、重启游戏后整场重跑）。
+        restarted = not any(_TASK_EVENT_RE.fullmatch(line.strip()) for line in clean)
+        for key, state in states.items():
+            if state == "pending" and self.states[key] in ("done", "failed") and not restarted:
+                continue
+            self._set(key, state)
+
+        sanity = _last_match(clean, r"Current sanity:\s*(\d+)\s*/\s*(\d+)")
+        done = 0 if fight_wiped_out(clean)[0] else _fight_times(clean)
+        self.fight["done"] = done
+        self.fight["drops"] = [{"name": name, "count": count} for name, count in _drop_pairs(clean)]
+        self.fight["sanity"] = (
+            {"current": int(sanity.group(1)), "max": int(sanity.group(2))} if sanity else None
+        )
+        if self.states["fight"] == "running" and sanity and not self._ap_cost_known:
+            self._ap_cost_known = True
+            try:
+                self._ap_cost = _stage_ap_cost(str(plan.get("stage") or ""), self.config)
+            except Exception:  # noqa: BLE001 — (c) 查不到每把理智就不估总数
+                self._ap_cost = None
+        self.fight["ap_cost"] = self._ap_cost
+        if self.states["fight"] == "done":
+            self.fight["estimate"] = done
+        elif self.states["fight"] == "running" and sanity and self._ap_cost:
+            self.fight["estimate"] = done + int(sanity.group(1)) // self._ap_cost
+        else:
+            self.fight["estimate"] = None
+
+    def _eta(self) -> str | None:
+        if self.final or not self.history:
+            return None
+        now = now_beijing()
+        remaining = 0.0
+        for key, *_ in PROGRESS_STEPS:
+            state = self.states[key]
+            if state not in ("pending", "running"):
+                continue
+            if key not in self.history:
+                return None
+            spent = 0.0
+            started = self.times[key]["started_at"]
+            if state == "running" and started:
+                spent = (now - datetime.fromisoformat(started)).total_seconds()
+            remaining += max(0.0, self.history[key] - spent)
+        return (now + timedelta(seconds=remaining)).isoformat(timespec="seconds")
+
+    def payload(self) -> dict[str, Any]:
+        current = next((key for key, *_ in PROGRESS_STEPS if self.states[key] == "running"), None)
+        return {
+            "schema_version": PROGRESS_SCHEMA_VERSION,
+            "kind": self.kind,
+            "phase": self.phase,
+            "started_at": self.started.isoformat(),
+            "updated_at": now_beijing().isoformat(),
+            "status": self.status,
+            "current": None if self.final else current,
+            "steps": [
+                {"key": key, "label": label, "state": self.states[key], **self.times[key]}
+                for key, label, _tasks in PROGRESS_STEPS
+            ],
+            "fight": dict(self.fight),
+            "notes": list(self.notes),
+            "eta": self._eta(),
+        }
+
+    def write(self) -> None:
+        try:
+            atomic_write_json(self.path, self.payload())
+        except Exception as exc:  # noqa: BLE001 — (c) 写失败不能影响跑场（#65）
+            self._warn(exc)
+
+
 def extract_summary(
     stdout_lines: list[str],
     stderr_lines: list[str],
@@ -1402,6 +1723,7 @@ def run_maa(
     timeout: int | None = None,
     carry_lines: list[str] | None = None,
     append: bool = False,
+    progress: RunProgressFile | None = None,
 ) -> tuple[int, list[str], list[str]]:
     maa = str(config.get("maa_bin", "/opt/homebrew/bin/maa"))
     # maa-cli 0.7.5's --log-file redirects logs away from stderr.  Capture the
@@ -1495,12 +1817,16 @@ def run_maa(
                             warning = f"摆回游戏窗口失败：{exc}"
                         note = f"{SCREENCAP_SETTLE_NOTE}{warning}".strip()
                         stderr_lines.append(note)
+                        if progress is not None:
+                            progress.note("screen_lost")
                         with log_lock:
                             for step in trail:
                                 log_handle.write(step + "\n")
                             log_handle.write(note + "\n")
                     screencap_failures = failures
                     content = progress_content(prefix + live, plan=plan)
+                    if progress is not None:
+                        progress.update(prefix + live, live=live, plan=plan)
                     # 没有子区（Discord 不可用，不变量 #63）就不发进度，只写日志。
                     if content != previous and thread_id and progress_message_id:
                         try:
@@ -1544,7 +1870,11 @@ def run_maa(
         with log_path.open("a", encoding="utf-8") as log_handle:
             log_handle.write(timeout_message + "\n")
         return_code = 124
+        if progress is not None:
+            progress.note("timeout")
     elif proxy_tripped:
+        if progress is not None:
+            progress.note("proxy_break", n=proxy_tripped)
         break_message = (
             f"连续 {proxy_tripped} 批代理指挥失误，理智全额返还、一关没打成，"
             "已中止 maa run，避免空转到超时。"
@@ -1567,6 +1897,7 @@ def run_maa_resilient(
     timeout: int | None = None,
     carry_lines: list[str] | None = None,
     log_preamble: list[str] | None = None,
+    progress: RunProgressFile | None = None,
 ) -> tuple[int, list[str], list[str], int, int]:
     """跑 maa run；一个键都没点成的两类失败上重开。末两位是（连接重开, 掉线重开）次数。
 
@@ -1616,6 +1947,7 @@ def run_maa_resilient(
             timeout=remaining,
             carry_lines=list(carry_lines or []) + stdout_all + stderr_all,
             append=attempts > 0 or bool(log_preamble),
+            progress=progress,
         )
         attempts += 1
         stdout_all += out
@@ -1625,12 +1957,16 @@ def run_maa_resilient(
         if marker:
             if retries >= limit or budget - spent - delay < MIN_RUN_TIMEOUT_SECONDS:
                 say(f"游戏连接失败（{marker}），重试 {retries} 次{CONNECT_GAVE_UP}。")
+                if progress is not None:
+                    progress.note("connect_gave_up")
                 return code, stdout_all, stderr_all, retries, offline_retries
             retries += 1
             say(
                 f"游戏连接失败（{marker}）：MaaTools 没连上或截图为空，没有任务跑完。"
                 f"等 {delay}s、把游戏窗口摆回台前后重开第 {retries} 趟。"
             )
+            if progress is not None:
+                progress.note("connect_retry", wait=_wait_text(delay), n=retries, limit=limit)
             time.sleep(delay)
             trail: list[str] = []
             try:
@@ -1650,12 +1986,16 @@ def run_maa_resilient(
                 or budget - spent - wait - RESTART_ALLOWANCE_SECONDS < MIN_RUN_TIMEOUT_SECONDS
             ):
                 say(f"游戏没登录上（获取网络配置失败），重启游戏 {offline_retries} 次{OFFLINE_GAVE_UP}。")
+                if progress is not None:
+                    progress.note("offline_gave_up")
                 return code, stdout_all, stderr_all, retries, offline_retries
             offline_retries += 1
             say(
                 f"游戏没登录上（{GAME_OFFLINE_MARKER}：获取网络配置失败），点确认救不回来。"
                 f"等 {wait}s 后重启游戏、整场重跑第 {offline_retries} 趟。"
             )
+            if progress is not None:
+                progress.note("offline_retry", wait=_wait_text(wait), n=offline_retries, limit=offline_limit)
             time.sleep(wait)
             _append_log(log_path, conf_probe())
             trail = []
@@ -1765,6 +2105,7 @@ def _fallback_fight_run(
     progress_message_id: str,
     carry_lines: list[str],
     elapsed: float,
+    progress: RunProgressFile | None = None,
 ) -> tuple[int | None, list[str], list[str]]:
     """主关空跑失败后改刷后备关。返回码为 None 表示没跑（无后备关 / 关闭 / 时间不够）。"""
     if not bool(config.get("fight_fallback_on_error", True)):
@@ -1775,8 +2116,12 @@ def _fallback_fight_run(
     remaining = int(config.get("maa_run_timeout", 3000)) - int(elapsed)
     floor = max(60, int(config.get("fight_fallback_min_seconds", 300)))
     if remaining < floor:
+        if progress is not None:
+            progress.note("no_time")
         return None, [], [f"剩余预算 {max(0, remaining)}s 不足 {floor}s，跳过后备关补跑。"]
     atomic_write_text(task_path, render_daily_toml(retry_plan, config))
+    if progress is not None:
+        progress.note("fallback", stage=plan_stage_label(plan), spare=retry_plan.get("stage"))
     code, out, err = run_maa(
         config,
         log_path,
@@ -1786,6 +2131,7 @@ def _fallback_fight_run(
         retry_plan,
         timeout=remaining,
         carry_lines=carry_lines,
+        progress=progress,
     )
     note = (
         f"刷理智 {plan_stage_label(plan)} 失败且未消耗理智，"
@@ -1805,6 +2151,7 @@ def _salvage_run(
     progress_message_id: str,
     carry_lines: list[str],
     elapsed: float,
+    progress: RunProgressFile | None = None,
 ) -> tuple[int | None, list[str], list[str]]:
     """熔断后补跑剩余任务链。返回码为 None 表示没跑（无事可做或时间不够）。"""
     if not bool(config.get("proxy_failure_salvage", True)):
@@ -1816,8 +2163,12 @@ def _salvage_run(
     remaining = int(config.get("maa_run_timeout", 3000)) - int(elapsed)
     floor = max(60, int(config.get("proxy_failure_salvage_min_seconds", 300)))
     if remaining < floor:
+        if progress is not None:
+            progress.note("no_time")
         return None, [], [f"剩余预算 {max(0, remaining)}s 不足 {floor}s，跳过补跑。"]
     atomic_write_text(task_path, render_daily_toml(retry_plan, config))
+    if progress is not None:
+        progress.note("salvage")
     code, out, err = run_maa(
         config,
         log_path,
@@ -1827,6 +2178,7 @@ def _salvage_run(
         retry_plan,
         timeout=remaining,
         carry_lines=carry_lines,
+        progress=progress,
     )
     return code, out, ["代理指挥失误熔断，已补跑剩余任务（不含刷理智）。", *err]
 
@@ -2146,7 +2498,7 @@ def execute(phase: Phase, manual_token: str = "") -> int:
     关游戏、还原台前调度、发战报，`last_run.status = cancelled`；落在主流程之外（拿到
     锁之后、开游戏之前，或者收尾时）也补写 `cancelled`。返回 130。
     """
-    marks: dict[str, bool] = {"locked": False, "finished": False}
+    marks: dict[str, Any] = {"locked": False, "finished": False, "progress": None}
     with interrupt_once():
         try:
             return _execute(phase, manual_token, marks)
@@ -2158,10 +2510,12 @@ def execute(phase: Phase, manual_token: str = "") -> int:
                     "return_code": CANCEL_EXIT_CODE,
                     "summary": CANCELLED_NOTE,
                 })
+                if marks["progress"] is not None:
+                    marks["progress"].finish("cancelled")
             return CANCEL_EXIT_CODE
 
 
-def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
+def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
     started = now_beijing()
     config = load_config()
     # Discord 只是通知出口：缺频道 / token 时两个都是空串，本场照跑（不变量 #63）。
@@ -2197,6 +2551,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
     log_path = RUNS_DIR / f"{run_stem}.log"
     screenshot_path = RUNS_DIR / f"{run_stem}.png"
     report_path = RUNS_DIR / f"{run_stem}-report.json"
+    progress_path = progress_path_for(log_path)
 
     # K17：07:50 的上游更新拖过了开跑时间 → 等它跑完（有上限），等掉的时间从本场预算里扣。
     waited = wait_for_update_holder(config)
@@ -2222,6 +2577,11 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
         # This is the immutable per-run plan snapshot. Later plan.json writes
         # cannot change this Python object or this file.
         atomic_write_json(snapshot_path, snapshot)
+        # 本场进度文件（#65）：先写一份空的，盖掉同名旧场；之后每 5 秒和收尾各写一次。
+        progress = RunProgressFile(
+            progress_path, phase=phase, plan=plan, config=config, started=started
+        )
+        marks["progress"] = progress
         merge_last_run(
             {
                 "status": "running",
@@ -2245,6 +2605,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
                 "cleanup_errors": [],
                 "summary": "",
                 "report": None,
+                "progress": str(progress_path),
             },
             new_run=True,
         )
@@ -2269,6 +2630,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
                 what="跳过通知",
             )
             merge_last_run({"status": "skipped", "finished_at": now_beijing().isoformat()})
+            progress.finish("skipped")
             return 0
 
         # spike §6(c) 方案 B：开跑前离线查一次上游，只认「源被改了」和「不自洽」两种硬拒。
@@ -2276,6 +2638,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
         blocked = upstream_hard_block(config)
         if blocked:
             report_upstream_block(token, channel_id, phase, blocked, now_beijing())
+            progress.finish("failed")
             return 1
 
         # PLAN_NAV_GATE B: the automatic phases must not take the device away
@@ -2287,6 +2650,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
                 report_game_busy(
                     config, token, channel_id, phase, probe_detail, now_beijing()
                 )
+                progress.finish("skipped")
                 return 0
 
         game_opened = False
@@ -2310,10 +2674,13 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
         startup_error = ""
         # 不变量 #62：拿到锁之后、开游戏之前关台前调度，finally 里关完游戏再还原。永不抛。
         stage_manager_paused = maa_playcover.pause_stage_manager(config)
+        if stage_manager_paused:
+            progress.note("stage_manager")
         try:
             require_executable(config, "maa_bin", "/opt/homebrew/bin/maa", "maa-cli")
             maa_playcover.verify_game_installed(config)
             launching = True
+            progress.boot()
             maa_playcover.launch_game(config)
             game_opened = True
             maa_playcover.wait_for_game(config)
@@ -2341,6 +2708,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
             )
             if settle_warning:
                 stderr_lines.append(settle_warning)
+                progress.note("window")
             prior_errors = list(stderr_lines)
             (
                 return_code,
@@ -2357,6 +2725,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
                 plan,
                 carry_lines=prior_errors,
                 log_preamble=settle_trail,
+                progress=progress,
             )
             stderr_lines = prior_errors + run_errors
             cancelled = return_code == CANCEL_EXIT_CODE
@@ -2390,6 +2759,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
                     progress_message_id=progress_message_id,
                     carry_lines=stdout_lines + stderr_lines,
                     elapsed=(now_beijing() - started).total_seconds(),
+                    progress=progress,
                 )
                 if salvage_code is not None:
                     return_code = salvage_code
@@ -2410,6 +2780,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
                     progress_message_id=progress_message_id,
                     carry_lines=stdout_lines + stderr_lines,
                     elapsed=(now_beijing() - started).total_seconds(),
+                    progress=progress,
                 )
                 if fallback_code is not None:
                     return_code = fallback_code
@@ -2561,6 +2932,9 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, bool]) -> int:
             "inventory_error": inventory_error or None,
             "report": None if report_error else str(report_path),
         }
+        if cancelled:
+            progress.note("cancelled")
+        progress.finish(finished["status"], stdout_lines + stderr_lines)
         if plan.get("annihilation") and annihilation_consumed(stdout_lines + stderr_lines):
             finished["annihilation_game_day"] = cn_game_day(started)
             finished["annihilation_finished_at"] = now_beijing().isoformat()

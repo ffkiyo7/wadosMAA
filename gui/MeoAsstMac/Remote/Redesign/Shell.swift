@@ -225,7 +225,7 @@ struct RunStateView: View {
     /// 详情栏还要放「日志」按钮和两侧留白，约 130pt；剩下的给胶囊。
     private func fit(busy: Bool) -> Fit {
         let room = width - 130
-        if busy { return room >= 230 ? .full : room >= 150 ? .medium : .compact }
+        if busy { return room >= (etaText == nil ? 230 : 300) ? .full : room >= 150 ? .medium : .compact }
         return room >= 270 ? .full : room >= 200 ? .medium : .compact
     }
 
@@ -280,6 +280,9 @@ struct RunStateView: View {
                             .controlSize(.mini)
                             .tint(WM.game)
                     }
+                }
+                if fit == .full, let eta = etaText {
+                    Text(eta).foregroundStyle(WM.f2).monospacedDigit().lineLimit(1)
                 }
             }
         } else {
@@ -384,6 +387,12 @@ struct RunStateView: View {
 
     private var fightCount: String? {
         remoteStage?.key == "Fight" ? store.progress.fightText : nil
+    }
+
+    /// 「约 08:12 结束」：maa-remote 按历史耗时估的，没有就不显示。
+    private var etaText: String? {
+        guard liveRun, let eta = store.progress.eta else { return nil }
+        return "约 \(RunLock.beijingClock(eta)) 结束"
     }
 
     private var liveFraction: Double? {
@@ -587,6 +596,7 @@ struct LogInspector: View {
         case .stage: .primary
         case .ok: WM.ok
         case .error: WM.danger
+        case .note: WM.game
         }
     }
 }

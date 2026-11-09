@@ -2,6 +2,7 @@
 //  RunStageParser.swift
 //  Wado's MAA
 //
+//  过渡期用：maa-remote 没给 `last_run.progress`（旧版、抄作业）时才用它，见 RunProgress.swift。
 //  maa-cli 日志 → 阶段。只认整行的 `<Task> Start|Completed|Error|Stopped` 和 `AllTasksCompleted`，
 //  其余行（理智、掉落、公招 tag……）一律不看。只依赖 Foundation，方便单独拿出来测。
 //

@@ -2,9 +2,13 @@
 //  RunProgress.swift
 //  Wado's MAA
 //
-//  maa-remote 跑日常 / 手动场 / 抄作业时，跟着本场的 maa-cli 日志（`last_run.log`，DEV_GUIDE §12.3）
-//  算出现在在哪个阶段。`RemoteStore` 每次读到 `last_run.json` 就喂进来；运行中每秒只读日志新增的部分
-//  （`state/maa/` 的目录监听收不到 `runs/` 里的追加）。跑完、切环境就停。
+//  maa-remote 跑日常 / 手动场 / 抄作业时，现在做到哪了。`RemoteStore` 每次读到 `last_run.json` 就喂进来；
+//  运行中每秒读一次（`state/maa/` 的目录监听收不到 `runs/` 里的改动）。跑完、切环境就停。
+//
+//  数据来源（DEV_GUIDE §12.3）：
+//  - 有 `last_run.progress`：读 maa-remote 写的 `runs/<场>.progress.json`，步骤、刷理智把数、ETA、
+//    重试 / 重启这些说明都照它显示，自己不解析日志；
+//  - 没有（旧版 maa-remote、抄作业）：退回跟 maa-cli 日志（`last_run.log`），用 `RunStageParser` 猜。
 //
 
 import Foundation
@@ -12,7 +16,7 @@ import Observation
 
 @MainActor @Observable final class RunProgress {
     struct Entry: Identifiable, Equatable {
-        enum Tone { case run, stage, ok, error }
+        enum Tone { case run, stage, ok, error, note }
 
         let id = UUID()
         let date: Date
@@ -24,12 +28,19 @@ import Observation
 
     /// 步骤条上的一格：计划里要做的一件事。
     struct Step: Identifiable, Equatable {
-        enum State { case pending, running, done, failed, skipped }
+        enum State: String { case pending, running, done, failed, skipped }
 
         let key: String
         let label: String
         var state: State = .pending
         var id: String { key }
+    }
+
+    /// maa-remote 记下的恢复动作（重试、重启、摆窗、补跑……），给玩家看的原话。
+    struct Note: Identifiable, Equatable {
+        let id: Int
+        let date: Date?
+        let text: String
     }
 
     /// 最近一场的阶段行（开始、各阶段、出错、结果）。新一场开跑时清空。
@@ -49,6 +60,10 @@ import Observation
     /// 刷理智估计一共几把：已打 + 剩余理智 ÷ 每把消耗；拿不到每把消耗或理智时是 nil。刷理智做完后是确数。
     private(set) var fightTotal: Int?
     private(set) var fightTotalExact = false
+    /// 本场的恢复说明，按时间先后。只有新版 maa-remote（有 progress.json）才有。
+    private(set) var notes: [Note] = []
+    /// 预计几点结束；没有历史耗时或已结束时是 nil。
+    private(set) var eta: Date?
 
     /// 有一场在跟（或刚跟完）。
     var hasRun: Bool { runKey != nil }
@@ -90,6 +105,10 @@ import Observation
     /// 跟的时候日志还没建、或还是同名旧场的内容：之后读到的都是现场发生的。
     @ObservationIgnored private var sawNotReady = false
     @ObservationIgnored private var parser = RunStageParser(copilot: false, annihilationPlanned: false)
+    /// maa-remote 写的本场进度文件；nil = 旧版 maa-remote 或抄作业，退回解析日志。
+    @ObservationIgnored private var progressURL: URL?
+    /// 计划里要做的事（`planSteps`）；进度文件里其余的格子不画。
+    @ObservationIgnored private var plannedKeys: Set<String> = []
     @ObservationIgnored private var poll: Task<Void, Never>?
 
     /// 读到新的 `last_run.json` 时调用。
@@ -99,8 +118,14 @@ import Observation
         let key = (run["phase"]?.string ?? "") + "|" + startedText
         if status == "running" {
             if key != runKey { begin(run: run, key: key, started: RunLock.parseISO(startedText)) }
-            // 旧版 maa-remote 运行中不给 `log`，那就只有开始和结果两行。
-            if let path = run["log"]?.string, !path.isEmpty {
+            if let path = run["progress"]?.string, !path.isEmpty {
+                let url = URL(fileURLWithPath: path)
+                if url != progressURL { progressURL = url }
+                // 日志只给「在 Finder 中显示」用，不解析。
+                logURL = run["log"]?.string.flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+                startPolling()
+            } else if let path = run["log"]?.string, !path.isEmpty {
+                // 旧版 maa-remote：跟日志。更旧的运行中连 `log` 都不给，那就只有开始和结果两行。
                 let url = URL(fileURLWithPath: path)
                 if url != logURL {
                     logURL = url
@@ -113,6 +138,7 @@ import Observation
             stopPolling()
             finished = true
             current = nil
+            eta = nil
             outcome = status
             for i in steps.indices where steps[i].state == .running {
                 steps[i].state = status == "success" ? .done : .failed
@@ -135,6 +161,10 @@ import Observation
         startedAt = nil
         outcome = nil
         steps = []
+        notes = []
+        eta = nil
+        progressURL = nil
+        plannedKeys = []
         resetFights()
     }
 
@@ -148,6 +178,10 @@ import Observation
         current = nil
         outcome = nil
         steps = Self.planSteps(run)
+        plannedKeys = Set(steps.map(\.key))
+        notes = []
+        eta = nil
+        progressURL = nil
         resetFights()
         let annihilation = run["plan"]?.object?["annihilation"]?.bool == true
         parser = RunStageParser(copilot: LastRunText.isCopilot(run), annihilationPlanned: annihilation)
@@ -229,6 +263,10 @@ import Observation
     }
 
     private func readNew() {
+        if progressURL != nil {
+            readProgressFile()
+            return
+        }
         guard let logURL else { return }
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: logURL.path),
             let size = (attributes[.size] as? NSNumber)?.uint64Value
@@ -286,5 +324,81 @@ import Observation
                 advance(to: RunStageParser.wrapUp.key)
             }
         }
+    }
+
+    // MARK: progress.json（新版 maa-remote）
+
+    /// 进度文件的步骤 key → 界面里一直用的 key（和 `planSteps`、状态条的 `"Fight"` 判断一致）。
+    static let fileKeys: [String: String] = [
+        "startup": "StartUp", "annihilation": "Annihilation", "fight": "Fight", "infrast": "Infrast",
+        "recruit": "Recruit", "mall": "Mall", "award": "Award",
+    ]
+
+    static func doing(_ key: String, _ label: String) -> String {
+        switch key {
+        case "StartUp": "正在启动游戏"
+        case "Annihilation": "正在打剿灭"
+        case "Fight": "正在刷理智"
+        case "Infrast": "正在基建换班"
+        case "Recruit": "正在公开招募"
+        case "Mall": "正在逛信用商店"
+        case "Award": "正在领取奖励"
+        default: "正在\(label)"
+        }
+    }
+
+    /// 读一遍进度文件，整份照抄过来；只给日志区补「新开始的一步」「没完成」和新的说明。
+    private func readProgressFile() {
+        guard let progressURL, let data = try? Data(contentsOf: progressURL),
+            case let .object(file)? = try? JSONDecoder().decode(JSONValue.self, from: data)
+        else { return }
+        // 同名旧场（今天第二次手动场）的文件：开始时刻对不上就当还没有。
+        if let startedAt, let fileStart = file["started_at"]?.string.flatMap(RunLock.parseISO),
+            abs(fileStart.timeIntervalSince(startedAt)) > 2
+        {
+            return
+        }
+        let now = Date()
+        var fresh: [Step] = []
+        for item in file["steps"]?.array ?? [] {
+            guard let object = item.object, let raw = object["key"]?.string else { continue }
+            let key = Self.fileKeys[raw] ?? raw
+            if !plannedKeys.isEmpty, !plannedKeys.contains(key) { continue }
+            let label = object["label"]?.string ?? key
+            let state = Step.State(rawValue: object["state"]?.string ?? "") ?? .pending
+            let old = steps.first { $0.key == key }?.state
+            if state != old {
+                let at = object["started_at"]?.string.flatMap(RunLock.parseISO)
+                if state == .running {
+                    entries.append(Entry(date: at ?? now, exact: at != nil, text: Self.doing(key, label), tone: .stage))
+                } else if state == .failed {
+                    let end = object["finished_at"]?.string.flatMap(RunLock.parseISO)
+                    entries.append(Entry(date: end ?? now, exact: end != nil, text: "\(label)未完成", tone: .error))
+                }
+            }
+            fresh.append(Step(key: key, label: label, state: state))
+        }
+        if !fresh.isEmpty { steps = fresh }
+
+        if let raw = file["current"]?.string, let step = steps.first(where: { $0.key == (Self.fileKeys[raw] ?? raw) }) {
+            current = RunStage(key: step.key, label: step.label, doing: Self.doing(step.key, step.label))
+        } else {
+            current = nil
+        }
+
+        let fight = file["fight"]?.object ?? [:]
+        fights = Int(fight["done"]?.number ?? 0)
+        fightTotal = fight["estimate"]?.number.map { Int($0) }
+        fightTotalExact = steps.first { $0.key == "Fight" }?.state == .done
+
+        let all = (file["notes"]?.array ?? []).enumerated().compactMap { index, item -> Note? in
+            guard let object = item.object, let text = object["text"]?.string, !text.isEmpty else { return nil }
+            return Note(id: index, date: object["at"]?.string.flatMap(RunLock.parseISO), text: text)
+        }
+        for note in all.dropFirst(notes.count) {
+            entries.append(Entry(date: note.date ?? now, exact: note.date != nil, text: note.text, tone: .note))
+        }
+        if all.count != notes.count { notes = all }
+        eta = file["eta"]?.string.flatMap(RunLock.parseISO)
     }
 }

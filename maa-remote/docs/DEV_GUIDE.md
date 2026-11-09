@@ -234,7 +234,7 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
    - 最后的 `Custom` 的 `task_names` **每项带 `Home@` 前缀**（`HOME_TASK_NAMES` = `["Home@QuickSwitch@ToHome#next", "Home@ReturnButtons#next"]`，手工展开，因为顶层 `task_names` 原样交给 `ProcessTask`）：`#back` 取第一个 `@` 之前的前缀，回到 `Home`（`action = Stop`）认出主页即成功（#5c，[incidents/2026-08-02-home-quickswitch-custom-error.md](./incidents/2026-08-02-home-quickswitch-custom-error.md)）。
    - `Infrast` 固定 `mode = 0`，MaaCore 按实时识别的干员、技能、心情排七类设施；不用无人机、不补源石碎片订单、宿舍不刷信赖。
      **链里没有 CloseDown**。`profiles/default.toml` 开用户资源层，`resource/tasks/tasks.json` 完整覆盖 `InfrastDormDoubleConfirmButton`（用 `PopupConfirm.png` 认红色确认条、点右侧对勾）。**这条覆盖还没有 run 级实测**；MaaCore 在**进程启动时**一次性载入 `resource/`。再遇到卡确认条先抓截图比对模板与位置，不要改 `roi` 猜（[incidents/2026-09-01-infrast-dorm-confirm-unverified.md](./incidents/2026-09-01-infrast-dorm-confirm-unverified.md)）。
-8. **`run_maa_resilient()` → `run_maa()`** — `maa run daily -v --batch`，注入 `MAA_CONFIG_DIR` / `MAA_LOG_PREFIX=Never` /（可选）剔除代理。两个 reader 线程把 stdout+stderr tee 到 `runs/<date>-<phase>.log`；每 5 秒把解析后的中文状态 PATCH 进子区消息，内容无变化不发，Discord 异常一律吞掉。超时 `maa_run_timeout`（3000s，给 Hermes 外层 3600s 留 10 分钟）→ terminate/kill，返回码 **124**；`KeyboardInterrupt` → **130**。重开与补跑见下。
+8. **`run_maa_resilient()` → `run_maa()`** — `maa run daily -v --batch`，注入 `MAA_CONFIG_DIR` / `MAA_LOG_PREFIX=Never` /（可选）剔除代理。两个 reader 线程把 stdout+stderr tee 到 `runs/<date>-<phase>.log`；每 5 秒把解析后的中文状态 PATCH 进子区消息，内容无变化不发，Discord 异常一律吞掉；同一个循环里用同一套解析写 `runs/<date>-<phase>.progress.json`（`RunProgressFile`，§12.3，#65），恢复动作（重试、重启、摆窗、补跑、改刷后备关、台前调度、超时、停下）各记一条 `notes`。超时 `maa_run_timeout`（3000s，给 Hermes 外层 3600s 留 10 分钟）→ terminate/kill，返回码 **124**；`KeyboardInterrupt` → **130**。重开与补跑见下。
    **停下（`run cancel`，#64）**：`execute()` 外面套 `interrupt_once()`，只有第一次 SIGINT 变成 `KeyboardInterrupt`，之后的忽略（不打断收尾）。落在 `maa run` 里 → 130；落在开游戏 / 等游戏 / 重开前等待 / 截图 → 主流程的 `except KeyboardInterrupt` 记 130。两种都不补跑、不截图，照常关游戏（开游戏半路上也关）、还原台前调度、发「⏹️ 已停止」战报，`last_run.status = cancelled`，返回 130。落在主流程之外（拿锁之后、开游戏之前，或收尾时）由外层补写 `cancelled`。
 9. **截图 + 主页校验**（`capture_home_screenshot()`）— 等 `home_screenshot_delay` 秒 → `maa_playcover.capture_screenshot()` → chmod 600 → `ocrbox`核对 `HOME_MARKERS`（终端/编队/采购中心/公开招募/基建/好友/档案/SANITY）命中 ≥ `HOME_MARKER_MIN`（4），不在就重截，最多 `home_screenshot_attempts`（3）次。截图失败不阻断；判定 False 让整场判红并在备注写命中数；无法判定（ocrbox 没部署 / 崩了）记 `None`、不改结论，写 `last_run.home_verify_detail`。这条闸门只挂日常链，抄作业直接 `capture_screenshot()`（#5b）。
 10. **`close_game()`**（在 `finally` 里，只要 `launch_game()` 被调过）：`TERM` → 等退出 → `pkill -f <完整路径>` 兜底 → 首字符加方括号的同一模式 `pgrep -f` 复核。
@@ -377,7 +377,7 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
   last_run.lock   flock（保护 last_run.json 的跨进程 read-modify-write）
   stage_manager.json 台前调度原状态 {enabled: true, saved_at}：只在「原本开着、被跑场临时关掉」期间存在，还原后删（#62）
   am/ pm/         空目录，只给 cron 传场次
-  runs/<date>-<phase>.{json,log,png}   快照 / 日志 / 截图（14 天）；同天同场次文件名复用，多次 run now 会覆盖 <date>-now.*
+  runs/<date>-<phase>.{json,log,png}   快照 / 日志 / 截图（14 天）；`<date>-<phase>.progress.json` 本场进度（§12.3）；同天同场次文件名复用，多次 run now 会覆盖 <date>-now.*
 
 ~/.hermes/state/agent-book/
   buttons.json    全局共享按钮登记表（MAA 只碰自己的前缀）
@@ -564,6 +564,7 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | 19 | 只有「查询成功且确实无活动」才清空活动关，格式不可辨认一律抛；闸门与解析器共用 `is_side_story_heading()`；`deploy.py` 不得用种子覆盖线上 `activity_stages` | `activity_snapshot()` + `test_snapshot_gate_and_parser_agree_on_what_a_heading_is`；`PRESERVED_RUNTIME_CACHE_KEYS` | [2026-09-02](./incidents/2026-09-02-deploy-overwrote-activity-stages.md) |
 | 25 | 由线上进程写回的运行时缓存键必须列入 `PRESERVED_RUNTIME_CACHE_KEYS`（线上有值一律保留，种子只首次兜底）；新增此类键必须同步加 | `deploy_state()` + `test_every_known_runtime_cache_key_is_preserved_on_deploy` | [2026-09-02](./incidents/2026-09-02-deploy-overwrote-activity-stages.md) |
 | 58 | 状态文件读时校验、写时带 `schema_version`（§6.1）；`config` / `plan` / `manual_run` 遇未知更高版本拒跑，`last_run` 告警宽读；所有读取都过 `check_schema()`；`schema_version` 不进 `PRESERVED_RUNTIME_CACHE_KEYS` | `check_schema()` / `*_SCHEMA_VERSION` + `migrate_live_config()` + `tests/test_state_schema.py` | — |
+| 65 | 本场进度文件 `runs/<场>.progress.json`：字段只增不改语义（改语义就升 `schema_version`）；写失败（含解析异常）只打一行 stderr，绝不影响跑场；`RunProgressFile` 的方法永不抛；GUI 只读不写。`notes` 文本只来自 `PROGRESS_NOTES`、步骤名只来自 `PROGRESS_STEPS`，两者都在 `test_ui_copy` 的禁用词扫描里；只在恢复点加 note，不改控制流 | `RunProgressFile` / `run_maa()` / `run_maa_resilient()` / `_execute()` + `ProgressFileTests` / `test_progress_notes_have_no_implementation_words` | REVIEW_2026-11-09 §1.3 |
 
 ### 8.6 材料推荐与自动定关
 | # | 不变量 | 落点 | 来由 |
@@ -767,9 +768,27 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 | 文件 | GUI 用到的字段 |
 |---|---|
 | `config.json` | `session_schedule`、`config_meta`、`maa_core_version` / `maa_cli_version`，以及 `config get` 列出的键 |
-| `last_run.json` | `status`、`phase`（`am` / `pm` / `now` / `copilot-<token>`）、`started_at` / `finished_at`、`summary`、`plan.stage` / `plan.tasks`（日常）、`stage`（抄作业）、`resource_update_*`、`log`（本场 maa-cli 日志的绝对路径。日常、手动场、抄作业**开跑那一笔就写上**，运行中逐行追加，GUI 只读新增部分、按 `<Task> Start` 显示当前阶段；文件可能还没建，或者在 maa run 开写前仍是同名旧场的内容——修改时间早于 `started_at` 的当没有，文件变短就从头读）。新一场开跑时只属于上一场的字段会被整批删掉（§6 `new_run`），读不到就当没有；判成败只看 `status`（`running` / `success` / `failed` / `skipped` / `cancelled`），不要读 `ok`。`thread_id` 可能是 `null`（Discord 不可用，#63），`report` 是本场战报文件 `runs/<场>-report.json` 的路径（日常才有） |
+| `last_run.json` | `status`、`phase`（`am` / `pm` / `now` / `copilot-<token>`）、`started_at` / `finished_at`、`summary`、`plan.stage` / `plan.tasks`（日常）、`stage`（抄作业）、`resource_update_*`、`log`（本场 maa-cli 日志的绝对路径。日常、手动场、抄作业**开跑那一笔就写上**，运行中逐行追加，GUI 只读新增部分、按 `<Task> Start` 显示当前阶段；文件可能还没建，或者在 maa run 开写前仍是同名旧场的内容——修改时间早于 `started_at` 的当没有，文件变短就从头读）。新一场开跑时只属于上一场的字段会被整批删掉（§6 `new_run`），读不到就当没有；判成败只看 `status`（`running` / `success` / `failed` / `skipped` / `cancelled`），不要读 `ok`。`thread_id` 可能是 `null`（Discord 不可用，#63），`report` 是本场战报文件 `runs/<场>-report.json` 的路径（日常才有）；`progress` 是本场进度文件的路径（日常开跑那一笔就写上；没有这个键 = 旧版 maa-remote 或抄作业，GUI 退回解析 `log`） |
+| `runs/<场>.progress.json` | 见下表。GUI 正在跑时每秒读一次（`state/maa/` 的目录监听收不到 `runs/` 里的改动），跑完再读一次终态 |
 | `plan.json` / `defaults.json` | 本场关卡、跳过；默认关和默认任务 |
 | `upstream.json` | 见下表 |
+
+`progress.json` 的字段（#65：只增不改语义；原子写，读到半个文件不会发生）：
+
+| 字段 | 含义 |
+|---|---|
+| `schema_version` | 现在是 1 |
+| `kind` | `daily`；以后抄作业写 `copilot`（`steps` 换成一关一格，其余字段不变） |
+| `phase` / `started_at` | 和 `last_run.json` 同一场；`started_at` 对不上就是同名旧场的文件，当没有 |
+| `updated_at` | 最近一次写的时间 |
+| `status` | `running` / `success` / `failed` / `cancelled` / `skipped` |
+| `current` | 正在做的那一步的 `key`；没有或已结束是 `null` |
+| `steps[]` | 固定 7 格、按执行顺序：`{key, label, state, started_at, finished_at}`。`key` ∈ `startup` / `annihilation` / `fight` / `infrast` / `recruit` / `mall` / `award`，`label` 是界面用词（启动游戏、剿灭、刷理智、基建、公招、商店、领奖）。`state` ∈ `pending` / `running` / `done` / `failed` / `skipped`：计划里没有的事一开始就是 `skipped`，结束时没轮到的也记 `skipped`。`fight` 合并两个刷理智块和后备关补跑 |
+| `fight` | `{done, estimate, sanity, ap_cost, drops}`：已打把数；估计总把数（`done + 当前理智 ÷ ap_cost`，刷完后等于 `done`，算不出是 `null`）；`sanity` = `{current, max}` 或 `null`；`ap_cost` 每把理智或 `null`；`drops` = `[{name, count}]`，不含返还的理智 |
+| `notes[]` | `{at, text}`，按时间追加：重试、重启、摆窗、补跑、改刷后备关、台前调度、超时、停下。`text` 是给玩家看的一句话，原样显示 |
+| `eta` | 预计结束时间（ISO）。按 `runs/` 下最近 20 份旧进度文件里每步耗时的中位数推；还没做的步里有一步没历史就是 `null`；结束后是 `null` |
+
+样例：`maa-remote/tests/fixtures/progress_sample.json`（`test_sample_fixture_matches_what_we_write` 守着字段集）。
 
 `upstream.json` 的字段：
 

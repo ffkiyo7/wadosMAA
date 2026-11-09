@@ -329,6 +329,7 @@ class LastRun(TypedDict, total=False):
     offline_retries: int
     inventory_error: str | None
     report: str | None
+    progress: str | None
     thread_id: str | None
     threads: list[LastRunThread]
     annihilation_game_day: str
@@ -361,7 +362,7 @@ RUN_SCOPED_LAST_RUN_KEYS: frozenset[str] = frozenset({
     "screenshot_error", "startup_error", "summary", "skip_reason", "game_probe",
     "emulator_probe", "home_verified", "home_verify_detail", "cleanup_errors",
     "proxy_failure_batches", "proxy_failure_sanity_refunded", "connect_retries",
-    "offline_retries", "inventory_error", "thread_id", "report",
+    "offline_retries", "inventory_error", "thread_id", "report", "progress",
 })
 
 
