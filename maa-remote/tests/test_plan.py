@@ -842,6 +842,20 @@ class PlanFightSwitchTests(unittest.TestCase):
         self.assertNotIn('type = "Fight"', toml)
         self.assertIn('type = "Infrast"', toml)
 
+    def test_fight_off_survives_a_later_change_to_the_same_session(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            plan_path = Path(raw) / "plan.json"
+            defaults = Path(raw) / "defaults.json"
+            with patch.object(maa_common, "PLAN_PATH", plan_path), \
+                 patch.object(maa_common, "DEFAULTS_PATH", defaults), \
+                 patch.object(maa_action, "PLAN_PATH", plan_path), \
+                 patch.object(maa_action, "is_run_locked", return_value=False):
+                self.assertTrue(maa_action.dispatch(["plan", "fight", "off", "pm"])[0])
+                self.assertTrue(maa_action.dispatch(["plan", "skip-today", "on", "pm"])[0])
+                self.assertTrue(maa_action.dispatch(["plan", "skip-today", "off", "pm"])[0])
+                pm = maa_common.effective_plan(phase="pm")
+        self.assertFalse(pm["tasks"]["fight"])
+
     def test_bad_values_are_refused(self) -> None:
         ok, _message, pm, _am = self._with_plan(["plan", "fight", "maybe", "pm"])
         self.assertFalse(ok)

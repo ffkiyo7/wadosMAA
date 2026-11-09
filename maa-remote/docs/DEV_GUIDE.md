@@ -358,7 +358,7 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
 ~/.hermes/state/maa/
   config.json     环境与阈值（§6.2）                                  ← 计划卡会改写
   defaults.json   持久默认：stage="1-7" / medicine=expiring / tasks 全开
-  plan.json       今日覆盖（按场次）：{date, sessions: {am: {stage, stage_source, skip, source, updated_at, farming_drops, farming_fallback_stage}, pm: {…}}, updated_at}
+  plan.json       今日覆盖（按场次）：{date, sessions: {am: {stage, stage_source, skip, fight, source, updated_at, farming_drops, farming_fallback_stage}, pm: {…}}, updated_at}
   manual_run.json 手动场请求（单文件）：{token, status ∈ pending/dispatched/expired/superseded, stage, choices, recommendation, recommended_stage, message_id, created_at, expires_at(+10min), …}； 手动关只经它传给 `maa_daily.py now <token>`；`run local` 另带 tasks / annihilation / source / forced
   last_run.json   最近一次运行状态 + threads[] + 资源更新时间戳
   upstream.json   上游更新分步结果（§12.3）

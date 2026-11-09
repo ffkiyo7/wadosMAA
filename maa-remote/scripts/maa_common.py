@@ -120,10 +120,12 @@ PLAN_PHASES = ("am", "pm")
 # `{itemId: 还差多少个}`（渲染成 Fight 的 `drops`，刷够即停），后者是刷够之后
 # 接着刷的第二个关。两者由 `maa_plan_card.apply_auto_stage()` 写，
 # `maa_action.set_stage()` 在手动选关时清空——手动选的关不带上限。
+# `fight`（`plan fight on|off`）也要在里面，否则改这一场的关或跳过时会把它丢掉。
 PLAN_SESSION_FIELDS = (
     "stage",
     "stage_source",
     "skip",
+    "fight",
     "source",
     "updated_at",
     "farming_drops",
