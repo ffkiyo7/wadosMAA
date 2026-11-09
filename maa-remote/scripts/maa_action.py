@@ -213,7 +213,7 @@ def _confirmation(plan: Plan, was_running: bool, phase: PlanPhase) -> str:
         )
     elif not (plan.get("tasks") or {}).get("fight", True):
         target = (
-            f"今天（{now.month}/{now.day}）的{label}不清理智（剿灭和刷理智都不打），"
+            f"今天（{now.month}/{now.day}）的{label}不刷理智（剿灭也不打），"
             f"基建 / 公招 / 商店 / 领奖照常；{other}不受影响。"
         )
     else:
@@ -228,7 +228,7 @@ def _confirmation(plan: Plan, was_running: bool, phase: PlanPhase) -> str:
 
 
 def _reject_phase(phase: str) -> tuple[bool, str]:
-    return False, f"场次只接受 am（早场）或 pm（晚场），收到 {phase[:20]!r}。"
+    return False, f"只能改早场（am）或晚场（pm），收到 {phase[:20]!r}。"
 
 
 def set_stage(stage: str, phase: str) -> tuple[bool, str]:
@@ -1965,6 +1965,54 @@ def copilot_status(token: str) -> tuple[bool, str]:
     return True, "⏳ 等待匹配……"
 
 
+def plan_today() -> tuple[bool, str, dict[str, Any]]:
+    """`plan today`：今天早场、晚场各打算做什么（只读本地，不改任何东西）。
+
+    关是谁定的看 `stage_source`；自动定关带的上限（`farming_drops`）换成物品名，
+    卡片上就能写「缺 X」。可换的关和计划卡下拉同源（`_stage_choices()`）。
+    改走现成的 `plan set-stage` / `plan skip-today` / `plan fight`。
+    """
+    import maa_farming
+    from maa_plan_card import _stage_choices
+
+    config = load_config()
+    schedule = maa_common.session_schedule(config)
+    names: dict[str, str] | None = None
+    sessions: list[dict[str, Any]] = []
+    for phase in PLAN_PHASES:
+        plan = effective_plan(phase=phase)
+        override = maa_common.session_override(phase)
+        drops = plan.get("farming_drops") or {}
+        if drops and names is None:
+            names = maa_farming.item_names(config)
+        sessions.append({
+            "phase": phase,
+            "name": PHASE_NAMES.get(phase, phase),
+            "time": str(schedule[phase]["time"]),
+            "enabled": bool(schedule[phase]["enabled"]),
+            "stage": str(plan.get("stage") or ""),
+            "stage_source": str(plan.get("stage_source") or ""),
+            "skip": bool(plan.get("skip")),
+            "tasks": dict(plan.get("tasks") or {}),
+            "drops": [
+                {"item_id": item_id, "name": (names or {}).get(item_id, item_id), "count": count}
+                for item_id, count in drops.items()
+            ],
+            "fallback_stage": str(plan.get("farming_fallback_stage") or ""),
+            "source": str(override.get("source") or ""),
+            "updated_at": str(override.get("updated_at") or ""),
+            "choices": [
+                {"label": label, "stage": stage, "description": description}
+                for label, stage, description in _stage_choices(plan, config)
+            ],
+        })
+    return True, "今天的计划。", {
+        "date": now_beijing().date().isoformat(),
+        "sessions": sessions,
+        "task_names": TASK_NAMES,
+    }
+
+
 def plan_refresh_card(phase: PlanPhase) -> tuple[bool, str, dict[str, Any]]:
     from maa_plan_card import refresh_card
 
@@ -1988,6 +2036,8 @@ def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
         return defaults_set(argv[2], *argv[3:])
     if argv[:2] == ["plan", "refresh-card"] and len(argv) == 3 and valid_phase(argv[2]):
         return plan_refresh_card(argv[2])
+    if argv == ["plan", "today"]:
+        return plan_today()
     if argv == ["run", "choices"]:
         return run_choices()
     if argv == ["copilot", "stages"]:

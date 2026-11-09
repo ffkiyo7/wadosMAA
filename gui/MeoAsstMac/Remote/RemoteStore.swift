@@ -274,6 +274,11 @@ struct RunReport: Identifiable, Equatable, Sendable {
     private(set) var defaults: DefaultsSnapshot?
     private(set) var schedule: ScheduleReport?
     private(set) var scheduleError: String?
+    /// 今天早场、晚场的计划（`plan today`）。
+    private(set) var todayPlan: TodayPlan?
+    private(set) var todayPlanError: String?
+    /// 正在改计划的那一场（`am` / `pm`）。
+    private(set) var planChanging: String?
     private(set) var lastRun: [String: JSONValue] = [:]
     private(set) var lockHolder: LockHolder?
     private(set) var schemaProblem: String?
@@ -358,6 +363,7 @@ struct RunReport: Identifiable, Equatable, Sendable {
         } catch {
             scheduleError = error.localizedDescription
         }
+        await loadTodayPlan()
         upstreamStatus = await RemoteGate.refreshStatus() ?? upstreamStatus
         reloadedAt = Date()
     }
@@ -458,6 +464,40 @@ struct RunReport: Identifiable, Equatable, Sendable {
         }
     }
 
+    func loadTodayPlan() async {
+        do {
+            let receipt = try await RemoteBridge.run(["plan", "today"])
+            if receipt.ok {
+                todayPlan = try receipt.decode(TodayPlan.self, snakeCase: false)
+                todayPlanError = nil
+            } else {
+                todayPlanError = receipt.message
+            }
+        } catch {
+            todayPlanError = error.localizedDescription
+        }
+    }
+
+    /// 改今天某一场的计划（`plan set-stage` / `skip-today` / `fight`），点了就生效。
+    /// 成功不弹回执：场卡自己会变；失败才在页面顶上说为什么。
+    func changePlan(_ phase: String, _ args: [String]) async {
+        guard !readOnly else {
+            post(false, schemaProblem ?? "只读")
+            return
+        }
+        guard planChanging == nil else { return }
+        clearNotice()
+        planChanging = phase
+        defer { planChanging = nil }
+        do {
+            let receipt = try await RemoteBridge.run(args + [phase])
+            if !receipt.ok { post(false, receipt.message) }
+        } catch {
+            post(false, error.localizedDescription)
+        }
+        await loadTodayPlan()
+    }
+
     func setConfig(_ key: String, _ value: JSONValue) async {
         await perform(["config", "set", key, value.jsonText])
     }
@@ -539,6 +579,8 @@ struct RunReport: Identifiable, Equatable, Sendable {
         defaults = nil
         schedule = nil
         scheduleError = nil
+        todayPlan = nil
+        todayPlanError = nil
         lastRun = [:]
         lockHolder = nil
         loadError = nil

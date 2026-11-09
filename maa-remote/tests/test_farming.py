@@ -1308,10 +1308,10 @@ class FarmingAutoStageTests(unittest.TestCase):
                     with self.subTest(phase=phase):
                         ok, message = maa_action.set_stage("1-7", phase)
                         self.assertFalse(ok)
-                        self.assertIn("场次只接受", message)
+                        self.assertIn("只能改早场", message)
                         ok, message = maa_action.skip_today("on", phase)
                         self.assertFalse(ok)
-                        self.assertIn("场次只接受", message)
+                        self.assertIn("只能改早场", message)
             self.assertFalse(plan_path.exists())
 
     def test_dispatch_requires_the_phase_argument(self) -> None:

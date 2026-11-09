@@ -59,6 +59,8 @@ EXTRA_ACTION_FUNCTIONS = {
     "dispatch_blocker", "_copilot_blackout_reason", "min_lead_reason", "depot_window_reason",
     "manual_run_blackout_reason", "_schedule_write", "_local_run_switches", "copilot_cancel",
     "copilot_status", "run_cancel",
+    # 首页场卡改计划走的是 Discord 也用的这几条（`dispatch()`），失败原因原样显示。
+    "set_stage", "skip_today", "fight_today", "_confirmation", "_reject_phase",
 }
 
 

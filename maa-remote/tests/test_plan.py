@@ -834,7 +834,7 @@ class PlanFightSwitchTests(unittest.TestCase):
     def test_fight_off_drops_both_fight_blocks_for_that_session_only(self) -> None:
         ok, message, pm, am = self._with_plan(["plan", "fight", "off", "pm"])
         self.assertTrue(ok, message)
-        self.assertIn("不清理智", message)
+        self.assertIn("不刷理智", message)
         self.assertFalse(pm["tasks"]["fight"])
         self.assertTrue(pm["tasks"]["infrast"])
         self.assertTrue(am["tasks"]["fight"])
@@ -861,6 +861,73 @@ class PlanFightSwitchTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(pm["tasks"]["fight"])
 
+
+
+class PlanTodayTests(unittest.TestCase):
+    """`plan today`（只给 Wado's MAA）：两场各打算做什么，只读、不写盘。"""
+
+    def _today(self, sessions=None, defaults=None, config=None):
+        config = config or {"session_schedule": {"am": {"time": "08:00", "enabled": True},
+                                                 "pm": {"time": "22:00", "enabled": False}}}
+        now = maa_common.now_beijing()
+        with tempfile.TemporaryDirectory() as raw:
+            plan_path = Path(raw) / "plan.json"
+            defaults_path = Path(raw) / "defaults.json"
+            if sessions is not None:
+                plan_path.write_text(json.dumps({
+                    "schema_version": 1, "date": now.date().isoformat(), "sessions": sessions,
+                }), encoding="utf-8")
+            if defaults is not None:
+                defaults_path.write_text(json.dumps(defaults), encoding="utf-8")
+            before = plan_path.read_bytes() if plan_path.exists() else None
+            choices = [("上次作战关卡", "", "x"), ("1-7 · 固源岩", "1-7", "y")]
+            with patch.object(maa_common, "PLAN_PATH", plan_path), \
+                 patch.object(maa_common, "DEFAULTS_PATH", defaults_path), \
+                 patch.object(maa_action, "PLAN_PATH", plan_path), \
+                 patch.object(maa_action, "load_config", return_value=config), \
+                 patch("maa_plan_card._stage_choices", return_value=choices), \
+                 patch("maa_farming.item_names", return_value={"30063": "全新装置"}):
+                result = maa_action.dispatch_gui(["plan", "today"])
+            after = plan_path.read_bytes() if plan_path.exists() else None
+        self.assertEqual(before, after)
+        assert result is not None
+        return result
+
+    def test_both_sessions_with_who_picked_the_stage_and_what_is_short(self) -> None:
+        ok, _message, data = self._today(
+            sessions={
+                "am": {"stage": "TL-9", "stage_source": "auto",
+                       "farming_drops": {"30063": 12}, "farming_fallback_stage": "1-7"},
+                "pm": {"stage": "CE-6", "stage_source": "discord", "skip": True, "fight": False,
+                       "source": "gui", "updated_at": "2026-11-09T12:00:00+08:00"},
+            },
+            defaults={"stage": "1-7", "tasks": {"mall": False}},
+        )
+        self.assertTrue(ok)
+        am, pm = data["sessions"]
+        self.assertEqual((am["phase"], am["name"], am["time"], am["enabled"]), ("am", "早场", "08:00", True))
+        self.assertEqual((am["stage"], am["stage_source"], am["skip"]), ("TL-9", "auto", False))
+        self.assertEqual(am["drops"], [{"item_id": "30063", "name": "全新装置", "count": 12}])
+        self.assertEqual(am["fallback_stage"], "1-7")
+        self.assertTrue(am["tasks"]["fight"])
+        self.assertFalse(am["tasks"]["mall"])  # 默认里关掉的环节照样体现
+        self.assertEqual((pm["stage"], pm["stage_source"], pm["skip"], pm["enabled"]), ("CE-6", "discord", True, False))
+        self.assertFalse(pm["tasks"]["fight"])
+        self.assertEqual(pm["drops"], [])
+        self.assertEqual(pm["source"], "gui")
+        self.assertEqual([c["stage"] for c in pm["choices"]], ["", "1-7"])
+        self.assertEqual(data["task_names"]["fight"], "刷理智")
+
+    def test_no_plan_file_falls_back_to_the_defaults(self) -> None:
+        ok, _message, data = self._today()
+        self.assertTrue(ok)
+        for session in data["sessions"]:
+            self.assertEqual(session["stage"], "1-7")
+            self.assertEqual(session["stage_source"], "")
+            self.assertFalse(session["skip"])
+
+    def test_only_from_the_app(self) -> None:
+        self.assertFalse(maa_action.dispatch(["plan", "today"])[0])
 
 
 if __name__ == "__main__":

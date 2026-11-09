@@ -2,7 +2,8 @@
 //  TodayPage.swift
 //  Wado's MAA
 //
-//  首页「今天」：左边是要操作的「手动日常」（原一键长草的「这一次」，K12），右边是只读状态；
+//  首页「今天」：左边是要操作的「手动日常」（原一键长草的「这一次」，K12），右边是早场 / 晚场的
+//  计划（`plan today`，点了就改：`plan set-stage` / `skip-today` / `fight`）和游戏资源；
 //  下面是自动抄作业的关卡和最近一次。开始走 `run local`，和 Discord「现在跑」同一条路。
 //
 
@@ -373,13 +374,25 @@ struct StatusStack: View {
                 Button("日程 ›") { go(.schedule) }.buttonStyle(WMLinkStyle()).help("打开「日程与默认」")
             }
             TimelineView(.periodic(from: .now, by: 30)) { context in
-                VStack(spacing: 8) {
-                    ForEach([("am", "早场"), ("pm", "晚场")], id: \.0) { phase, name in
-                        sessionRow(phase, name, now: context.date)
+                VStack(spacing: 10) {
+                    ForEach(Array([("am", "早场"), ("pm", "晚场")].enumerated()), id: \.element.0) { index, item in
+                        if index > 0 { RowDivider() }
+                        VStack(alignment: .leading, spacing: 6) {
+                            sessionRow(item.0, item.1, now: context.date)
+                            if let plan = store.todayPlan?.sessions.first(where: { $0.phase == item.0 }) {
+                                SessionPlanView(
+                                    plan: plan,
+                                    taskNames: store.todayPlan?.taskNames ?? [:],
+                                    editable: !store.readOnly && startedToday(item.0, now: context.date) == nil)
+                            }
+                        }
                     }
                 }
             }
             if store.schedule == nil, let error = store.scheduleError {
+                Text(error).font(.system(size: 11.5)).foregroundStyle(WM.danger)
+            }
+            if store.todayPlan == nil, let error = store.todayPlanError {
                 Text(error).font(.system(size: 11.5)).foregroundStyle(WM.danger)
             }
         }
@@ -401,14 +414,21 @@ struct StatusStack: View {
         }
     }
 
+    /// 这一场今天已经开始过（正在跑或跑完了）就返回开始时间：这时再改计划也不影响它。
+    private func startedToday(_ phase: String, now: Date) -> Date? {
+        guard store.lastRun["phase"]?.string == phase,
+            let started = store.lastRun["started_at"]?.string.flatMap(RunLock.parseISO),
+            Beijing.calendar.isDate(started, inSameDayAs: now)
+        else { return nil }
+        return started
+    }
+
     private func sessionState(_ phase: String, _ session: ScheduleReport.Session?, now: Date)
         -> (icon: String, color: Color, text: String, tip: String)
     {
         guard let session else { return ("circle.dashed", WM.f3, "读不到", "暂时读不到时间") }
         if !session.enabled { return ("pause.circle", WM.f3, "已关", "到点不自动开始") }
-        let lastPhase = store.lastRun["phase"]?.string
-        let started = store.lastRun["started_at"]?.string.flatMap(RunLock.parseISO)
-        if lastPhase == phase, let started, Beijing.calendar.isDate(started, inSameDayAs: now) {
+        if let started = startedToday(phase, now: now) {
             let status = store.lastRun["status"]?.string ?? ""
             let finished = store.lastRun["finished_at"]?.string.flatMap(RunLock.parseISO)
             let clock = finished.map(RunLock.beijingClock) ?? RunLock.beijingClock(started)
@@ -420,6 +440,9 @@ struct StatusStack: View {
             case _ where LastRunText.ongoing.contains(status): return ("play.circle", WM.game, word, "正在进行")
             default: return ("exclamationmark.circle", WM.danger, "\(clock) \(word)", summary)
             }
+        }
+        if store.todayPlan?.sessions.first(where: { $0.phase == phase })?.skip == true {
+            return ("minus.circle", WM.f3, "今天跳过", "到点不跑这一场")
         }
         if let date = Beijing.today(at: session.time, now: now), date > now {
             return ("circle.dashed", WM.f2, Beijing.until(date, from: now), "还没开始")
@@ -479,6 +502,121 @@ struct StatusStack: View {
             return ("有新版本", accent.color)
         }
         return status.fresh ? ("今天已更新", WM.ok) : ("今天还没更新", accent.color)
+    }
+}
+
+/// 一场的计划：刷哪关（谁定的）、做哪些事；没开始前点了就改。
+struct SessionPlanView: View {
+    let plan: TodayPlan.Session
+    let taskNames: [String: String]
+    let editable: Bool
+
+    @Environment(RemoteStore.self) private var store
+
+    private static let order = ["fight", "infrast", "recruit", "mall", "award"]
+
+    private var changing: Bool { store.planChanging == plan.phase }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                if editable {
+                    Menu {
+                        stageItems
+                        Divider()
+                        Toggle("刷理智", isOn: Binding(
+                            get: { plan.fight },
+                            set: { on in change(["plan", "fight", on ? "on" : "off"]) }))
+                    } label: {
+                        stageLabel
+                    }
+                    .menuStyle(.button)
+                    .buttonStyle(.plain)
+                    .menuIndicator(.hidden)
+                    .fixedSize()
+                    .disabled(store.planChanging != nil)
+                    .help("换关，或这一场不刷理智")
+                } else {
+                    stageLabel
+                }
+                Spacer(minLength: 0)
+                if changing {
+                    ProgressView().controlSize(.mini)
+                } else if editable {
+                    Button(plan.skip ? "恢复" : "跳过") {
+                        change(["plan", "skip-today", plan.skip ? "off" : "on"])
+                    }
+                    .buttonStyle(WMLinkStyle())
+                    .font(.system(size: 11.5))
+                    .disabled(store.planChanging != nil)
+                    .help(plan.skip ? "到点照常跑这一场" : "今天到点不跑这一场，另一场不受影响")
+                }
+            }
+            Text(tasksText)
+                .font(.system(size: 11.5)).foregroundStyle(WM.f2).lineLimit(1)
+        }
+        .padding(.leading, 26)
+        .opacity(plan.skip ? 0.45 : 1)
+    }
+
+    @ViewBuilder private var stageItems: some View {
+        ForEach(plan.choices, id: \.self) { choice in
+            Button {
+                change(["plan", "set-stage", choice.stage])
+            } label: {
+                if choice.stage == plan.stage {
+                    Label(choice.label, systemImage: "checkmark")
+                } else {
+                    Text(choice.label)
+                }
+            }
+        }
+    }
+
+    private var stageLabel: some View {
+        HStack(spacing: 6) {
+            if plan.fight {
+                Swatch(code: plan.stage, size: 16, radius: 4)
+                Text(plan.stage.isEmpty ? "上次作战" : plan.stage).fontWeight(.semibold).monospacedDigit()
+                    .strikethrough(plan.skip)
+                if let note = sourceNote {
+                    Text(note).font(.system(size: 11)).foregroundStyle(WM.f3).lineLimit(1)
+                }
+            } else {
+                Text("不刷理智").foregroundStyle(WM.f2).strikethrough(plan.skip)
+            }
+            if editable {
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(WM.f3)
+            }
+        }
+        .contentShape(Rectangle())
+        .help(dropHelp)
+    }
+
+    /// 「自动定关：缺电极单元」/「你选的」；默认关不加话。
+    private var sourceNote: String? {
+        switch plan.stageSource {
+        case "auto":
+            if let drop = plan.drops.first { return "自动定关：缺\(drop.name)" }
+            return "自动定关"
+        case "discord": return "你选的"
+        default: return nil
+        }
+    }
+
+    private var dropHelp: String {
+        guard plan.stageSource == "auto", let drop = plan.drops.first else { return "" }
+        let spare = plan.fallbackStage.isEmpty ? "" : "，剩下的理智去 \(plan.fallbackStage)"
+        return "还缺 \(drop.count) 个\(drop.name)，刷够就停\(spare)"
+    }
+
+    private var tasksText: String {
+        let names = Self.order.filter { plan.tasks[$0] ?? true }.map { taskNames[$0] ?? $0 }
+        return names.isEmpty ? "什么都不做" : names.joined(separator: " · ")
+    }
+
+    private func change(_ args: [String]) {
+        Task { await store.changePlan(plan.phase, args) }
     }
 }
 

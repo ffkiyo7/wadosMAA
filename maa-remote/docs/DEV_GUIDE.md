@@ -746,12 +746,16 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 | `run choices` | 一键长草页的选项：关卡（和选关卡同源 `_stage_choices()`）、环节开关、锁 / 定时场优先的现状 | `choices`、`switches`、`task_names`、`busy`、`blackout` |
 | `copilot stages` | 自动抄作业的关卡列表（和抄作业卡同源 `copilot_card_stages()`），只读本地 | `stages`、`in_activity` |
 | `run local <关> <开关 JSON> [--force]` | 本机手动场：`--force` 只解除「定时场优先」，不解锁 | `token` 等 |
+| `plan today` | 今天早场、晚场各打算做什么。只读本地（不联网、不重算自动定关、不写盘），首页场卡用 | `date`；`sessions[]`（按 am、pm）：`phase` / `name` / `time` / `enabled`（`session_schedule`）、`stage`、`stage_source`（`auto` / `discord` / 空 = 默认关）、`skip`、`tasks`（`effective_plan()` 的环节开关，`plan fight off` 后 `fight` 为假）、`drops`（`[{item_id, name, count}]`，自动定关的刷够即停上限，物品名读不出来就是 itemId）、`fallback_stage`、`source` / `updated_at`（这场覆盖最后是谁改的）、`choices`（可换的关，和计划卡下拉同源 `_stage_choices()`）；`task_names` |
 | `plan refresh-card <场>` | 让 Discord 上的计划卡跟着刷新 | — |
 | `copilot preview <关>` / `copilot go <token> [作业 id]` | 抄作业：先预览、再确认（K13）。`go` 只接受完全满足的候选，并且要过 `dispatch_blocker()` | 候选列表（带 `perfect`）、`best_id`、`token` |
 | `upstream status [--online]` | 上游状态，默认离线、< 2 秒 | 见 12.3 |
 | `upstream update` | 过闸门后派一个 worker，立即返回；GUI 每 2 秒轮询 `upstream status`，直到 `running` 变成 false | `started`，或 `blocked` |
 
-**GUI 也用的通用命令**：`run cancel`（在 `dispatch()` 里，Discord 和 GUI 走同一个入口，回执没有 `data`）。状态条的「停止」在 `run.lock` 持有者是 `daily` / `copilot` 时先弹确认、再调它，然后刷新状态；被停的那一场写 `last_run.status = cancelled`（#64）。
+**GUI 也用的通用命令**（在 `dispatch()` 里，Discord 和 GUI 走同一个入口，回执没有 `data`）：
+
+- `plan set-stage <关> <场>` / `plan skip-today on|off <场>` / `plan fight on|off <场>`：首页场卡的换关、跳过 / 恢复、「刷理智」开关，点了就生效。成功时 GUI 不显示 `message`、重读 `plan today`；失败原样显示 `message`。带 `MAA_ACTION_SOURCE=gui` 时 `_save_override()` 会在脱离会话的子进程里调 `plan refresh-card`，Discord 上的计划卡跟着变。改计划不动游戏、不持锁；那一场开跑后改的不影响它（#10），所以 GUI 在那一场今天已开始后不再给改。
+- `run cancel`：状态条的「停止」在 `run.lock` 持有者是 `daily` / `copilot` 时先弹确认、再调它，然后刷新状态；被停的那一场写 `last_run.status = cancelled`（#64）。
 
 实现细节：`run local` 不发选关卡，关卡白名单 → 开关校验（`fight/infrast/recruit/mall/award/annihilation`，只认真布尔，五项全关拒绝）→ 锁 → 拒绝窗（`--force` 只跳过这一条，锁冲突永远不能强行）→ 预检 → 收掉 Discord 上没选的选关卡（`superseded`）→ 写 `manual_run.json`（`dispatched` + `tasks` / `annihilation` / `source` / `forced`）→ `Popen maa_daily.py now <token>`；`maa_daily.apply_local_switches()` 只把开关叠到这一场，不进 `plan.json`（M4）。`copilot preview` 要 5～20 秒、不走 Discord 的 20 秒路径（#6）：持 `copilot_search.lock`、森空岛刷新失败直接报错、绕过 12h 缓存搜全部候选，返回每份是否完全满足（`maa_copilot.is_perfect()`，与 `pick_perfect_candidate()` 同一判据）、缺什么，自动选中第一份完全满足的，存 `copilot/previews/<token>.json`（30 分钟，不在 `searches/` 下）。`copilot go` 被挡什么都不写，否则发「已排程」卡 → 写 `searches/<新 token>.json` 为 `queued` → `dispatch_batch()`；同一次预览只能派一次。
 
