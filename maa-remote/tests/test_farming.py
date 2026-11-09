@@ -1297,6 +1297,48 @@ class FarmingAutoStageTests(unittest.TestCase):
                 self.assertEqual(maa_plan_card.today_stage_source("am", at), "discord")
                 self.assertEqual(maa_plan_card.today_stage_source("pm", at), "")
 
+    def test_gui_auto_stage_hands_a_picked_stage_back_to_auto(self) -> None:
+        """首页「自动选关」：用户选过的关也改回自动定的，带上 drops 上限；算不出来就不动。"""
+        result = {"degraded": False, "measured": True, "items": [
+            {"material": "碳素", "item_id": "30017", "stage": "SK-5", "score": 0.8,
+             "parts": {"scarcity": 0.0, "gap": 1.0, "efficiency": 1.0},
+             "needed_qty": 280, "ap_per_item": 4.0, "stock": 20, "per_day": 10.0,
+             "basis": "measured"},
+        ]}
+        at = maa_common.now_beijing()
+        with tempfile.TemporaryDirectory() as tmp:
+            plan_path = Path(tmp) / "plan.json"
+            with patch.object(maa_action, "PLAN_PATH", plan_path), \
+                 patch.object(maa_plan_card, "PLAN_PATH", plan_path), \
+                 patch.object(maa_common, "PLAN_PATH", plan_path), \
+                 patch.object(maa_common, "DEFAULTS_PATH", Path(tmp) / "defaults.json"), \
+                 patch.object(maa_action, "load_config", return_value={}), \
+                 patch.object(maa_action, "is_run_locked", return_value=False), \
+                 patch.object(maa_action, "action_source", return_value="discord"), \
+                 patch.object(maa_action, "state_lock",
+                              return_value=contextlib.nullcontext()), \
+                 patch.object(maa_plan_card, "state_lock",
+                              return_value=contextlib.nullcontext()):
+                self.assertTrue(maa_action.set_stage("CE-6", "am")[0])
+                with patch.object(maa_plan_card, "current_farming_result",
+                                  return_value={"items": []}):
+                    ok, _message, _data = maa_action.plan_auto_stage("am")
+                self.assertFalse(ok)
+                self.assertEqual(maa_plan_card.today_stage_source("am", at), "discord")
+
+                with patch.object(maa_plan_card, "current_farming_result", return_value=result):
+                    ok, _message, data = maa_action.plan_auto_stage("am")
+                self.assertTrue(ok)
+                self.assertEqual(data, {"stage": "SK-5"})
+                session = json.loads(plan_path.read_text(encoding="utf-8"))["sessions"]["am"]
+                self.assertEqual(session["stage"], "SK-5")
+                self.assertEqual(session["stage_source"], "auto")
+                self.assertTrue(session["farming_drops"])
+                self.assertEqual(maa_plan_card.today_stage_source("pm", at), "")
+                ok, message, _data = maa_action.plan_auto_stage("now")
+                self.assertFalse(ok)
+                self.assertIn("只能改早场", message)
+
     def test_set_stage_and_skip_reject_an_unknown_phase(self) -> None:
         """场次只接受 am / pm；非法值一律拒绝，且不写盘。"""
         with tempfile.TemporaryDirectory() as tmp:

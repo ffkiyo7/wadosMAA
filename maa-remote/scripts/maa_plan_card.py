@@ -738,7 +738,7 @@ def build_components(
 
 
 def apply_auto_stage(
-    result: dict[str, Any], phase: PlanPhase, at: datetime | None = None
+    result: dict[str, Any], phase: PlanPhase, at: datetime | None = None, *, force: bool = False
 ) -> str:
     """把自动定的关写进当日 `plan.json` 的**这一场**。返回写入的关卡，没写返回空串。
 
@@ -754,6 +754,9 @@ def apply_auto_stage(
     给 `daily.toml` 的 Fight `drops` 用）和 **`farming_fallback_stage`**（第二名的关，
     刷够上限之后接着刷它，理智不浪费）。用户手动选关时 `maa_action.set_stage()`
     会把这两个字段清掉——手动选的关不带 drops 上限。
+
+    `force=True` 只给 GUI 的「自动选关」（`maa_action.plan_auto_stage()`）用：用户明确
+    把这一场交回给自动定关，所以跳过上面的闸门、改回 `auto`，之后建卡时也能继续改它。
     """
     stage, _why = auto_stage(result)
     if not stage:
@@ -774,7 +777,7 @@ def apply_auto_stage(
         sessions = current["sessions"]
         session = sessions.get(phase)
         session = dict(session) if isinstance(session, dict) else {}
-        if "stage" in session and session.get("stage_source") != "auto":
+        if not force and "stage" in session and session.get("stage_source") != "auto":
             return ""
         session["stage"] = stage
         session["stage_source"] = "auto"

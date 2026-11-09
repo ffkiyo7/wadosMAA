@@ -2121,6 +2121,35 @@ def plan_refresh_card(phase: PlanPhase) -> tuple[bool, str, dict[str, Any]]:
 
 
 
+def plan_auto_stage(phase: str) -> tuple[bool, str, dict[str, Any]]:
+    """首页场卡选「自动选关」：马上按材料缺口算一次，写成这一场的关（`stage_source=auto`）。
+
+    和建卡时同一套（`current_farming_result()` + `apply_auto_stage()`），只是用 `force`
+    把用户手动选的关让出来。算不出来就不动原来的关。改计划不动游戏、不持锁。
+    """
+    if not valid_phase(phase):
+        return refuse("bad_phase", f"只能改早场（am）或晚场（pm），收到 {phase[:20]!r}。", {})
+    from maa_plan_card import apply_auto_stage, auto_stage, current_farming_result
+
+    config = load_config()
+    try:
+        result = current_farming_result(effective_plan(phase=phase), config)
+    except Exception as exc:  # noqa: BLE001 — (c) 缺口计算是旁路（森空岛 / 掉落表，失败形态不定），失败只回一句、不改计划
+        return refuse(
+            "auto_unavailable", "现在算不出该刷哪关，原来的关没有改，稍后再试。", {},
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+    stage, why = auto_stage(result)
+    if not stage:
+        return refuse("auto_unavailable", "现在定不下来自动刷哪关，原来的关没有改。", {}, detail=why)
+    was_running = is_run_locked()
+    apply_auto_stage(result, phase, force=True)
+    if action_source() == "gui":
+        _spawn_action(["plan", "refresh-card", phase])
+    plan = effective_plan(phase=phase)
+    return done("stage_auto", _confirmation(plan, was_running, phase), {"stage": stage})
+
+
 def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
     """只给 Wado's MAA 用的命令：回执多带一个 `data`（结构化结果）。
 
@@ -2140,6 +2169,8 @@ def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
         return plan_refresh_card(argv[2])
     if argv == ["plan", "today"]:
         return plan_today()
+    if argv[:2] == ["plan", "auto-stage"] and len(argv) == 3:
+        return plan_auto_stage(argv[2])
     if argv == ["run", "choices"]:
         return run_choices()
     if argv == ["copilot", "stages"]:

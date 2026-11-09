@@ -688,14 +688,27 @@ struct SessionStageMenu: View {
 
     @Environment(RemoteStore.self) private var store
 
+    private var auto: Bool { plan.stageSource == "auto" }
+
     var body: some View {
         if editable {
             Menu {
+                // 马上按材料缺口算一次，用户选过的关也交回给自动定关（`plan auto-stage`）。
+                Button {
+                    change(["plan", "auto-stage"])
+                } label: {
+                    if auto {
+                        Label("自动选关", systemImage: "checkmark")
+                    } else {
+                        Text("自动选关")
+                    }
+                }
+                Divider()
                 ForEach(plan.choices, id: \.self) { choice in
                     Button {
                         change(["plan", "set-stage", choice.stage])
                     } label: {
-                        if choice.stage == plan.stage {
+                        if !auto, choice.stage == plan.stage {
                             Label(choice.label, systemImage: "checkmark")
                         } else {
                             Text(choice.label)

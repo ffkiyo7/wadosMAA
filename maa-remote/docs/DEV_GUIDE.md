@@ -768,6 +768,7 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 **GUI 也用的通用命令**（在 `dispatch()` 里，Discord 和 GUI 走同一个入口，回执没有 `data`）：
 
 - `plan set-stage <关> <场>` / `plan skip-today on|off <场>` / `plan fight on|off <场>`：首页场卡的换关、跳过 / 恢复、「刷理智」开关，点了就生效。成功时 GUI 不显示 `message`、重读 `plan today`；失败原样显示 `message`。带 `MAA_ACTION_SOURCE=gui` 时 `_save_override()` 会在脱离会话的子进程里调 `plan refresh-card`，Discord 上的计划卡跟着变。改计划不动游戏、不持锁；那一场开跑后改的不影响它（#10），所以 GUI 在那一场今天已开始后不再给改。
+- `plan auto-stage <场>`（GUI 专用，`dispatch_gui`）：场卡下拉里的「自动选关」。马上按材料缺口算一次（`current_farming_result()` + `apply_auto_stage(force=True)`），把这一场的关写成 `stage_source = auto`（带 `farming_drops` / 后备关），用户之前手动选的关也让出来，之后建卡时自动定关可以继续改它。算不出来回 `auto_unavailable`、不动原来的关。`data = {"stage": 定下的关}`。
 - `run cancel`：状态条的「停止」在 `run.lock` 持有者是 `daily` / `copilot` 时先弹确认、再调它，然后刷新状态；被停的那一场写 `last_run.status = cancelled`（#64）。
 
 实现细节：`run local` 不发选关卡，关卡白名单 → 开关校验（`fight/infrast/recruit/mall/award/annihilation`，只认真布尔，五项全关拒绝）→ 锁 → 拒绝窗（`--force` 只跳过这一条，锁冲突永远不能强行）→ 预检 → 收掉 Discord 上没选的选关卡（`superseded`）→ 写 `manual_run.json`（`dispatched` + `tasks` / `annihilation` / `source` / `forced`）→ `Popen maa_daily.py now <token>`；`maa_daily.apply_local_switches()` 只把开关叠到这一场，不进 `plan.json`（M4）。`copilot preview` 要 5～20 秒、不走 Discord 的 20 秒路径（#6）：持 `copilot_search.lock`、森空岛刷新失败直接报错、绕过 12h 缓存搜全部候选，返回每份是否完全满足（`maa_copilot.is_perfect()`，与 `pick_perfect_candidate()` 同一判据）、缺什么，自动选中第一份完全满足的，存 `copilot/previews/<token>.json`（30 分钟，不在 `searches/` 下）。`copilot go` 被挡什么都不写，否则发「已排程」卡 → 写 `searches/<新 token>.json` 为 `queued` → `dispatch_batch()`；同一次预览只能派一次。
