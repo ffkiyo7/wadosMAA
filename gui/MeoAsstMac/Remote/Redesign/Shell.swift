@@ -3,7 +3,8 @@
 //  Wado's MAA
 //
 //  重设计的窗口外壳：边栏（今天 / 自动抄作业 / 日程与默认 / 日常配置 / 工具与更多 / 设置）、
-//  顶部状态条（空闲或运行中 + 当前阶段、「日志」按钮；环境只在设置里看）、右侧日志检查器、会连游戏的统一确认框。
+//  顶部状态条（一个胶囊：空闲或运行中 + 做到哪，点开看详情；「日志」按钮）、右侧日志检查器（「本场」卡片 +
+//  本场 / App 两段）、会连游戏的统一确认框。
 //
 
 import SwiftUI
@@ -96,6 +97,8 @@ struct RedesignRoot: View {
     @State private var page: WMPage? = .today
     @State private var confirm: GameConfirm?
     @State private var data = RunData()
+    /// 详情栏宽度：状态条胶囊按它退化（打开日志后会窄到约 390pt）。
+    @State private var detailWidth: CGFloat = 800
 
     var body: some View {
         NavigationSplitView {
@@ -103,6 +106,7 @@ struct RedesignRoot: View {
                 .navigationSplitViewColumnWidth(min: 180, ideal: 212, max: 260)
         } detail: {
             detail
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { detailWidth = $0 }
                 .toolbar { statusBar }
                 .inspector(isPresented: $showLog) {
                     LogInspector()
@@ -195,7 +199,7 @@ struct RedesignRoot: View {
 
     @ToolbarContentBuilder private var statusBar: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
-            RunStateView()
+            RunStateView(width: detailWidth)
         }
         ToolbarItem(placement: .primaryAction) {
             Button {
@@ -209,61 +213,48 @@ struct RedesignRoot: View {
     }
 }
 
-/// 状态条左侧：空闲 / 谁在用游戏。
+/// 状态条左侧的胶囊：空闲 / 谁在用游戏 + 做到哪了；点开看是哪一场、步骤条和「停止」。
+///
+/// 宽度按详情栏宽度退化（工具栏项按理想宽度排，`ViewThatFits` 在这里总会挑最宽的那个，所以不用它）：
+/// 运行中「● 早场日常 · 刷理智 3/≈7 ◔」→「● 刷理智 3/≈7 ◔」→「● 刷理智」；
+/// 空闲「● 空闲 ✓ 22:16 下次 早场日常 08:00」→「● 空闲 下次 早场日常 08:00」→「● 空闲」。
 struct RunStateView: View {
     @EnvironmentObject private var viewModel: MAAViewModel
     @Environment(RemoteStore.self) private var store
 
+    /// 详情栏现在多宽。
+    let width: CGFloat
+
+    @State private var showDetail = false
+    @State private var confirmStop: LockHolder?
+    @State private var stopping = false
+
+    private enum Fit { case full, medium, compact }
+
+    /// 详情栏还要放「日志」按钮和两侧留白，约 130pt；剩下的给胶囊。
+    private func fit(busy: Bool) -> Fit {
+        let room = width - 130
+        if busy { return room >= 230 ? .full : room >= 150 ? .medium : .compact }
+        return room >= 270 ? .full : room >= 200 ? .medium : .compact
+    }
+
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 30)) { context in
-            HStack(spacing: 8) {
-                if let busy = busyText {
-                    Circle().fill(WM.game).frame(width: 8, height: 8)
-                        .background(Circle().fill(WM.game.opacity(0.18)).frame(width: 16, height: 16))
-                    Text("运行中").fontWeight(.semibold)
-                    Text(busy).foregroundStyle(WM.f2).lineLimit(1)
-                    if let stage = remoteStage {
-                        Text(stage.label).fontWeight(.medium).lineLimit(1)
-                    }
-                    ProgressView().progressViewStyle(.linear).frame(width: 140).tint(WM.game)
-                    // copy-guard: legacy（本 App 自己跑的上游任务，随「GUI 退成纯前端」整段删掉）
-                    if viewModel.status == .busy {
-                        Button {
-                            Task { try? await viewModel.stop() }
-                        } label: {
-                            Label("停止", systemImage: "stop.fill")
-                        }
-                        .buttonStyle(WMButtonStyle(kind: .danger))
-                        .help("停止本 App 里正在跑的上游任务")
-                    }
-                    // copy-guard: end
-                    if let run = cancelableRun {
-                        Button {
-                            confirmStop = run
-                        } label: {
-                            Label("停止", systemImage: "stop.fill")
-                        }
-                        .buttonStyle(WMButtonStyle(kind: .danger))
-                        .disabled(stopping)
-                        .help("停下正在跑的\(run.name)")
-                    }
-                } else {
-                    Circle().fill(WM.ok).frame(width: 8, height: 8)
-                    Text("空闲").fontWeight(.semibold)
-                    if let success = lastSuccess(now: context.date) {
-                        HStack(spacing: 3) {
-                            Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(WM.ok)
-                            Text(success.text).foregroundStyle(WM.f2).monospacedDigit()
-                        }
-                        .help(success.tip)
-                    }
-                    if let next = nextSession(now: context.date) {
-                        Text("下次 \(next)").foregroundStyle(WM.f2).lineLimit(1)
-                    }
-                }
+        Button {
+            showDetail.toggle()
+        } label: {
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                capsule(now: context.date)
+                    .padding(.horizontal, 10)
+                    .fixedSize()
+                    .contentShape(Rectangle())
             }
-            .padding(.horizontal, 10)
-            .fixedSize()
+        }
+        .buttonStyle(.plain)
+        .help("看这一场做到哪了")
+        .popover(isPresented: $showDetail, arrowEdge: .bottom) {
+            detailPopover
+                .padding(16)
+                .frame(width: 340, alignment: .leading)
         }
         .alert(
             "停止\(confirmStop?.name ?? "")？",
@@ -276,8 +267,99 @@ struct RunStateView: View {
         }
     }
 
-    @State private var confirmStop: LockHolder?
-    @State private var stopping = false
+    // MARK: 胶囊
+
+    @ViewBuilder private func capsule(now: Date) -> some View {
+        if busyText != nil {
+            let fit = fit(busy: true)
+            HStack(spacing: 6) {
+                dot(WM.game)
+                if fit == .full, let name = runName, name != doing {
+                    Text(name).foregroundStyle(WM.f2).lineLimit(1)
+                    Text("·").foregroundStyle(WM.f3)
+                }
+                Text(doing).fontWeight(.semibold).lineLimit(1)
+                if fit != .compact {
+                    if let count = fightCount {
+                        Text(count).monospacedDigit()
+                    }
+                    if let fraction = liveFraction {
+                        ProgressView(value: fraction)
+                            .progressViewStyle(.circular)
+                            .controlSize(.mini)
+                            .tint(WM.game)
+                    }
+                }
+            }
+        } else {
+            let fit = fit(busy: false)
+            HStack(spacing: 6) {
+                dot(WM.ok)
+                Text("空闲").fontWeight(.semibold)
+                if fit == .full, let success = lastSuccess(now: now) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(WM.ok)
+                        Text(success.text).foregroundStyle(WM.f2).monospacedDigit()
+                    }
+                }
+                if fit != .compact, let next = nextSession(now: now) {
+                    Text("下次 \(next)").foregroundStyle(WM.f2).lineLimit(1)
+                }
+            }
+        }
+    }
+
+    private func dot(_ color: Color) -> some View {
+        Circle().fill(color).frame(width: 8, height: 8)
+            .background(Circle().fill(color.opacity(0.18)).frame(width: 16, height: 16))
+    }
+
+    // MARK: 弹出框
+
+    @ViewBuilder private var detailPopover: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let busy = busyText {
+                if liveRun {
+                    RunSessionSummary(progress: store.progress, doing: remoteStage?.doing)
+                } else {
+                    Text(busy).fontWeight(.semibold)
+                }
+                // copy-guard: legacy（本 App 自己跑的上游任务，随「GUI 退成纯前端」整段删掉）
+                if viewModel.status == .busy {
+                    Button {
+                        Task { try? await viewModel.stop() }
+                    } label: {
+                        Label("停止", systemImage: "stop.fill")
+                    }
+                    .buttonStyle(WMButtonStyle(kind: .danger))
+                    .help("停止本 App 里正在跑的上游任务")
+                }
+                // copy-guard: end
+                if let run = cancelableRun {
+                    Button {
+                        showDetail = false
+                        confirmStop = run
+                    } label: {
+                        Label("停止", systemImage: "stop.fill")
+                    }
+                    .buttonStyle(WMButtonStyle(kind: .danger))
+                    .disabled(stopping)
+                    .help("停下正在跑的\(run.name)")
+                }
+            } else {
+                Text("空闲").fontWeight(.semibold)
+                if let success = lastSuccess(now: Date()) {
+                    Text(success.tip).foregroundStyle(WM.f2)
+                }
+                if let next = nextSession(now: Date()) {
+                    Text("下次 \(next)").foregroundStyle(WM.f2)
+                }
+            }
+        }
+        .font(.system(size: 12.5))
+    }
+
+    // MARK: 数据
 
     /// maa-remote 正在跑、可以从这里停下的那一场（日常或抄作业）。本 App 自己的任务另有按钮。
     private var cancelableRun: LockHolder? {
@@ -305,6 +387,31 @@ struct RunStateView: View {
         if viewModel.status != .idle { return "本 App 的上游任务" }
         // copy-guard: end
         return store.lockHolder?.text
+    }
+
+    /// 日常 / 抄作业正在跑，`RunProgress` 跟着它。
+    private var liveRun: Bool {
+        viewModel.status == .idle && store.lockHolder != nil && store.lastRun["status"]?.string == "running"
+            && store.progress.hasRun && store.progress.outcome == nil
+    }
+
+    /// 「早场日常」「抄作业 SR-8」；本 App 的任务没有。
+    private var runName: String? {
+        viewModel.status == .idle ? store.lockHolder?.name : nil
+    }
+
+    /// 胶囊上的主词：现在做的那件事（「刷理智」）；还没到第一件事时是这一场的名字。
+    private var doing: String {
+        if viewModel.status != .idle { return "更多玩法运行中" }
+        return remoteStage?.label ?? runName ?? "运行中"
+    }
+
+    private var fightCount: String? {
+        remoteStage?.key == "Fight" ? store.progress.fightText : nil
+    }
+
+    private var liveFraction: Double? {
+        liveRun ? store.progress.fraction : nil
     }
 
     /// maa-remote 这一场现在在哪个阶段（「刷理智」）。
@@ -394,11 +501,16 @@ struct RunReportBanner: View {
     }
 }
 
-/// 右侧日志检查器：本 App 的运行日志，按时间插进 maa-remote 正在跑的那一场的阶段（不刷 maa-cli 原文）。
+/// 右侧日志检查器：顶部固定「本场」卡片（步骤条、进度、本场日志），下面分两段——
+/// 「本场」是 maa-remote 正在跑（或刚跑完）的那一场的阶段行，「App」是本 App 自己的运行日志。
 struct LogInspector: View {
     @Environment(NewViewModel.self) private var newModel
     @Environment(RemoteStore.self) private var store
     @Environment(\.wmAccent) private var accent
+
+    private enum Tab: Hashable { case run, app }
+
+    @State private var tab = Tab.run
 
     private enum Row: Identifiable {
         case app(MAALog)
@@ -412,48 +524,50 @@ struct LogInspector: View {
         }
     }
 
-    /// 两边各自按时间排好，归并成一列；同一时刻阶段行在前。
     private var rows: [Row] {
-        let logs = newModel.logs
-        let stages = store.progress.entries
-        var rows: [Row] = []
-        rows.reserveCapacity(logs.count + stages.count)
-        var i = 0, j = 0
-        while i < logs.count || j < stages.count {
-            if j < stages.count, i == logs.count || stages[j].date <= logs[i].date {
-                rows.append(.stage(stages[j]))
-                j += 1
-            } else {
-                rows.append(.app(logs[i]))
-                i += 1
-            }
+        switch tab {
+        case .run: store.progress.entries.map(Row.stage)
+        case .app: newModel.logs.map(Row.app)
         }
-        return rows
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack {
+            HStack(spacing: 10) {
                 Text("日志").fontWeight(.bold)
                 Spacer()
-                Button {
-                    OpenLogFileView.revealLogInFinder()
-                } label: {
-                    Image(systemName: "folder")
+                Picker("", selection: $tab) {
+                    Text("本场").tag(Tab.run)
+                    Text("App").tag(Tab.app)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(WM.f2)
-                .help("在 Finder 中显示日志文件")
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+                if tab == .app {
+                    Button {
+                        OpenLogFileView.revealLogInFinder()
+                    } label: {
+                        Image(systemName: "folder")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(WM.f2)
+                    .help("在 Finder 中显示 App 的日志文件")
+                }
             }
             .padding(.horizontal, 16)
             .padding(.top, 16)
-            .padding(.bottom, 8)
+            .padding(.bottom, 10)
+            if store.progress.hasRun {
+                RunSessionCard()
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+            }
             ScrollViewReader { proxy in
                 let rows = rows
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 3) {
                         if rows.isEmpty {
-                            Text("还没有日志").foregroundStyle(WM.f3)
+                            Text(tab == .run ? "现在没有在跑的日常或抄作业" : "还没有日志").foregroundStyle(WM.f3)
                         }
                         ForEach(rows) { row in
                             line(row)
@@ -468,6 +582,9 @@ struct LogInspector: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .onChange(of: rows.count) {
+                    if let last = rows.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                }
+                .onChange(of: tab) {
                     if let last = rows.last { proxy.scrollTo(last.id, anchor: .bottom) }
                 }
             }
