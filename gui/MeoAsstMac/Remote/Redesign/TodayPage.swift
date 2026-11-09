@@ -459,7 +459,7 @@ struct StatusStack: View {
     }
 
     private func versionHelp(_ status: UpstreamStatus?) -> String {
-        let version = CorePreflight.loadedVersion ?? status?.versions.maaCore ?? "未知"
+        let version = status?.versions.maaCore ?? "未知"
         if status?.verdict == "blocked" {
             return "游戏资源状态不对，暂时不能开始日常。请稍后再看，或在设置 › 开发者里复制诊断信息。\n版本 \(version)"
         }

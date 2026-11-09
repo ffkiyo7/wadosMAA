@@ -5,12 +5,12 @@
   `Button(` / `.help(` / `title:` / `help:` / `sub:` / `rows:` 等界面调用那一行上的英文字面量；
 - `maa_action.py` 里 `dispatch_gui` 会走到的回执 `message`（Wado's MAA 原样显示，Discord 也用）。
 
-命中禁用词就红，报出「文件:行号 词 原文」。开发者区、诊断信息、要随「GUI 退成纯前端」删掉的
-旧代码用注释圈起来跳过：
+命中禁用词就红，报出「文件:行号 词 原文」。开发者区、诊断信息用注释圈起来跳过：
 
     // copy-guard: developer   …   // copy-guard: end   （开发者区、复制诊断信息，可以用技术词）
-    // copy-guard: legacy      …   // copy-guard: end   （下一步整段删掉的旧代码，不改文案）
     … // copy-guard: ignore                             （这一行的字面量不是给人看的，例如数据键）
+
+GUI 已经退成纯 maa-remote 前端（REVIEW §4 P1-6），不再有整文件白名单和 `legacy` 段。
 
 正则够用就行，不写 Swift 解析器。
 """
@@ -38,18 +38,7 @@ BANNED = (
     "run.lock",
 )
 
-# 整个文件不扫：下一步「GUI 退成纯 maa-remote 前端」（REVIEW §4 P1-6）时整个删掉，不再改文案。
-WHITELIST_FILES = {
-    "Redesign/ToolsPage.swift": "上游任务页，随纯前端删除",
-    "RemotePages.swift": "旧版 maa-remote 页面，随纯前端删除",
-    "RemoteRunViews.swift": "旧版运行视图，随纯前端删除",
-    "LegacyImport.swift": "上游配置导入，随纯前端删除",
-    "CorePreflight.swift": "MaaCore 版本检查，随纯前端删除",
-    "MaaCliPaths.swift": "maa-cli 路径，随纯前端删除",
-}
-
-# 文件里的局部白名单（RemoteGate 的 MaaCore / 上游更新段、Shell 的「停止本 App 的上游任务」、
-# 设置页的开发者区等）用上面的 copy-guard 注释圈，不在这里列。
+# 文件里的局部白名单（设置页的开发者区、诊断信息）用上面的 copy-guard 注释圈，不在这里列。
 
 UI_CALL = re.compile(
     r"\b(Text|Label|Button|Toggle|Picker|TextField|DatePicker|Menu|FieldLabel|SectionTitle|PageHeader|"
@@ -57,7 +46,9 @@ UI_CALL = re.compile(
     r"\.(help|alert|navigationTitle|confirmationDialog)\(|\b(title|help|sub|rows|caption|text):"
 )
 CJK = re.compile(r"[㐀-鿿]")
-GUARD = re.compile(r"//\s*copy-guard:\s*(developer|legacy|end|ignore)\b")
+GUARD = re.compile(r"//\s*copy-guard:\s*(developer|end|ignore)\b")
+# 已经不认的旧标记：出现了就说明有人把旧代码的豁免带回来了。
+RETIRED_GUARD = re.compile(r"//\s*copy-guard:\s*legacy\b")
 
 # `dispatch_gui` 直接调的函数之外，这些函数返回的字也会原样出现在 GUI 上（闸门原因、按钮回执）。
 EXTRA_ACTION_FUNCTIONS = {
@@ -137,12 +128,10 @@ def scan_swift() -> list[str]:
     problems: list[str] = []
     for path in sorted(SWIFT_ROOT.rglob("*.swift")):
         rel = path.relative_to(SWIFT_ROOT).as_posix()
-        if rel in WHITELIST_FILES:
-            continue
         skipping: str | None = None
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             guard = GUARD.search(line)
-            if guard and guard.group(1) in {"developer", "legacy"}:
+            if guard and guard.group(1) == "developer":
                 skipping = guard.group(1)
                 continue
             if guard and guard.group(1) == "end":
@@ -213,10 +202,15 @@ class UiCopyTests(unittest.TestCase):
         self.assertEqual(banned_in("刷理智"), [])
 
     @unittest.skipUnless(SWIFT_ROOT.is_dir(), "没有 gui/ 目录")
-    def test_whitelisted_files_exist(self) -> None:
-        # 文件删掉了就把白名单里那一行也删掉，免得白名单烂在这里。
-        for rel in WHITELIST_FILES:
-            self.assertTrue((SWIFT_ROOT / rel).is_file(), rel)
+    def test_no_retired_guards(self) -> None:
+        # 整文件白名单和 `copy-guard: legacy` 已随纯前端删掉，不许再加回来。
+        hits = [
+            f"{path.relative_to(SWIFT_ROOT).as_posix()}:{number}"
+            for path in sorted(SWIFT_ROOT.rglob("*.swift"))
+            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+            if RETIRED_GUARD.search(line)
+        ]
+        self.assertEqual(hits, [], "还有 copy-guard: legacy：\n" + "\n".join(hits))
 
     @unittest.skipUnless(SWIFT_ROOT.is_dir(), "没有 gui/ 目录")
     def test_gui_copy_has_no_implementation_words(self) -> None:

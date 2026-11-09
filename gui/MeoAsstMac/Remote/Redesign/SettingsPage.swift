@@ -2,9 +2,8 @@
 //  SettingsPage.swift
 //  Wado's MAA
 //
-//  设置：外观（强调色、背景图、玻璃卡片）、连接与游戏、帮助与日志文件；
+//  设置：外观（强调色、背景图、玻璃卡片）、日志文件；
 //  底部默认收起的「开发者」：环境、HERMES_HOME、Python、cron（给维护的人用，普通界面不出现这些词）。
-//  原来的连接 / 游戏 / 系统设置页原样放进弹出页里用；⌘, 的设置窗口也还在。
 //
 
 import SwiftUI
@@ -15,12 +14,8 @@ struct SettingsPage: View {
     @AppStorage(AppearanceKeys.lightImage) private var lightPath = ""
     @AppStorage(AppearanceKeys.darkImage) private var darkPath = ""
 
-    @State private var sheet: SettingsSheet?
-
-    enum SettingsSheet: String, Identifiable {
-        case background, connection, game, system
-        var id: String { rawValue }
-    }
+    @Environment(RemoteStore.self) private var store
+    @State private var showBackground = false
 
     var body: some View {
         ScrollView {
@@ -43,7 +38,7 @@ struct SettingsPage: View {
                             }
                         }
                         FormRow(title: "背景图", sub: backgroundText, help: "浅色、深色各一张；只设一张时共用") {
-                            Button("选择…") { sheet = .background }.buttonStyle(WMButtonStyle())
+                            Button("选择…") { showBackground = true }.buttonStyle(WMButtonStyle())
                                 .help("选背景图，调填充、遮罩和模糊")
                         }
                         FormRow(title: "玻璃卡片", help: "有背景图时，卡片用 Liquid Glass") {
@@ -51,28 +46,16 @@ struct SettingsPage: View {
                                 .help("有背景图时，卡片用 Liquid Glass")
                         }
                     }
-                    FormGroup(title: "连接与游戏") {
-                        FormRow(title: "连接设置", help: "连接地址、触控方式") {
-                            Button("打开…") { sheet = .connection }.buttonStyle(WMButtonStyle()).help("连接地址、触控方式")
+                    FormGroup(title: "日志") {
+                        FormRow(title: "本场日志", help: "最近一场日常或抄作业的完整日志") {
+                            let url = AppLog.runLogURL(store.lastRun)
+                            Button("打开") { if let url { NSWorkspace.shared.open(url) } }
+                                .buttonStyle(WMButtonStyle())
+                                .disabled(url == nil)
                         }
-                        FormRow(title: "游戏设置", help: "客户端、启动游戏") {
-                            Button("打开…") { sheet = .game }.buttonStyle(WMButtonStyle()).help("客户端、启动游戏")
-                        }
-                        FormRow(title: "系统选项", help: "防休眠、通知等") {
-                            Button("打开…") { sheet = .system }.buttonStyle(WMButtonStyle()).help("防休眠、通知等")
-                        }
-                    }
-                    FormGroup {
-                        FormRow(title: "帮助与公告") {
-                            Link(destination: URL(string: "https://docs.maa.plus/zh-cn/mac.html")!) {
-                                Text("打开…")
-                            }
-                            .buttonStyle(WMButtonStyle())
-                            .help("docs.maa.plus 的 Mac 版说明")
-                        }
-                        FormRow(title: "日志文件") {
-                            Button("在 Finder 中显示") { OpenLogFileView.revealLogInFinder() }
-                                .buttonStyle(WMButtonStyle()).help("运行日志所在的文件夹")
+                        FormRow(title: "App 日志", help: "本 App 每次操作的结果") {
+                            Button("在 Finder 中显示") { AppLog.shared.revealInFinder() }
+                                .buttonStyle(WMButtonStyle())
                         }
                     }
                     // copy-guard: developer
@@ -85,17 +68,12 @@ struct SettingsPage: View {
             .padding(.top, 22)
             .padding(.bottom, 40)
         }
-        .sheet(item: $sheet) { which in
+        .sheet(isPresented: $showBackground) {
             VStack(spacing: 0) {
-                switch which {
-                case .background: AppearanceSettingsView()
-                case .connection: ConnectionSettingsView()
-                case .game: GameSettingsView()
-                case .system: SystemSettingsView()
-                }
+                AppearanceSettingsView()
                 HStack {
                     Spacer()
-                    Button("完成") { sheet = nil }.buttonStyle(WMButtonStyle(kind: .accent))
+                    Button("完成") { showBackground = false }.buttonStyle(WMButtonStyle(kind: .accent))
                         .keyboardShortcut(.cancelAction)
                 }
                 .padding(16)

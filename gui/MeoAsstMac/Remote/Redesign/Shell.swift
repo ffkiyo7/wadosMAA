@@ -2,7 +2,7 @@
 //  Shell.swift
 //  Wado's MAA
 //
-//  重设计的窗口外壳：边栏（今天 / 自动抄作业 / 日程与默认 / 日常配置 / 工具与更多 / 设置）、
+//  重设计的窗口外壳：边栏（今天 / 自动抄作业 / 日程与默认 / 日常配置 / 设置）、
 //  顶部状态条（一个胶囊：空闲或运行中 + 做到哪，点开看详情；「日志」按钮）、右侧日志检查器（「本场」卡片 +
 //  本场 / App 两段）、会连游戏的统一确认框。
 //
@@ -10,7 +10,7 @@
 import SwiftUI
 
 enum WMPage: String, CaseIterable, Identifiable, Hashable {
-    case today, copilot, schedule, config, tools, settings
+    case today, copilot, schedule, config, settings
 
     var id: String { rawValue }
 
@@ -20,7 +20,6 @@ enum WMPage: String, CaseIterable, Identifiable, Hashable {
         case .copilot: "自动抄作业"
         case .schedule: "日程与默认"
         case .config: "日常配置"
-        case .tools: "工具与更多"
         case .settings: "设置"
         }
     }
@@ -31,7 +30,6 @@ enum WMPage: String, CaseIterable, Identifiable, Hashable {
         case .copilot: "doc.on.doc"
         case .schedule: "calendar"
         case .config: "slider.horizontal.3"
-        case .tools: "square.grid.2x2"
         case .settings: "gearshape"
         }
     }
@@ -42,8 +40,7 @@ enum WMPage: String, CaseIterable, Identifiable, Hashable {
         case .copilot: "选关、挑作业、开打"
         case .schedule: "早晚场时间、默认关卡和要做的事"
         case .config: "日常怎么刷，整页保存"
-        case .tools: "肉鸽、生息演算、手贴作业和实用工具"
-        case .settings: "外观、连接与游戏"
+        case .settings: "外观和日志文件"
         }
     }
 }
@@ -89,7 +86,6 @@ enum WMPage: String, CaseIterable, Identifiable, Hashable {
 }
 
 struct RedesignRoot: View {
-    @EnvironmentObject private var viewModel: MAAViewModel
     @Environment(RemoteStore.self) private var store
     @AppStorage(WM.accentKey) private var accent = AccentChoice.gold
     @AppStorage(WM.logKey) private var showLog = false
@@ -146,9 +142,6 @@ struct RedesignRoot: View {
                 row(.schedule)
                 row(.config)
             }
-            Section("更多") {
-                row(.tools)
-            }
         }
         .safeAreaInset(edge: .bottom) {
             List(selection: $page) { row(.settings) }
@@ -177,7 +170,6 @@ struct RedesignRoot: View {
             case .copilot: CopilotPage()
             case .schedule: SchedulePage()
             case .config: ConfigPage()
-            case .tools: ToolsPage()
             case .settings: SettingsPage()
             }
         }
@@ -219,7 +211,6 @@ struct RedesignRoot: View {
 /// 运行中「● 早场日常 · 刷理智 3/≈7 ◔」→「● 刷理智 3/≈7 ◔」→「● 刷理智」；
 /// 空闲「● 空闲 ✓ 22:16 下次 早场日常 08:00」→「● 空闲 下次 早场日常 08:00」→「● 空闲」。
 struct RunStateView: View {
-    @EnvironmentObject private var viewModel: MAAViewModel
     @Environment(RemoteStore.self) private var store
 
     /// 详情栏现在多宽。
@@ -324,17 +315,6 @@ struct RunStateView: View {
                 } else {
                     Text(busy).fontWeight(.semibold)
                 }
-                // copy-guard: legacy（本 App 自己跑的上游任务，随「GUI 退成纯前端」整段删掉）
-                if viewModel.status == .busy {
-                    Button {
-                        Task { try? await viewModel.stop() }
-                    } label: {
-                        Label("停止", systemImage: "stop.fill")
-                    }
-                    .buttonStyle(WMButtonStyle(kind: .danger))
-                    .help("停止本 App 里正在跑的上游任务")
-                }
-                // copy-guard: end
                 if let run = cancelableRun {
                     Button {
                         showDetail = false
@@ -361,9 +341,9 @@ struct RunStateView: View {
 
     // MARK: 数据
 
-    /// maa-remote 正在跑、可以从这里停下的那一场（日常或抄作业）。本 App 自己的任务另有按钮。
+    /// maa-remote 正在跑、可以从这里停下的那一场（日常或抄作业）。
     private var cancelableRun: LockHolder? {
-        guard viewModel.status == .idle, let holder = store.lockHolder,
+        guard let holder = store.lockHolder,
             ["daily", "copilot"].contains(holder.holder)  // copy-guard: ignore
         else { return nil }
         return holder
@@ -383,27 +363,23 @@ struct RunStateView: View {
     }
 
     private var busyText: String? {
-        // copy-guard: legacy（同上）
-        if viewModel.status != .idle { return "本 App 的上游任务" }
-        // copy-guard: end
-        return store.lockHolder?.text
+        store.lockHolder?.text
     }
 
     /// 日常 / 抄作业正在跑，`RunProgress` 跟着它。
     private var liveRun: Bool {
-        viewModel.status == .idle && store.lockHolder != nil && store.lastRun["status"]?.string == "running"
+        store.lockHolder != nil && store.lastRun["status"]?.string == "running"
             && store.progress.hasRun && store.progress.outcome == nil
     }
 
-    /// 「早场日常」「抄作业 SR-8」；本 App 的任务没有。
+    /// 「早场日常」「抄作业 SR-8」。
     private var runName: String? {
-        viewModel.status == .idle ? store.lockHolder?.name : nil
+        store.lockHolder?.name
     }
 
     /// 胶囊上的主词：现在做的那件事（「刷理智」）；还没到第一件事时是这一场的名字。
     private var doing: String {
-        if viewModel.status != .idle { return "更多玩法运行中" }
-        return remoteStage?.label ?? runName ?? "运行中"
+        remoteStage?.label ?? runName ?? "运行中"
     }
 
     private var fightCount: String? {
@@ -416,7 +392,7 @@ struct RunStateView: View {
 
     /// maa-remote 这一场现在在哪个阶段（「刷理智」）。
     private var remoteStage: RunStage? {
-        guard viewModel.status == .idle, store.lockHolder != nil, store.lastRun["status"]?.string == "running"
+        guard store.lockHolder != nil, store.lastRun["status"]?.string == "running"
         else { return nil }
         return store.progress.current
     }
@@ -502,10 +478,10 @@ struct RunReportBanner: View {
 }
 
 /// 右侧日志检查器：顶部固定「本场」卡片（步骤条、进度、本场日志），下面分两段——
-/// 「本场」是 maa-remote 正在跑（或刚跑完）的那一场的阶段行，「App」是本 App 自己的运行日志。
+/// 「本场」是 maa-remote 正在跑（或刚跑完）的那一场的阶段行，「App」是本 App 的回执记录（`AppLog`）。
 struct LogInspector: View {
-    @Environment(NewViewModel.self) private var newModel
     @Environment(RemoteStore.self) private var store
+    private let appLog = AppLog.shared
     @Environment(\.wmAccent) private var accent
 
     private enum Tab: Hashable { case run, app }
@@ -513,7 +489,7 @@ struct LogInspector: View {
     @State private var tab = Tab.run
 
     private enum Row: Identifiable {
-        case app(MAALog)
+        case app(AppLog.Entry)
         case stage(RunProgress.Entry)
 
         var id: UUID {
@@ -527,7 +503,7 @@ struct LogInspector: View {
     private var rows: [Row] {
         switch tab {
         case .run: store.progress.entries.map(Row.stage)
-        case .app: newModel.logs.map(Row.app)
+        case .app: appLog.entries.map(Row.app)
         }
     }
 
@@ -545,7 +521,7 @@ struct LogInspector: View {
                 .fixedSize()
                 if tab == .app {
                     Button {
-                        OpenLogFileView.revealLogInFinder()
+                        appLog.revealInFinder()
                     } label: {
                         Image(systemName: "folder")
                     }
@@ -595,7 +571,7 @@ struct LogInspector: View {
         switch row {
         case let .app(log):
             return Text(log.date.formatted(date: .omitted, time: .standard) + " ").foregroundStyle(WM.f3)
-                + Text(log.content).foregroundStyle(color(log))
+                + Text(log.text).foregroundStyle(log.ok ? WM.f2 : WM.danger)
         case let .stage(entry):
             // 打开 App 之前就过去的阶段只知道顺序，时刻那一栏空着。
             let time = entry.date.formatted(date: .omitted, time: .standard)
@@ -611,15 +587,6 @@ struct LogInspector: View {
         case .stage: .primary
         case .ok: WM.ok
         case .error: WM.danger
-        }
-    }
-
-    private func color(_ log: MAALog) -> Color {
-        switch log.color {
-        case .error: WM.danger
-        case .warning: WM.game
-        case .rare: accent.color
-        default: WM.f2
         }
     }
 }

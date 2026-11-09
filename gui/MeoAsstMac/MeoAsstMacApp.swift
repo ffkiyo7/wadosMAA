@@ -10,68 +10,31 @@ import SwiftUI
 @main
 struct MeoAsstMacApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
-    @StateObject private var appViewModel: MAAViewModel
-    @State private var newViewModel: NewViewModel
-
-    init() {
-        let viewModel = MAAViewModel()
-        let newModel = NewViewModel(parent: viewModel)
-        _appViewModel = StateObject(wrappedValue: viewModel)
-        _newViewModel = State(wrappedValue: newModel)
-        appDelegate.beforeTermination = {
-            await newModel.waitLogStoreToFinish()
-        }
-    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .environmentObject(appViewModel)
-                .environment(newViewModel)
+            // 自绘边栏 + 状态条 + 日志检查器；整个窗口一张背景图，侧栏和工具栏是系统的 Liquid Glass（K9）。
+            RedesignRoot()
+                .containerBackground(for: .window) {
+                    WindowBackground()
+                }
                 .environment(RemoteStore.shared)
-                // 上游的「定时一键长草」（TaskTimerManager）不启动：调度只认 maa-remote 的 cron（K6 / K8）。
                 .frame(minWidth: 900, minHeight: 600)
                 .background(ScreenSafeWindow())
+                // maa-remote 的状态文件一变就重读（K3）。
+                .task { RemoteStore.shared.startWatching() }
         }
         .defaultSize(width: 1180, height: 760)
         .windowResizability(.contentMinSize)
         .commands {
             CommandGroup(replacing: .newItem) {
-                OpenLogFileView()
+                Button("打开本场日志") {
+                    if let url = AppLog.runLogURL(RemoteStore.shared.lastRun) { NSWorkspace.shared.open(url) }
+                }
+                .disabled(AppLog.runLogURL(RemoteStore.shared.lastRun) == nil)
+                Button("在 Finder 中显示 App 日志") { AppLog.shared.revealInFinder() }
             }
             SidebarCommands()
-            TaskCommands(viewModel: appViewModel)
-        }
-
-        Settings {
-            TabView {
-                ConnectionSettingsView()
-                    .tabItem {
-                        Label("连接设置", systemImage: "rectangle.connected.to.line.below")
-                    }
-
-                GameSettingsView()
-                    .tabItem {
-                        Label("游戏设置", systemImage: "gamecontroller")
-                    }
-
-                SystemSettingsView()
-                    .tabItem {
-                        Label("系统设置", systemImage: "wrench.adjustable")
-                    }
-
-                AppearanceSettingsView()
-                    .tabItem {
-                        Label("外观", systemImage: "paintbrush")
-                    }
-
-                RemoteSettingsView()
-                    .tabItem {
-                        Label("maa-remote", systemImage: "point.3.connected.trianglepath.dotted")
-                    }
-            }
-            .environmentObject(appViewModel)
-            .frame(minWidth: 360, maxWidth: 520, minHeight: 240)
         }
     }
 }
@@ -150,23 +113,8 @@ private struct ScreenSafeWindow: NSViewRepresentable {
 }
 
 private class AppDelegate: NSObject, NSApplicationDelegate {
-    fileprivate var beforeTermination: (() async -> Void)?
-    private var terminationTask: Task<Void, Never>?
-
     func applicationWillFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
-    }
-
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let beforeTermination else { return .terminateNow }
-        if terminationTask != nil { return .terminateLater }
-
-        terminationTask = Task {
-            await beforeTermination()
-            sender.reply(toApplicationShouldTerminate: true)
-        }
-
-        return .terminateLater
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

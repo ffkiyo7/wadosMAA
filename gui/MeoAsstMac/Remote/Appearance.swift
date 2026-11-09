@@ -196,26 +196,3 @@ struct AppearanceSettingsView: View {
         }
     }
 }
-
-// copy-guard: developer
-/// maa-remote 在哪（S7 切线上时在这里改）。只在 ⌘, 的旧设置窗口里，给维护的人用。
-struct RemoteSettingsView: View {
-    @AppStorage(RemoteConfig.hermesHomeKey) private var hermesHome = ""
-    @AppStorage(RemoteConfig.pythonKey) private var python = ""
-
-    var body: some View {
-        Form {
-            Section {
-                TextField("HERMES_HOME", text: $hermesHome, prompt: Text(RemoteConfig.developmentHermesHome))
-                TextField("Python", text: $python, prompt: Text(RemoteConfig.python))
-            } footer: {
-                VStack(alignment: .leading) {
-                    Text("现在用的是：\(RemoteConfig.hermesHome.path)")
-                    Text("留空 = 开发副本。切到线上（\(RemoteConfig.liveHermesHome)）之前先读 PLAN_MACGUI 的 S7。")
-                }
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-// copy-guard: end

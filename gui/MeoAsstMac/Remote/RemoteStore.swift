@@ -311,9 +311,10 @@ struct RunReport: Identifiable, Equatable, Sendable {
     /// 这之前就结束的场次不报。切环境时重置。
     @ObservationIgnored private var watchingSince = Date()
 
-    /// 成功的回执几秒后自己消失；失败的留到用户关掉、下一次操作或切页。
+    /// 回执同时记进 App 日志。成功的回执几秒后自己消失；失败的留到用户关掉、下一次操作或切页。
     /// 新回执会取消旧的计时，旧定时器不会清掉新回执（都在主线程上，取消先于检查）。
     func post(_ ok: Bool, _ text: String) {
+        AppLog.shared.add(ok, text)
         noticeTimer?.cancel()
         noticeTimer = nil
         notice = (ok, text)
