@@ -3,7 +3,7 @@
 //  Wado's MAA
 //
 //  首页「今天」，从上到下：页头（日期、当期活动）、早场 / 晚场两张大卡（`TodaySessions.swift`）、
-//  手动日常（`TodayManual.swift`）、待处理（`TodayPending.swift`）、最近几场。
+//  手动日常（`TodayManual.swift`）、待处理（`TodayPending.swift`）、近 7 天（`TodayWeek.swift`）。
 //
 
 import SwiftUI
@@ -33,7 +33,7 @@ struct TodayPage: View {
                 }
                 ManualRunRow()
                 TodayPending(go: go)
-                RecentRunsSection()
+                TimelineView(.periodic(from: .now, by: 30)) { context in WeekStrip(now: context.date) }
             }
             .padding(.horizontal, 28)
             .padding(.top, 20)
@@ -93,116 +93,5 @@ struct RemoteNotices: View {
             }
         }
         .padding(.bottom, Self.any(store) ? gap : 0)
-    }
-}
-
-// MARK: - 最近几场
-
-struct RecentRunsSection: View {
-    @Environment(RemoteStore.self) private var store
-
-    /// 正在跑的那一场还没进索引，先放在最上面。
-    private var running: Bool {
-        LastRunText.ongoing.contains(store.lastRun["status"]?.string ?? "") && store.lastRun["status"] != nil
-    }
-
-    var body: some View {
-        let runs = Array(store.recentRuns.prefix(RunHistory.shown))
-        VStack(alignment: .leading, spacing: 0) {
-            if runs.isEmpty {
-                SectionTitle(title: "最近一次")
-            } else {
-                SectionTitle(title: "最近几场") { rateText }
-            }
-            VStack(spacing: 0) {
-                if runs.isEmpty {
-                    if store.lastRun["status"] == nil {
-                        Text("还没有记录").foregroundStyle(WM.f2)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 16).padding(.vertical, 12)
-                    } else {
-                        lastRunRow
-                    }
-                } else {
-                    if running {
-                        lastRunRow
-                        RowDivider()
-                    }
-                    ForEach(Array(runs.enumerated()), id: \.element.id) { index, run in
-                        if index > 0 { RowDivider() }
-                        recordRow(run)
-                    }
-                }
-            }
-            .wmCard()
-        }
-    }
-
-    @ViewBuilder private var rateText: some View {
-        if let rate = RunHistory.successRate(store.recentRuns) {
-            Text("近 \(rate.total) 场成功 \(rate.ok * 100 / rate.total)%")
-                .font(.system(size: 12)).foregroundStyle(WM.f2).monospacedDigit()
-                .help("\(rate.total) 场里成功 \(rate.ok) 场，跳过和停下的不算")
-        }
-    }
-
-    private func recordRow(_ run: RunRecord) -> some View {
-        var when = run.startedAt.map { "\(Beijing.monthDay($0)) \(RunLock.beijingClock($0))" } ?? ""
-        if let seconds = run.durationSeconds, run.status != "skipped" {
-            when += (when.isEmpty ? "" : " · ") + RunHistory.durationText(seconds)
-        }
-        return HStack(spacing: 12) {
-            Swatch(code: run.stage, size: 24, radius: 6)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(run.title).fontWeight(.semibold)
-                Text(when).font(.system(size: 11.5)).foregroundStyle(WM.f2).monospacedDigit().lineLimit(1)
-            }
-            Spacer()
-            Text(LastRunText.statusWord(run.status))
-                .font(.system(size: 12))
-                .foregroundStyle(Self.statusColor(run.status))
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .help(run.reason)
-    }
-
-    static func statusColor(_ status: String) -> Color {
-        status == "success" ? WM.ok
-            : status == "skipped" || status == "cancelled" ? WM.f3
-            : LastRunText.ongoing.contains(status) ? WM.game : WM.danger
-    }
-
-    private var lastRunRow: some View {
-        let run = store.lastRun
-        // 抄作业（phase 是 copilot-<token>）没有 plan，关卡在顶层 stage；下面一行用 summary。
-        let plan = LastRunText.isCopilot(run) ? nil : run["plan"]?.object
-        let stage = LastRunText.stage(run)
-        let names = ["fight": "刷理智", "infrast": "基建", "recruit": "公招", "mall": "信用商店", "award": "领奖"]
-        let tasks = Set((plan?["tasks"]?.object ?? [:]).filter { $0.value.bool == true }.keys)
-        let order = ["fight", "infrast", "recruit", "mall", "award"]
-        let taskText = order.filter { tasks.contains($0) }.compactMap { names[$0] }.joined(separator: "、")
-        let started = run["started_at"]?.string.flatMap(RunLock.parseISO)
-        let status = run["status"]?.string ?? ""
-        let title = LastRunText.title(run)
-        return HStack(spacing: 12) {
-            Swatch(code: stage, size: 24, radius: 6)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title).fontWeight(.semibold)
-                Text(taskText.isEmpty ? (run["summary"]?.displayText ?? "") : taskText)
-                    .font(.system(size: 11.5)).foregroundStyle(WM.f2).lineLimit(1)
-            }
-            Spacer()
-            if let started {
-                Text("\(Beijing.monthDay(started)) \(RunLock.beijingClock(started))")
-                    .font(.system(size: 12)).foregroundStyle(WM.f2).monospacedDigit()
-            }
-            Text(LastRunText.statusWord(status))
-                .font(.system(size: 12))
-                .foregroundStyle(Self.statusColor(status))
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .help(run["summary"]?.displayText ?? "")
     }
 }

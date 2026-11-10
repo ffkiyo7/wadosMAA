@@ -2,7 +2,7 @@
 //  RunHistory.swift
 //  Wado's MAA
 //
-//  最近几场：读 `$HERMES_HOME/state/maa/runs/index.jsonl`（DEV_GUIDE §12.3，不变量 #66）。
+//  场次索引：读 `$HERMES_HOME/state/maa/runs/index.jsonl`（DEV_GUIDE §12.3，不变量 #66）。
 //  maa-remote 每场结束往里追加一行，GUI 只读不写。读不懂的行（写到一半、更高版本）跳过。
 //
 
@@ -33,7 +33,7 @@ struct RunRecord: Identifiable, Equatable, Sendable {
         return kind + (stage.isEmpty ? "" : " · \(stage)")
     }
 
-    /// 没成功 / 跳过的原因，给悬停提示用。
+    /// 没成功 / 跳过的原因。
     var reason: String {
         switch status {
         case "failed": RunHistory.failureText[failure] ?? ""
@@ -95,10 +95,6 @@ struct RunFightResult: Equatable, Sendable {
 
 enum RunHistory {
     static let knownSchemaVersion = 1
-    /// 首页列几场。
-    static let shown = 6
-    /// 成功率看最近多少场。
-    static let rateWindow = 30
 
     static var file: URL { RemoteConfig.stateDirectory.appending(path: "runs/index.jsonl") }
 
@@ -148,13 +144,6 @@ enum RunHistory {
                 progressPath: row["progress"]?.string))
         }
         return rows.reversed()
-    }
-
-    /// 最近 `rateWindow` 场里成功了几场：只算成功和没成功的，跳过和停下的不算。一场都没有就是 nil。
-    static func successRate(_ rows: [RunRecord]) -> (ok: Int, total: Int)? {
-        let counted = rows.filter { $0.status == "success" || $0.status == "failed" }.prefix(rateWindow)
-        guard !counted.isEmpty else { return nil }
-        return (counted.filter { $0.status == "success" }.count, counted.count)
     }
 
     /// 「23 分钟」「1 小时 5 分钟」「不到 1 分钟」。
