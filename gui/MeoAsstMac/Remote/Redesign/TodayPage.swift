@@ -2,10 +2,8 @@
 //  TodayPage.swift
 //  Wado's MAA
 //
-//  首页「今天」：左边是要操作的「手动日常」（原一键长草的「这一次」，K12），右边是早场 / 晚场的
-//  计划（`plan today`，点了就改：`plan set-stage` / `skip-today` / `fight`）和游戏资源；
-//  下面是自动抄作业的关卡和最近几场（`runs/index.jsonl`，没有记录时退回 `last_run.json` 的最近一次）。
-//  开始走 `run local`，和 Discord「现在跑」同一条路。
+//  首页「今天」，从上到下：页头（日期、当期活动）、早场 / 晚场两张大卡（`TodaySessions.swift`）、
+//  手动日常、待处理（`TodayPending.swift`）、最近几场。
 //
 
 import SwiftUI
@@ -18,22 +16,28 @@ struct TodayPage: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                PageHeader(title: "今天", caption: caption)
-                RemoteNotices()
-                HStack(alignment: .top, spacing: 16) {
-                    ManualRunCard()
-                        .frame(maxWidth: .infinity)
-                        .layoutPriority(1.65)
-                    StatusStack(go: go)
-                        .frame(minWidth: 260, idealWidth: 320, maxWidth: 360)
+            VStack(alignment: .leading, spacing: 14) {
+                header
+                if RemoteNotices.any(store) { RemoteNotices(gap: 0) }
+                TimelineView(.periodic(from: .now, by: 30)) { context in
+                    // 进行中的那张展开，另一张不跟着拉伸。
+                    HStack(alignment: .top, spacing: 14) {
+                        SessionCard(phase: "am", name: "早场", now: context.date)
+                        SessionCard(phase: "pm", name: "晚场", now: context.date)
+                    }
                 }
-                TodayPending(go: go).padding(.top, 26)
-                RecentRunsSection().padding(.top, 26)
+                ForEach([store.schedule == nil ? store.scheduleError : nil, store.todayPlan == nil ? store.todayPlanError : nil]
+                    .compactMap { $0 }, id: \.self)
+                { error in
+                    Text(error).font(.system(size: 12)).foregroundStyle(WM.danger)
+                }
+                ManualRunCard()
+                TodayPending(go: go)
+                RecentRunsSection()
             }
             .padding(.horizontal, 28)
-            .padding(.top, 22)
-            .padding(.bottom, 40)
+            .padding(.top, 20)
+            .padding(.bottom, 32)
         }
         .task {
             await store.reload()
@@ -42,19 +46,39 @@ struct TodayPage: View {
         }
     }
 
-    /// 「11 月 10 日 星期二 · 「时间啊，向前！」11/1–11/22 · 还剩 12 天」。没有活动就只有日期。
-    private var caption: String {
-        let today = Beijing.todayCaption()
-        guard let activity = data.choices?.activity, let start = activity.start, let end = activity.end,
-            end > .now
-        else { return today }
-        return "\(today)  ·  \(activity.name) \(Beijing.slashDay(start))–\(Beijing.slashDay(end)) · \(Beijing.left(until: end))"
+    /// 「今天 11 月 10 日 星期二」；有活动时右边一个胶囊「『活动名』还剩 N 天」。
+    private var header: some View {
+        HStack(spacing: 12) {
+            Text("今天").font(.system(size: 30, weight: .bold)).tracking(-0.5)
+            Text(Beijing.todayCaption()).font(.system(size: 15)).foregroundStyle(WM.f2).padding(.top, 4)
+            Spacer(minLength: 0)
+            if let activity = data.choices?.activity, let end = activity.end, end > .now {
+                HStack(spacing: 8) {
+                    Swatch(code: activity.stages.first ?? "", size: 14, radius: 4)
+                    Text(activity.name).font(.system(size: 13, weight: .semibold))
+                    Text(Beijing.left(until: end)).font(.system(size: 13)).foregroundStyle(WM.f2).monospacedDigit()
+                }
+                .padding(.leading, 10)
+                .padding(.trailing, 14)
+                .frame(height: 30)
+                .wmCard(radius: 15)
+                .help(activity.start.map { "\(Beijing.slashDay($0))–\(Beijing.slashDay(end))" } ?? "")
+            }
+        }
+        .frame(height: 38)
     }
 }
 
 /// 只读、读失败、刚才那次操作的回执（各页顶部共用）。
 struct RemoteNotices: View {
+    /// 下面留多少空：首页的区块之间本来就有间距，传 0。
+    var gap: CGFloat = 14
     @Environment(RemoteStore.self) private var store
+
+    /// 有没有要显示的。
+    static func any(_ store: RemoteStore) -> Bool {
+        store.schemaProblem != nil || store.loadError != nil || store.notice != nil
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -68,7 +92,7 @@ struct RemoteNotices: View {
                 NoticeLine(ok: notice.ok, text: notice.text) { store.clearNotice() }
             }
         }
-        .padding(.bottom, store.schemaProblem == nil && store.loadError == nil && store.notice == nil ? 0 : 14)
+        .padding(.bottom, Self.any(store) ? gap : 0)
     }
 }
 
@@ -375,378 +399,6 @@ struct FlowRow: Layout {
             rowHeight = max(rowHeight, size.height)
         }
         return (maxX, y + rowHeight)
-    }
-}
-
-// MARK: - 右栏状态
-
-struct StatusStack: View {
-    let go: (WMPage) -> Void
-    @Environment(RemoteStore.self) private var store
-    @Environment(\.wmAccent) private var accent
-
-    var body: some View {
-        sessionsCard
-    }
-
-    private func key(_ icon: String, _ title: String) -> some View {
-        Label(title, systemImage: icon)
-            .font(.system(size: 11.5, weight: .semibold))
-            .foregroundStyle(WM.f2)
-    }
-
-    private var sessionsCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                key("calendar", "今天的日常")
-                Spacer()
-                Button("日常 ›") { go(.daily) }.buttonStyle(WMLinkStyle()).help("打开「日常」")
-            }
-            TimelineView(.periodic(from: .now, by: 30)) { context in
-                VStack(spacing: 10) {
-                    ForEach(Array([("am", "早场"), ("pm", "晚场")].enumerated()), id: \.element.0) { index, item in
-                        if index > 0 { RowDivider() }
-                        SessionBlock(phase: item.0, name: item.1, now: context.date)
-                    }
-                }
-            }
-            if store.schedule == nil, let error = store.scheduleError {
-                Text(error).font(.system(size: 11.5)).foregroundStyle(WM.danger)
-            }
-            if store.todayPlan == nil, let error = store.todayPlanError {
-                Text(error).font(.system(size: 11.5)).foregroundStyle(WM.danger)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .wmCard()
-    }
-}
-
-/// 一场今天的结果。正在跑的看 `last_run.json`；跑完的看 `runs/index.jsonl`，
-/// 早场、晚场各有一行，晚场开跑不会把早场的结果盖掉。
-struct SessionOutcome {
-    let status: String
-    let started: Date
-    let finished: Date?
-    /// 没成功 / 跳过的原因（索引里才有）。
-    let reason: String
-
-    var ongoing: Bool { LastRunText.ongoing.contains(status) }
-
-    @MainActor static func today(_ phase: String, store: RemoteStore, now: Date) -> SessionOutcome? {
-        let calendar = Beijing.calendar
-        var live: SessionOutcome?
-        let run = store.lastRun
-        if run["phase"]?.string == phase,
-            let started = run["started_at"]?.string.flatMap(RunLock.parseISO),
-            calendar.isDate(started, inSameDayAs: now)
-        {
-            var status = run["status"]?.string ?? ""
-            var reason = ""
-            // 写着「进行中」但锁已经空了：进程没收尾就没了。
-            if LastRunText.ongoing.contains(status), store.lockHolder == nil {
-                status = "failed"
-                reason = "中途断了"
-            }
-            live = SessionOutcome(
-                status: status, started: started,
-                finished: run["finished_at"]?.string.flatMap(RunLock.parseISO), reason: reason)
-        }
-        let record = store.recentRuns.first {
-            $0.phase == phase && $0.startedAt.map { calendar.isDate($0, inSameDayAs: now) } == true
-        }
-        if let record, let started = record.startedAt,
-            live.map({ !$0.ongoing && started >= $0.started.addingTimeInterval(-1) }) ?? true
-        {
-            return SessionOutcome(
-                status: record.status, started: started,
-                finished: record.durationSeconds.map { started.addingTimeInterval(TimeInterval($0)) },
-                reason: record.reason)
-        }
-        return live
-    }
-}
-
-/// 首页「今天的日常」里的一场：状态行 + 计划。
-/// 右边一列只放一个动作：在跑 → 停止；没成功 → 再跑一次；没开始 → 跳过 / 恢复；关着 → 打开。
-struct SessionBlock: View {
-    let phase: String
-    let name: String
-    let now: Date
-
-    @Environment(RemoteStore.self) private var store
-    @Environment(\.askGame) private var askGame
-
-    private static let order = ["fight", "infrast", "recruit", "mall", "award"]
-
-    private var session: ScheduleReport.Session? { store.schedule?.sessions[phase] }
-    private var plan: TodayPlan.Session? { store.todayPlan?.sessions.first { $0.phase == phase } }
-    private var enabledKey: String { "schedule.\(phase).enabled" }
-    private var enabled: Bool { store.pendingValue(enabledKey)?.bool ?? session?.enabled ?? true }
-
-    var body: some View {
-        let outcome = SessionOutcome.today(phase, store: store, now: now)
-        let state = state(outcome)
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                Image(systemName: state.icon).foregroundStyle(state.color)
-                Text(name).fontWeight(.semibold).frame(width: 34, alignment: .leading)
-                Text(session?.time ?? "—").foregroundStyle(WM.f2).monospacedDigit()
-                Spacer()
-                Text(state.text).font(.system(size: 11.5)).foregroundStyle(state.textColor)
-            }
-            .help(state.tip)
-            if let plan {
-                planBlock(plan, outcome: outcome)
-            }
-        }
-    }
-
-    // MARK: 状态
-
-    private func state(_ outcome: SessionOutcome?)
-        -> (icon: String, color: Color, text: String, textColor: Color, tip: String)
-    {
-        if let outcome {
-            switch outcome.status {
-            case "success": return ("checkmark.circle", WM.ok, "完成", WM.ok, "")
-            case "skipped": return ("minus.circle", WM.f3, "已跳过", WM.f2, "")
-            case "canceled", "cancelled": return ("stop.circle", WM.f3, "已停止", WM.f2, "")
-            case _ where outcome.ongoing: return ("play.circle", WM.game, "进行中", WM.game, "")
-            default: return ("exclamationmark.circle", WM.danger, "没完成", WM.danger, "")
-            }
-        }
-        guard let session else { return ("circle.dashed", WM.f3, "读不到", WM.f2, "暂时读不到时间") }
-        if !enabled { return ("pause.circle", WM.f3, "已关", WM.f2, "到点不自动开始") }
-        if plan?.skip == true { return ("minus.circle", WM.f3, "今天跳过", WM.f2, "到点不跑这一场") }
-        if let date = Beijing.today(at: session.time, now: now), date > now {
-            return ("circle.dashed", WM.f2, Beijing.until(date, from: now), WM.f2, "还没开始")
-        }
-        return ("minus.circle", WM.f3, "今天没跑", WM.f2, "今天没有记录")
-    }
-
-    // MARK: 计划
-
-    private func planBlock(_ plan: TodayPlan.Session, outcome: SessionOutcome?) -> some View {
-        let dim = outcome == nil && (!enabled || plan.skip)
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                SessionStageMenu(
-                    plan: plan,
-                    editable: outcome == nil && enabled && !store.readOnly,
-                    struck: outcome == nil && enabled && plan.skip)
-                    .opacity(dim ? 0.45 : 1)
-                Spacer(minLength: 0)
-                trailing(plan, outcome: outcome)
-            }
-            if let footer = footer(plan, outcome: outcome) {
-                Text(footer).font(.system(size: 11.5)).foregroundStyle(WM.f2).lineLimit(2)
-                    .monospacedDigit()
-                    .opacity(dim ? 0.45 : 1)
-            }
-        }
-        .padding(.leading, 26)
-    }
-
-    /// 跑过了：起止时间和原因；没跑：只在有事不做时说一句，全做就不占行。
-    private func footer(_ plan: TodayPlan.Session, outcome: SessionOutcome?) -> String? {
-        if let outcome {
-            if outcome.ongoing { return "\(RunLock.beijingClock(outcome.started)) 开始" }
-            if outcome.status == "skipped" { return outcome.reason.isEmpty ? nil : outcome.reason }
-            var text = RunLock.beijingClock(outcome.started)
-            if let finished = outcome.finished { text += "–\(RunLock.beijingClock(finished))" }
-            if !outcome.reason.isEmpty { text += " · \(outcome.reason)" }
-            return text
-        }
-        let off = Self.order.dropFirst().filter { plan.tasks[$0] == false }
-            .map { store.todayPlan?.taskNames[$0] ?? $0 }
-        return off.isEmpty ? nil : "不做\(off.joined(separator: "、"))"
-    }
-
-    @ViewBuilder private func trailing(_ plan: TodayPlan.Session, outcome: SessionOutcome?) -> some View {
-        if let outcome {
-            if outcome.ongoing {
-                if store.cancelableRun?.name == "\(name)日常" { StopRunButton() }
-            } else if outcome.status != "success", outcome.status != "skipped",
-                store.lockHolder == nil, !store.readOnly
-            {
-                Button("再跑一次") { askGame(retryConfirm(plan)) }
-                    .buttonStyle(QuietLinkStyle())
-                    .help("按这一场的计划马上再跑一次")
-            }
-        } else if store.readOnly {
-            EmptyView()
-        } else if !enabled {
-            Button("打开") {
-                Task {
-                    await store.change(
-                        ["schedule", "enable", phase], undo: ["schedule", "disable", phase],
-                        pendingKey: enabledKey, pendingValue: .bool(true))
-                }
-            }
-            .buttonStyle(QuietLinkStyle())
-            .help("到点自动开始")
-        } else if store.planChanging == phase {
-            ProgressView().controlSize(.mini)
-        } else {
-            Button(plan.skip ? "恢复" : "跳过") {
-                Task { await store.changePlan(phase, ["plan", "skip-today", plan.skip ? "off" : "on"]) }
-            }
-            .buttonStyle(QuietLinkStyle())
-            .disabled(store.planChanging != nil)
-            .help(plan.skip ? "到点照常跑这一场" : "今天到点不跑这一场，另一场不受影响")
-        }
-    }
-
-    // MARK: 再跑一次
-
-    /// 和「手动日常」同一条路（`run local`）：关卡、要做的事照这一场的计划。
-    private func retryConfirm(_ plan: TodayPlan.Session, soon: Bool = false) -> GameConfirm {
-        let names = Self.order.filter { plan.tasks[$0] ?? true }.map { store.todayPlan?.taskNames[$0] ?? $0 }
-        let rows = [
-            ("关卡", plan.fight ? (plan.stage.isEmpty ? "上次作战关卡" : plan.stage) : "不刷理智"),
-            ("要做的事", names.isEmpty ? "无" : names.joined(separator: "、")),
-            ("规矩", "不碎石、不借助战，只吃快过期的理智药"),
-        ]
-        guard soon else {
-            return GameConfirm(title: "再跑一次\(name)？", rows: rows, ok: "开始") { Task { await retry(plan, force: false) } }
-        }
-        return GameConfirm(
-            title: "另一场就要开始了", rows: rows,
-            warning: "现在开始，另一场可能会因为游戏被占用而跳过。", ok: "仍然开始"
-        ) { Task { await retry(plan, force: true) } }
-    }
-
-    private func retry(_ plan: TodayPlan.Session, force: Bool) async {
-        var switches: [String: Bool] = [:]
-        for key in Self.order { switches[key] = plan.tasks[key] ?? true }
-        let payload = (try? JSONSerialization.data(withJSONObject: switches, options: [.sortedKeys]))
-            .map { String(decoding: $0, as: UTF8.self) } ?? "{}"
-        var args = ["run", "local", plan.stage, payload]
-        if force { args.append("--force") }
-        do {
-            let receipt = try await RemoteBridge.run(args)
-            if !receipt.ok, !force,
-                receipt.code == "session_soon" || receipt.dictionary["blocked"] as? String == "blackout"
-            {
-                askGame(retryConfirm(plan, soon: true))
-                return
-            }
-            store.post(receipt.ok, receipt.message)
-        } catch {
-            store.post(false, error.localizedDescription)
-        }
-        await store.reload()
-    }
-}
-
-/// 场卡里的次要动作：灰字，不和标题栏的「日常 ›」抢颜色。
-private struct QuietLinkStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var isEnabled
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 11.5))
-            .foregroundStyle(WM.f2)
-            .underline(configuration.isPressed)
-            .opacity(isEnabled ? (configuration.isPressed ? 0.6 : 1) : 0.4)
-            .contentShape(Rectangle())
-    }
-}
-
-/// 一场刷哪关（谁定的）；没开始前点开换关，或者这一场不刷理智。
-struct SessionStageMenu: View {
-    let plan: TodayPlan.Session
-    let editable: Bool
-    let struck: Bool
-
-    @Environment(RemoteStore.self) private var store
-
-    private var auto: Bool { plan.stageSource == "auto" }
-
-    var body: some View {
-        if editable {
-            Menu {
-                // 马上按材料缺口算一次，用户选过的关也交回给自动定关（`plan auto-stage`）。
-                Button {
-                    change(["plan", "auto-stage"])
-                } label: {
-                    if auto {
-                        Label("自动选关", systemImage: "checkmark")
-                    } else {
-                        Text("自动选关")
-                    }
-                }
-                Divider()
-                ForEach(plan.choices, id: \.self) { choice in
-                    Button {
-                        change(["plan", "set-stage", choice.stage])
-                    } label: {
-                        if !auto, choice.stage == plan.stage {
-                            Label(choice.label, systemImage: "checkmark")
-                        } else {
-                            Text(choice.label)
-                        }
-                    }
-                }
-                Divider()
-                Toggle("刷理智", isOn: Binding(
-                    get: { plan.fight },
-                    set: { on in change(["plan", "fight", on ? "on" : "off"]) }))
-            } label: {
-                label
-            }
-            .menuStyle(.button)
-            .buttonStyle(.plain)
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .disabled(store.planChanging != nil)
-            .help("换关，或这一场不刷理智")
-        } else {
-            label
-        }
-    }
-
-    private var label: some View {
-        HStack(spacing: 6) {
-            if plan.fight {
-                Swatch(code: plan.stage, size: 16, radius: 4)
-                Text(plan.stage.isEmpty ? "上次作战" : plan.stage).fontWeight(.semibold).monospacedDigit()
-                    .strikethrough(struck)
-                if let note = sourceNote {
-                    Text(note).font(.system(size: 11)).foregroundStyle(WM.f3).lineLimit(1)
-                }
-            } else {
-                Text("不刷理智").foregroundStyle(WM.f2).strikethrough(struck)
-            }
-            if editable {
-                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(WM.f3)
-            }
-        }
-        .contentShape(Rectangle())
-        .help(dropHelp)
-    }
-
-    /// 只在说得出缺什么时才写「缺电极单元」；「你选的」照旧。默认关、说不出缺什么都不加话。
-    private var sourceNote: String? {
-        switch plan.stageSource {
-        case "auto": plan.drops.first.map { "缺\($0.name)" }
-        case "discord": "你选的"
-        default: nil
-        }
-    }
-
-    private var dropHelp: String {
-        guard plan.stageSource == "auto" else { return "" }
-        guard let drop = plan.drops.first else { return "按材料缺口自动定的关" }
-        let spare = plan.fallbackStage.isEmpty ? "" : "，剩下的理智去 \(plan.fallbackStage)"
-        return "自动定关：还缺 \(drop.count) 个\(drop.name)，刷够就停\(spare)"
-    }
-
-    private func change(_ args: [String]) {
-        Task { await store.changePlan(plan.phase, args) }
     }
 }
 
