@@ -3,7 +3,7 @@
 //  Wado's MAA
 //
 //  首页「今天」，从上到下：页头（日期、当期活动）、早场 / 晚场两张大卡（`TodaySessions.swift`）、
-//  手动日常（`TodayManual.swift`）、待处理（`TodayPending.swift`）、近 7 天（`TodayWeek.swift`）。
+//  手动日常（`TodayManual.swift`）、待处理（`TodayPending.swift`）、近况热力格（`TodayHeat.swift`）。
 //
 
 import SwiftUI
@@ -35,7 +35,7 @@ struct TodayPage: View {
                 }
                 ManualRunRow()
                 TodayPending(go: go)
-                TimelineView(.periodic(from: .now, by: 30)) { context in WeekStrip(now: context.date) }
+                TimelineView(.periodic(from: .now, by: 30)) { context in HeatStrip(now: context.date) }
             }
             .padding(.horizontal, 28)
             .padding(.top, 20)

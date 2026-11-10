@@ -44,7 +44,7 @@ struct RunRecord: Identifiable, Equatable, Sendable {
 }
 
 /// 一场的刷理智结果：读那一场的进度文件（DEV_GUIDE §12.3 `fight.done` / `fight.drops`）。
-/// 首页场卡、近 7 天的气泡用；文件不在、读不懂、开始时刻对不上（同名旧场）都当没有。
+/// 首页场卡、近况热力格的气泡用；文件不在、读不懂、开始时刻对不上（同名旧场）都当没有。
 struct RunFightResult: Equatable, Sendable {
     struct Drop: Equatable, Sendable, Hashable {
         let name: String
