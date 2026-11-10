@@ -73,6 +73,8 @@ struct SessionCard: View {
     let phase: String
     let name: String
     let now: Date
+    /// 和旁边那张一样高。
+    var stretch = false
 
     @Environment(RemoteStore.self) private var store
     @Environment(\.askGame) private var askGame
@@ -122,7 +124,7 @@ struct SessionCard: View {
         .padding(.top, 16)
         .padding(.horizontal, 20)
         .padding(.bottom, 18)
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity, maxHeight: stretch ? .infinity : nil, alignment: .topLeading)
         .wmCard(radius: 18)
     }
 
@@ -203,7 +205,9 @@ struct SessionCard: View {
         case let .cancelled(outcome):
             return (outcome.span, WM.f2)
         case let .skipped(outcome):
-            return outcome.reason.isEmpty ? nil : (outcome.reason, WM.f2)
+            // 计划里跳过的，「已跳过」已经说清楚了；只有「你在玩」这种才多一句。
+            let plain = outcome.reason.isEmpty || outcome.reason == RunHistory.skipText["plan"]
+            return plain ? nil : (outcome.reason, WM.f2)
         case .skipToday, .off, .missed, .unknown:
             return nil
         }
