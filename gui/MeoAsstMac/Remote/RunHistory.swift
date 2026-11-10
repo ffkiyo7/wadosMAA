@@ -17,7 +17,15 @@ struct RunRecord: Identifiable, Equatable, Sendable {
     let failure: String
     let skipReason: String
     let startedAt: Date?
+    let finishedAt: Date?
     let durationSeconds: Int?
+    /// 这一场的进度文件（`runs/<场>.progress.json`）；旧行或抄作业没有。
+    let progressPath: String?
+
+    /// 结束时刻：有 `finished_at` 用它，没有就按耗时推。
+    var endedAt: Date? {
+        finishedAt ?? startedAt.flatMap { start in durationSeconds.map { start.addingTimeInterval(TimeInterval($0)) } }
+    }
 
     /// 「早场日常 · 1-7」。
     var title: String {
@@ -31,6 +39,56 @@ struct RunRecord: Identifiable, Equatable, Sendable {
         case "failed": RunHistory.failureText[failure] ?? ""
         case "skipped": RunHistory.skipText[skipReason] ?? ""
         default: ""
+        }
+    }
+}
+
+/// 一场的刷理智结果：读那一场的进度文件（DEV_GUIDE §12.3 `fight.done` / `fight.drops`）。
+/// 首页场卡、近 7 天的气泡用；文件不在、读不懂、开始时刻对不上（同名旧场）都当没有。
+struct RunFightResult: Equatable, Sendable {
+    struct Drop: Equatable, Sendable, Hashable {
+        let name: String
+        let count: Int
+    }
+
+    let done: Int
+    let drops: [Drop]
+
+    /// 路径 → (修改时间, 结果)。界面每次重画都会问，文件没变就不重读。
+    @MainActor private static var cache: [String: (Date, RunFightResult?)] = [:]
+
+    @MainActor static func read(_ path: String?, started: Date?) -> RunFightResult? {
+        guard let path, !path.isEmpty,
+            let modified = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+        else { return nil }
+        let key = path + "|" + (started.map { String($0.timeIntervalSince1970) } ?? "")
+        if let hit = cache[key], hit.0 == modified { return hit.1 }
+        let result = parse(URL(fileURLWithPath: path), started: started)
+        cache[key] = (modified, result)
+        return result
+    }
+
+    private static func parse(_ url: URL, started: Date?) -> RunFightResult? {
+        guard let data = try? Data(contentsOf: url),
+            case let .object(file)? = try? JSONDecoder().decode(JSONValue.self, from: data),
+            let fight = file["fight"]?.object
+        else { return nil }
+        if let version = file["schema_version"]?.number, Int(version) > RunHistory.knownSchemaVersion { return nil }
+        if let started, let fileStart = file["started_at"]?.string.flatMap(RunLock.parseISO),
+            abs(fileStart.timeIntervalSince(started)) > 2
+        {
+            return nil
+        }
+        return RunFightResult(done: Int(fight["done"]?.number ?? 0), drops: drops(fight))
+    }
+
+    /// `fight.drops`：`[{name, count}]`，按文件里的顺序。
+    static func drops(_ fight: [String: JSONValue]) -> [Drop] {
+        (fight["drops"]?.array ?? []).compactMap { item in
+            guard let object = item.object, let name = object["name"]?.string, !name.isEmpty,
+                let count = object["count"]?.number
+            else { return nil }
+            return Drop(name: name, count: Int(count))
         }
     }
 }
@@ -85,7 +143,9 @@ enum RunHistory {
                 failure: row["failure"]?.string ?? "",
                 skipReason: row["skip_reason"]?.string ?? "",
                 startedAt: row["started_at"]?.string.flatMap(RunLock.parseISO),
-                durationSeconds: row["duration_seconds"]?.number.map { Int($0) }))
+                finishedAt: row["finished_at"]?.string.flatMap(RunLock.parseISO),
+                durationSeconds: row["duration_seconds"]?.number.map { Int($0) },
+                progressPath: row["progress"]?.string))
         }
         return rows.reversed()
     }
