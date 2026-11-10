@@ -20,11 +20,13 @@ struct TodayPage: View {
                 header
                 if RemoteNotices.any(store) { RemoteNotices(gap: 0) }
                 TimelineView(.periodic(from: .now, by: 30)) { context in
-                    // 进行中的那张展开，另一张不跟着拉伸。
+                    // 平时两张一样高；进行中的那张展开，另一张不跟着拉伸。
+                    let even = !sessionRunning
                     HStack(alignment: .top, spacing: 14) {
-                        SessionCard(phase: "am", name: "早场", now: context.date)
-                        SessionCard(phase: "pm", name: "晚场", now: context.date)
+                        SessionCard(phase: "am", name: "早场", now: context.date, stretch: even)
+                        SessionCard(phase: "pm", name: "晚场", now: context.date, stretch: even)
                     }
+                    .fixedSize(horizontal: false, vertical: even)
                 }
                 ForEach([store.schedule == nil ? store.scheduleError : nil, store.todayPlan == nil ? store.todayPlanError : nil]
                     .compactMap { $0 }, id: \.self)
@@ -44,6 +46,11 @@ struct TodayPage: View {
             // 活动跟着日子变；进首页顺手重读一次关卡选项（里面带当期活动）。
             await data.loadChoices()
         }
+    }
+
+    /// 早场或晚场正在跑（它的卡片会展开）。
+    private var sessionRunning: Bool {
+        store.lastRun["status"]?.string == "running" && ["am", "pm"].contains(store.lastRun["phase"]?.string ?? "")
     }
 
     /// 「今天 11 月 10 日 星期二」；有活动时右边一个胶囊「『活动名』还剩 N 天」。
