@@ -40,13 +40,12 @@ struct TodayPending: View {
             PendingIcon(systemImage: "doc.on.doc", color: nil)
             Text("\(todo.count) 关待抄").font(.system(size: 15, weight: .semibold)).padding(.trailing, 6)
                 .fixedSize()
-            // 放不下就少放几个，不换行。
+            // 放不下就少放几个，不换行。候选写死成几个固定的视图：ViewThatFits 里放 ForEach 会因 ID 重复崩溃。
             ViewThatFits(in: .horizontal) {
-                ForEach([todo.count, 6, 4, 2, 1].filter { $0 <= todo.count }, id: \.self) { count in
-                    HStack(spacing: 8) {
-                        ForEach(todo.prefix(count)) { row in stageChip(row) }
-                    }
-                }
+                chips(todo, count: todo.count)
+                chips(todo, count: min(todo.count, 4))
+                chips(todo, count: min(todo.count, 2))
+                chips(todo, count: 1)
                 Color.clear.frame(width: 0, height: 0)
             }
             Spacer(minLength: 0)
@@ -58,6 +57,12 @@ struct TodayPending: View {
         .contentShape(Rectangle())
         .onTapGesture { go(.copilot) }
         .help("打开「自动抄作业」")
+    }
+
+    private func chips(_ todo: [CopilotStageRow], count: Int) -> some View {
+        HStack(spacing: 8) {
+            ForEach(todo.prefix(count)) { row in stageChip(row) }
+        }
     }
 
     private func stageChip(_ row: CopilotStageRow) -> some View {
