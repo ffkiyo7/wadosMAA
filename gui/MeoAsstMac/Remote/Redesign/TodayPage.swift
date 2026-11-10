@@ -28,7 +28,7 @@ struct TodayPage: View {
                     StatusStack(go: go)
                         .frame(minWidth: 260, idealWidth: 320, maxWidth: 360)
                 }
-                CopilotPreviewSection(go: go).padding(.top, 26)
+                TodayPending(go: go).padding(.top, 26)
                 RecentRunsSection().padding(.top, 26)
             }
             .padding(.horizontal, 28)
@@ -386,10 +386,7 @@ struct StatusStack: View {
     @Environment(\.wmAccent) private var accent
 
     var body: some View {
-        VStack(spacing: 12) {
-            sessionsCard
-            versionCard
-        }
+        sessionsCard
     }
 
     private func key(_ icon: String, _ title: String) -> some View {
@@ -424,60 +421,6 @@ struct StatusStack: View {
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .wmCard()
-    }
-
-    /// 游戏资源：今天更新过没有；版本号放在悬停提示里。
-    private var versionCard: some View {
-        let status = store.upstream
-        let verdict = verdictShort(status)
-        let needsUpdate = status.map { !$0.fresh || $0.online?.maaResourceOutdated == true } ?? false
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                key("arrow.down.circle", "游戏资源")
-                Spacer()
-                Text(verdict.text).font(.system(size: 11.5)).foregroundStyle(verdict.color)
-            }
-            .help(versionHelp(status))
-            if needsUpdate, status?.running != true {
-                GameButton(title: "现在更新", help: updateHelp(status)) {
-                    GameConfirm(title: "更新游戏资源？", rows: [("用时", "大约 3 分钟，期间不能开始日常")], ok: "更新") {
-                        Task {
-                            await store.perform(["upstream", "update"])
-                            _ = await RemoteGate.waitForUpdate()
-                            await store.reload()
-                        }
-                    }
-                }
-                .disabled(!(status?.updateBlocked ?? "x").isEmpty || store.busy)
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .wmCard()
-    }
-
-    private func versionHelp(_ status: UpstreamStatus?) -> String {
-        let version = status?.versions.maaCore ?? "未知"
-        if status?.verdict == "blocked" {
-            return "游戏资源状态不对，暂时不能开始日常。请稍后再看，或在设置 › 高级里复制诊断信息。\n版本 \(version)"
-        }
-        return "版本 \(version)"
-    }
-
-    private func updateHelp(_ status: UpstreamStatus?) -> String {
-        if let blocked = status?.updateBlocked, !blocked.isEmpty { return "现在不能更新：\(blocked)" }
-        return "先确认再更新"
-    }
-
-    private func verdictShort(_ status: UpstreamStatus?) -> (text: String, color: Color) {
-        guard let status else { return ("没查到", WM.f3) }
-        if status.running { return ("正在更新", WM.game) }
-        if status.verdict == "blocked" { return ("待确认", WM.game) }
-        if status.online?.maaResourceOutdated == true || status.online?.maaCliOutdated == true {
-            return ("有新版本", accent.color)
-        }
-        return status.fresh ? ("今天已更新", WM.ok) : ("今天还没更新", accent.color)
     }
 }
 
@@ -807,95 +750,7 @@ struct SessionStageMenu: View {
     }
 }
 
-// MARK: - 自动抄作业 / 最近几场
-
-struct CopilotPreviewSection: View {
-    let go: (WMPage) -> Void
-    @Environment(RunData.self) private var data
-
-    var body: some View {
-        let todo = data.copilotTodo
-        VStack(alignment: .leading, spacing: 0) {
-            SectionTitle(title: "自动抄作业") {
-                Button("全部 ›") { go(.copilot) }.buttonStyle(WMLinkStyle()).help("打开「自动抄作业」")
-            }
-            VStack(spacing: 0) {
-                let rows = Array((todo.isEmpty ? (data.copilot?.stages ?? []) : todo).prefix(4))
-                if rows.isEmpty {
-                    Text(data.copilotError ?? (data.copilot == nil ? "读取中…" : "现在没有可抄的关"))
-                        .foregroundStyle(data.copilotError == nil ? WM.f2 : WM.danger)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16).padding(.vertical, 12)
-                }
-                ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                    if index > 0 { RowDivider() }
-                    Button {
-                        data.copilotFocus = row.stage
-                        go(.copilot)
-                    } label: {
-                        CopilotStageListRow(row: row)
-                    }
-                    .buttonStyle(.plain)
-                    .help("打开 \(row.stage) 的候选作业")
-                }
-            }
-            .wmCard()
-        }
-    }
-}
-
-struct CopilotStageListRow: View {
-    let row: CopilotStageRow
-
-    var body: some View {
-        HStack(spacing: 12) {
-            Swatch(code: row.stage, size: 24, radius: 6)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(row.stage).fontWeight(.semibold).monospacedDigit()
-                    .foregroundStyle(row.status == "cleared" ? WM.f2 : Color.primary)
-                if let reason = CopilotText.reason(row) {
-                    Text(reason).font(.system(size: 11.5)).foregroundStyle(WM.f2)
-                }
-            }
-            Spacer()
-            Text(CopilotText.state(row)).font(.system(size: 12))
-                .foregroundStyle(row.status == "cleared" ? WM.ok : WM.f2)
-            Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(WM.f3)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .contentShape(Rectangle())
-    }
-}
-
-enum CopilotText {
-    /// 去掉 status_text 前面的 emoji。
-    static func status(_ row: CopilotStageRow) -> String {
-        let text = row.statusText ?? ""
-        return text.drop { !$0.isLetter && !$0.isNumber && $0 != "（" }.trimmingCharacters(in: .whitespaces)
-    }
-
-    /// 进不去的关（maa-remote 的 no_nav / not_indexed）统一一个说法，不透出原因原文。
-    static func unsupported(_ row: CopilotStageRow) -> Bool {
-        row.nav == false || row.status == "no_nav" || row.status == "not_indexed"
-    }
-
-    static func state(_ row: CopilotStageRow) -> String {
-        if unsupported(row) { return "暂不支持自动前往" }
-        return status(row).isEmpty ? "" : status(row)
-    }
-
-    /// maa-remote 给的原因；进不去的关、没有原因时不占一行。
-    static func reason(_ row: CopilotStageRow) -> String? {
-        guard !unsupported(row), let reason = row.reason, !reason.isEmpty else { return nil }
-        return reason
-    }
-
-    static func detail(_ row: CopilotStageRow) -> String {
-        if unsupported(row) { return "暂不支持自动前往" }
-        return reason(row) ?? (row.status == "cleared" ? "已通" : "可以去搜作业")
-    }
-}
+// MARK: - 最近几场
 
 struct RecentRunsSection: View {
     @Environment(RemoteStore.self) private var store
