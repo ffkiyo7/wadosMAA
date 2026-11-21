@@ -40,6 +40,15 @@ struct ActiveRun: Equatable {
         }
     }
 
+    /// 这一场对应今天的哪个定时场；手动场和抄作业是 nil。
+    var phase: String? {
+        switch title {
+        case "早场": "am"
+        case "晚场": "pm"
+        default: nil
+        }
+    }
+
     /// 只有带 `run_id` 的日常和抄作业能停：服务端靠它防止停错场。
     var canStop: Bool {
         kind != .other && runID?.isEmpty == false

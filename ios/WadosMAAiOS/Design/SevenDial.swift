@@ -2,7 +2,8 @@
 //  SevenDial.swift
 //  Wado's MAA (iOS)
 //
-//  七段步骤图（E1 / E3 / E12）。每段从内向外生长，正在跑的那段长到一半。
+//  七段步骤图（E1 / E3 / E12）。状态靠形状区分，不只靠颜色：
+//  实心已完成，半截在跑，空心计划中，感叹号失败。
 //
 
 import SwiftUI
@@ -10,9 +11,14 @@ import WadosMAAShared
 
 struct SevenDial: View {
     struct Segment: Equatable {
+        enum Style {
+            case solid, outlined, failed
+        }
+
         let color: Color
         /// 0 = 空，1 = 满。
         let fill: Double
+        var style: Style = .solid
     }
 
     let segments: [Segment]
@@ -60,11 +66,34 @@ struct SevenDial: View {
             let style = StrokeStyle(lineWidth: width, lineCap: .round)
             context.stroke(track, with: .color(Palette.ghost), style: style)
             guard segment.fill > 0 else { continue }
-            let reach = inner + (outer - inner) * min(segment.fill, 1)
-            var filled = Path()
-            filled.move(to: start)
-            filled.addLine(to: CGPoint(x: center.x + direction.dx * reach, y: center.y + direction.dy * reach))
-            context.stroke(filled, with: .color(segment.color), style: style)
+            let point = { (distance: CGFloat) in
+                CGPoint(x: center.x + direction.dx * distance, y: center.y + direction.dy * distance)
+            }
+            switch segment.style {
+            case .solid:
+                let reach = inner + (outer - inner) * min(segment.fill, 1)
+                var filled = Path()
+                filled.move(to: start)
+                filled.addLine(to: point(reach))
+                context.stroke(filled, with: .color(segment.color), style: style)
+            case .outlined:
+                let line = max(2, 6 * scale)
+                let outline = track.strokedPath(StrokeStyle(lineWidth: width - line, lineCap: .round))
+                context.stroke(outline, with: .color(segment.color), lineWidth: line)
+            case .failed:
+                let line = width * 0.62
+                let gap = 9 * scale
+                let tip = outer + width / 2
+                let dotCenter = tip - line / 2
+                var bar = Path()
+                bar.move(to: point(inner - width / 2 + line / 2))
+                bar.addLine(to: point(dotCenter - line - gap))
+                context.stroke(bar, with: .color(segment.color), style: StrokeStyle(lineWidth: line, lineCap: .round))
+                let dot = point(dotCenter)
+                context.fill(
+                    Path(ellipseIn: CGRect(x: dot.x - line / 2, y: dot.y - line / 2, width: line, height: line)),
+                    with: .color(segment.color))
+            }
         }
     }
 }
@@ -77,7 +106,7 @@ extension SevenDial.Segment {
             switch state {
             case .done: return .init(color: item.color, fill: 1)
             case .running: return .init(color: item.color, fill: 0.5)
-            case .failed: return .init(color: Palette.stop, fill: 1)
+            case .failed: return .init(color: Palette.red, fill: 1, style: .failed)
             case .pending, .skipped: return .init(color: item.color, fill: 0)
             }
         }

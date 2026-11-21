@@ -2,7 +2,7 @@
 //  Palette.swift
 //  Wado's MAA (iOS)
 //
-//  设计稿 E 七段的颜色。流程七段各有固定颜色，深浅色都过 4.5:1。
+//  流程七段各有固定颜色：深浅色都过 4.5:1，红、绿、蓝色盲下也能互相分开。
 //
 
 import SwiftUI
@@ -26,6 +26,14 @@ enum Palette {
     static let teal = dynamic(light: 0x00786F, dark: 0x2DD4BF)
     static let accent = dynamic(light: 0x0A64C9, dark: 0x0A84FF)
     static let stop = dynamic(light: 0xD70015, dark: 0xE5252A)
+
+    static let stepStartUp = dynamic(light: 0x525DC5, dark: 0x89B4FD)
+    static let stepAnnihilation = dynamic(light: 0xD6133E, dark: 0xF1516B)
+    static let stepFight = dynamic(light: 0x5F2300, dark: 0xF4AA6F)
+    static let stepInfrast = dynamic(light: 0x3A7A4F, dark: 0x78E9C8)
+    static let stepRecruit = dynamic(light: 0xAF3E7B, dark: 0xCB6CAE)
+    static let stepMall = dynamic(light: 0x6F5600, dark: 0xB19301)
+    static let stepAward = dynamic(light: 0x3D2A8D, dark: 0x8B7BFD)
 
     private static func dynamic(
         light: UInt32, lightAlpha: CGFloat = 1, dark: UInt32, darkAlpha: CGFloat = 1
@@ -82,13 +90,13 @@ enum DailyStep: String, CaseIterable, Identifiable {
 
     var color: Color {
         switch self {
-        case .startUp: Palette.blue
-        case .annihilation: Palette.red
-        case .fight: Palette.orange
-        case .infrast: Palette.green
-        case .recruit: Palette.pink
-        case .mall: Palette.amber
-        case .award: Palette.violet
+        case .startUp: Palette.stepStartUp
+        case .annihilation: Palette.stepAnnihilation
+        case .fight: Palette.stepFight
+        case .infrast: Palette.stepInfrast
+        case .recruit: Palette.stepRecruit
+        case .mall: Palette.stepMall
+        case .award: Palette.stepAward
         }
     }
 }

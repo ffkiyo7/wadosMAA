@@ -14,6 +14,7 @@ struct RunAccessory: View {
 
     var body: some View {
         if let run = store.activeRun {
+            HStack(spacing: 4) {
             Button {
                 store.isRunSheetPresented = true
             } label: {
@@ -36,6 +37,38 @@ struct RunAccessory: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("\(run.title)，\(run.statusText)")
+                if run.canStop {
+                    Button {
+                        store.isRunSheetPresented = true
+                        store.requestStop()
+                    } label: {
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(.white)
+                            .frame(width: 13, height: 13)
+                            .frame(width: 36, height: 36)
+                            .background(Palette.stop, in: .circle)
+                            .frame(width: 44, height: 44)
+                            .contentShape(.circle)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!store.canWrite)
+                    .opacity(store.canWrite ? 1 : 0.4)
+                    .accessibilityLabel("停止")
+                }
+            }
+        } else {
+            Button {
+                store.isStartRunPresented = true
+            } label: {
+                Label("现在开一场", systemImage: "play.fill")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(Palette.blue)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            .disabled(!store.canWrite)
+            .opacity(store.canWrite ? 1 : 0.4)
         }
     }
 }

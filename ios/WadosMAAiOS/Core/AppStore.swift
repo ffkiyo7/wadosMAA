@@ -32,12 +32,20 @@ enum ConnectionState: Equatable {
 struct AppToast: Identifiable, Equatable {
     enum Action: Equatable {
         case showRun
+        case undoConfig(key: String, value: JSONValue)
+        case undoDefaultStage(String)
+        case undoDefaultTask(String, Bool)
     }
 
     let id = UUID()
     let text: String
     var actionTitle: String?
     var action: Action?
+}
+
+/// 打开某一场的详情。
+struct RunRoute: Identifiable, Hashable {
+    let id: String
 }
 
 struct RunChangedNotice: Identifiable, Equatable {
@@ -53,6 +61,8 @@ struct RunChangedNotice: Identifiable, Equatable {
     var isPairingPresented = false
     var isConnectionDetailPresented = false
     var runChangedNotice: RunChangedNotice?
+    var isStartRunPresented = false
+    var runDetailRoute: RunRoute?
 
     // 连接
     private(set) var config: ConnectionConfig?
@@ -67,12 +77,23 @@ struct RunChangedNotice: Identifiable, Equatable {
     private(set) var lastUpdatedAt: Date?
     private(set) var isStopping = false
     private(set) var toast: AppToast?
+    var recentRuns: [RunRecord] = []
+    var choices: RunChoices?
+    var settings: ConfigSnapshot?
+    var dailyDefaults: DefaultsSnapshot?
+    /// 已改、还没等到回执的值：控件先显示它，失败再退回。
+    var configOverrides: [String: JSONValue] = [:]
+    var defaultTaskOverrides: [String: Bool] = [:]
+    var isUpdatingResources = false
+    var isSendingTestPush = false
 
     #if DEBUG
     private(set) var demoScenario: DemoScenario?
     #endif
 
-    @ObservationIgnored private var transport: (any BackendTransport)?
+    @ObservationIgnored private(set) var transport: (any BackendTransport)?
+    @ObservationIgnored var configTasks: [String: Task<Void, Never>] = [:]
+    @ObservationIgnored var configOriginals: [String: JSONValue] = [:]
     @ObservationIgnored private var connectionTask: Task<Void, Never>?
     @ObservationIgnored private var toastTask: Task<Void, Never>?
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
@@ -97,7 +118,7 @@ struct RunChangedNotice: Identifiable, Equatable {
     /// 抄作业角标：当期还没通的关。
     var copilotRemaining: Int {
         guard let stages = copilotStages, stages.inActivity else { return 0 }
-        return stages.stages.filter { $0.status != "cleared" && $0.nav != false }.count
+        return stages.stages.filter { $0.status != "cleared" }.count
     }
 
     var hasData: Bool {
@@ -194,6 +215,37 @@ struct RunChangedNotice: Identifiable, Equatable {
             route(link)
         }
         await reloadCopilotStages(transport)
+        await reloadSupplementary(transport)
+    }
+
+    /// 手动选项和最近场次读不到不影响主流程。
+    private func reloadSupplementary(_ transport: any BackendTransport) async {
+        if let data = try? await transport.read("/api/v1/choices", query: []),
+            let value = try? JSONDecoder().decode(RunChoices.self, from: data)
+        {
+            choices = value
+        }
+        let query = [URLQueryItem(name: "limit", value: "20"), URLQueryItem(name: "offset", value: "0")]
+        if let data = try? await transport.read("/api/v1/history", query: query), let page = HistoryPage(data: data) {
+            recentRuns = page.items
+        }
+    }
+
+    /// 写操作之后、或一场结束时重读：SSE 不推理智、时间表和历史。
+    func refreshSnapshot() async {
+        guard let transport else { return }
+        if let data = try? await transport.read("/api/v1/snapshot", query: []),
+            let fresh = RemoteSnapshot(data: data)
+        {
+            snapshot = fresh
+            lastUpdatedAt = Date()
+        }
+        await reloadCopilotStages(transport)
+        await reloadSupplementary(transport)
+    }
+
+    func markTokenInvalid() {
+        connection = .tokenInvalid
     }
 
     /// 角标读不到不影响主流程。
@@ -209,8 +261,13 @@ struct RunChangedNotice: Identifiable, Equatable {
         guard current.apply(event) else { return }
         snapshot = current
         lastUpdatedAt = Date()
-        if event.name == "last_run" {
-            Task { [weak self] in await self?.reloadCopilotStages(transport) }
+        switch event.name {
+        case "last_run":
+            Task { [weak self] in await self?.refreshSnapshot() }
+        case "lock":
+            Task { [weak self] in await self?.reloadSupplementary(transport) }
+        default:
+            break
         }
     }
 
@@ -242,9 +299,7 @@ struct RunChangedNotice: Identifiable, Equatable {
         demoScenario = nil
         #endif
         self.config = config
-        snapshot = nil
-        copilotStages = nil
-        lastUpdatedAt = nil
+        clearData()
         connectionTask?.cancel()
         connectionTask = nil
         transport = HTTPTransport(config: config, credentials: credentials)
@@ -353,7 +408,26 @@ struct RunChangedNotice: Identifiable, Equatable {
         dismissToast()
         switch action {
         case .showRun: showRun()
+        case let .undoConfig(key, value): changeConfig(key, to: value)
+        case let .undoDefaultStage(stage): Task { await setDefaultStage(stage, undoable: false) }
+        case let .undoDefaultTask(task, enabled): Task { await setDefaultTask(task, enabled: enabled, undoable: false) }
         }
+    }
+
+    private func clearData() {
+        snapshot = nil
+        copilotStages = nil
+        lastUpdatedAt = nil
+        recentRuns = []
+        choices = nil
+        settings = nil
+        dailyDefaults = nil
+        configOverrides = [:]
+        defaultTaskOverrides = [:]
+        configTasks.values.forEach { $0.cancel() }
+        configTasks = [:]
+        configOriginals = [:]
+        runDetailRoute = nil
     }
 
     func showRun() {
@@ -384,13 +458,19 @@ struct RunChangedNotice: Identifiable, Equatable {
     private func route(_ link: DeepLink) {
         switch link {
         case .latestRun:
-            showRun()
+            if activeRun == nil, let id = snapshot?.lastRun?["run_id"]?.string {
+                selectedTab = .today
+                runDetailRoute = RunRoute(id: id)
+            } else {
+                showRun()
+            }
         case let .run(id):
             if activeRun?.runID == id {
                 isRunSheetPresented = true
             } else {
                 isRunSheetPresented = false
                 selectedTab = .today
+                runDetailRoute = RunRoute(id: id)
             }
         case .today:
             isRunSheetPresented = false
@@ -418,9 +498,7 @@ struct RunChangedNotice: Identifiable, Equatable {
         isRunSheetPresented = false
         isPairingPresented = false
         dismissToast()
-        snapshot = nil
-        copilotStages = nil
-        lastUpdatedAt = nil
+        clearData()
         lanPinMismatch = false
         config = DemoTransport.config
         connection = .connecting
@@ -436,9 +514,7 @@ struct RunChangedNotice: Identifiable, Equatable {
         connectionTask = nil
         demoScenario = nil
         transport = nil
-        snapshot = nil
-        copilotStages = nil
-        lastUpdatedAt = nil
+        clearData()
         config = nil
         connection = .connecting
         dismissToast()

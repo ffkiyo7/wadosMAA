@@ -25,7 +25,7 @@ struct MainTabView: View {
                 SettingsTab()
             }
         }
-        .tabViewBottomAccessory(isEnabled: store.activeRun != nil) {
+        .tabViewBottomAccessory(isEnabled: store.activeRun != nil || (store.selectedTab == .today && store.hasData)) {
             RunAccessory()
         }
         .overlay(alignment: .bottom) {
@@ -38,6 +38,9 @@ struct MainTabView: View {
         .animation(.snappy, value: store.toast)
         .sheet(isPresented: $store.isRunSheetPresented) {
             RunSheet()
+        }
+        .sheet(isPresented: $store.isStartRunPresented) {
+            StartRunSheet()
         }
         .sheet(isPresented: $store.isPairingPresented) {
             PairingFlow(isSheet: true)

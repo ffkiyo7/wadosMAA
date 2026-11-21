@@ -161,9 +161,6 @@ private struct DailyRunSummary: View {
         if let sanity = progress.sanity {
             result.append(Fact(label: "理智", value: "\(sanity.current)/\(sanity.max)"))
         }
-        if !progress.notes.isEmpty {
-            result.append(Fact(label: "恢复", value: "\(progress.notes.count) 次"))
-        }
         return result
     }
 }
