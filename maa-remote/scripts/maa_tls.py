@@ -254,6 +254,28 @@ def generate_self_signed_cert(
     }
 
 
+def _expiry_from_not_after_utc(
+    cert_path: Path,
+    not_after_utc: datetime,
+    *,
+    now: datetime | None = None,
+    warn_days: int = DEFAULT_WARN_DAYS,
+    spki_sha256: str = "",
+) -> dict[str, Any]:
+    moment = (now or now_beijing()).astimezone(timezone.utc)
+    remaining_seconds = (not_after_utc.astimezone(timezone.utc) - moment).total_seconds()
+    days_remaining = round(remaining_seconds / 86400.0, 2)
+    return {
+        "cert_path": str(cert_path),
+        "spki_sha256": spki_sha256,
+        "not_after": not_after_utc.astimezone(BEIJING).isoformat(),
+        "not_after_utc": not_after_utc.astimezone(timezone.utc).isoformat(),
+        "days_remaining": days_remaining,
+        "expired": remaining_seconds <= 0,
+        "warn_due": days_remaining <= float(warn_days),
+    }
+
+
 def check_cert_expiry_and_notify(
     cert_path: Path,
     state_path: Path,
@@ -262,11 +284,12 @@ def check_cert_expiry_and_notify(
     warn_days: int = DEFAULT_WARN_DAYS,
     openssl_bin: str | None = None,
     notify_fn: Callable[..., bool] | None = None,
+    served_info: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """每日巡检 TLS 证书剩余有效期；到期前 `warn_days`（默认 60 天）发 timeSensitive Bark 提醒。
 
-    按北京时间自然日去重：当天已检查且未进入告警，或当天已告警成功，则不重复发送。
-    发送失败不记已告警，留待下一拍重试；绝不抛异常影响主调度循环。
+    当传入 `served_info`（内存实际正在服务的证书元数据，含 `not_after_utc` / `spki_sha256`）时，
+    以实际在服务的证书为准，避免仅换了磁盘文件但服务未重载导致旧证书到期不告警。
     """
     moment = (now or now_beijing()).astimezone(BEIJING)
     today = moment.date().isoformat()
@@ -274,11 +297,20 @@ def check_cert_expiry_and_notify(
     if not isinstance(state, dict):
         state = {}
 
-    if not cert_path.is_file():
+    served_spki = str(served_info.get("spki_sha256") or "") if served_info else ""
+    served_not_after: datetime | None = None
+    if served_info and served_info.get("not_after_utc"):
+        try:
+            served_not_after = datetime.fromisoformat(str(served_info["not_after_utc"]))
+        except ValueError:
+            served_not_after = None
+
+    if served_not_after is None and not cert_path.is_file():
         return {"checked": False, "reason": "missing_cert", "notified": False}
 
-    # 如果今天已经告警成功，或者今天已经检查过且尚未到期告警，直接返回缓存结果。
-    if state.get("last_checked_date") == today and (
+    # 若在服务证书指纹发生变化（例如刚刚热重载了新证书），不能复用旧证书的当日缓存。
+    same_cert = not served_spki or state.get("spki_sha256") == served_spki
+    if same_cert and state.get("last_checked_date") == today and (
         not state.get("warn_due") or state.get("last_notified_date") == today
     ):
         return {
@@ -289,9 +321,20 @@ def check_cert_expiry_and_notify(
             "warn_due": bool(state.get("warn_due")),
         }
 
-    info = cert_expiry_info(cert_path, now=moment, warn_days=warn_days, openssl_bin=openssl_bin)
+    if served_not_after is not None:
+        info = _expiry_from_not_after_utc(
+            cert_path,
+            served_not_after,
+            now=moment,
+            warn_days=warn_days,
+            spki_sha256=served_spki,
+        )
+    else:
+        info = cert_expiry_info(cert_path, now=moment, warn_days=warn_days, openssl_bin=openssl_bin)
+        info["spki_sha256"] = served_spki
+
     notified = False
-    if info["warn_due"] and state.get("last_notified_date") != today:
+    if info["warn_due"] and (not same_cert or state.get("last_notified_date") != today):
         sender = notify_fn
         if sender is None:
             import maa_notify
@@ -319,12 +362,13 @@ def check_cert_expiry_and_notify(
 
     new_state = {
         "schema_version": 1,
+        "spki_sha256": info.get("spki_sha256", ""),
         "last_checked_date": today,
         "checked_at": moment.isoformat(),
         "not_after": info["not_after"],
         "days_remaining": info["days_remaining"],
         "warn_due": info["warn_due"],
-        "last_notified_date": today if notified else state.get("last_notified_date", ""),
+        "last_notified_date": today if notified else (state.get("last_notified_date", "") if same_cert else ""),
     }
     ensure_private_dir(state_path.parent)
     atomic_write_json(state_path, new_state)
@@ -334,6 +378,7 @@ def check_cert_expiry_and_notify(
         "days_remaining": info["days_remaining"],
         "not_after": info["not_after"],
         "warn_due": info["warn_due"],
+        "spki_sha256": info.get("spki_sha256", ""),
     }
 
 

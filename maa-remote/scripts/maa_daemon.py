@@ -60,6 +60,7 @@ from maa_common import (
 SCHEDULER_STATE_PATH = DAEMON_DIR / "scheduler.json"
 DAEMON_CONFIG_PATH = DAEMON_DIR / "daemon.json"
 DAEMON_PID_PATH = DAEMON_DIR / "daemon.pid"
+ACTIVE_TLS_PATH = DAEMON_DIR / "active_tls.json"
 RELOAD_FLAG_PATH = DAEMON_DIR / "reload.flag"
 WATCH_LOCK_PATH = STATE_DIR / "activity_watch.lock"
 
@@ -506,6 +507,23 @@ def _resolve_tls_paths(daemon_cfg: Mapping[str, Any]) -> tuple[Path, Path]:
     return cert_path, key_path
 
 
+def _write_active_tls(info: Mapping[str, Any] | None) -> None:
+    if not info:
+        return
+    doc = {"schema_version": 1, "pid": os.getpid(), **dict(info)}
+    atomic_write_json(ACTIVE_TLS_PATH, doc)
+    os.chmod(ACTIVE_TLS_PATH, 0o600)
+
+
+def _clear_active_tls_if_mine() -> None:
+    try:
+        raw = load_json(ACTIVE_TLS_PATH, {})
+        if isinstance(raw, dict) and raw.get("pid") == os.getpid():
+            ACTIVE_TLS_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
     ensure_private_dir(DAEMON_DIR)
     atomic_write_text(DAEMON_PID_PATH, f"{os.getpid()}\n", mode=0o600)
@@ -561,6 +579,7 @@ def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
                     daemon=True,
                 )
                 api_thread.start()
+                _write_active_tls(api_server.get_active_cert_info())
                 print(
                     f"wados-maa-api listening on https://{api_host}:{api_port} cert={cert_path}",
                     flush=True,
@@ -594,6 +613,12 @@ def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
                 try:
                     scheduler.reload()
                     if api_server is not None:
+                        cur_cfg = load_daemon_config(DAEMON_CONFIG_PATH)
+                        cur_cert, cur_key = _resolve_tls_paths(cur_cfg)
+                        if cur_cert.is_file() and cur_key.is_file():
+                            meta = api_server.reload_tls(cur_cert, cur_key)
+                            _write_active_tls(meta)
+                            print(f"wados-maa-api reloaded TLS spki={meta.get('spki_sha256')}", flush=True)
                         api_server.sse_hub.notify_changed()
                     print("wados-maa-daemon reloaded schedule", flush=True)
                 except Exception as exc:  # noqa: BLE001 — (a) 守护进程顶层兜底，重载异常不退出
@@ -605,11 +630,13 @@ def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
             try:
                 cur_cfg = load_daemon_config(DAEMON_CONFIG_PATH)
                 cur_cert, _cur_key = _resolve_tls_paths(cur_cfg)
-                if cur_cert.is_file():
+                served_info = api_server.get_active_cert_info() if api_server is not None else None
+                if served_info is not None or cur_cert.is_file():
                     maa_tls.check_cert_expiry_and_notify(
                         cur_cert,
                         DAEMON_DIR / "tls_check.json",
                         warn_days=int(cur_cfg.get("tls_warn_days", maa_tls.DEFAULT_WARN_DAYS)),
+                        served_info=served_info,
                     )
             except Exception as exc:  # noqa: BLE001 — (c) 每日 TLS 到期巡检异常不阻断调度循环
                 print(f"tls cert check failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
@@ -628,6 +655,7 @@ def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
                 print(f"api shutdown warning: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
         if api_thread is not None:
             api_thread.join(timeout=3.0)
+        _clear_active_tls_if_mine()
         # 优雅退出守护进程时绝不杀运行中的业务子进程（已 start_new_session=True）。
         try:
             if DAEMON_PID_PATH.is_file() and DAEMON_PID_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):

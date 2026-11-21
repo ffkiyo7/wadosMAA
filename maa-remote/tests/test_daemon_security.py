@@ -325,11 +325,17 @@ class DaemonSecurityTests(unittest.TestCase):
         self.assertFalse(r2["notified"])
         self.assertEqual(len(sent), 1)
 
-        # 验证两步平滑轮换（stage → activate）产生新 SPKI 并备份旧证书
+        # 验证两步平滑轮换（stage → activate）产生新 SPKI、触发可注入重载器并备份旧证书
+        reloaded_calls: list[tuple[str, str]] = []
         staged = rotate_tls.stage_next_cert(self.home, lan_ip="192.168.50.2", days=1825)
         self.assertNotEqual(staged["spki_sha256"], spki)
-        activated = rotate_tls.activate_next_cert(self.home)
+        activated = rotate_tls.activate_next_cert(
+            self.home,
+            daemon_reloader=lambda home, new_spki: (reloaded_calls.append(("daemon", new_spki)) or {"status": "reloaded"}),
+            cloudflared_reloader=lambda home: (reloaded_calls.append(("cloudflared", str(home))) or {"status": "reloaded"}),
+        )
         self.assertEqual(activated["spki_sha256"], staged["spki_sha256"])
+        self.assertEqual([c[0] for c in reloaded_calls], ["daemon", "cloudflared"])
         self.assertTrue(Path(activated["backup_dir"]).is_dir())
         self.assertEqual(maa_tls.compute_spki_sha256(cert_path), staged["spki_sha256"])
 
@@ -339,6 +345,79 @@ class DaemonSecurityTests(unittest.TestCase):
         )
         self.assertFalse(r3["warn_due"])
         self.assertFalse(r3["notified"])
+
+    @unittest.skipUnless(_has_openssl3(), "需要 Homebrew OpenSSL 3")
+    def test_tls_hot_reload_updates_served_cert_and_expiry_checks_served_cert(self) -> None:
+        """评审【4】回归：daemon 热重载真正切换在服务证书；未重载时到期巡检仍按旧在服务证书告警；重载失败明确报错。"""
+        cert_path = self.daemon_dir / "tls" / "cert.pem"
+        key_path = self.daemon_dir / "tls" / "key.pem"
+        old_info = maa_tls.generate_self_signed_cert(cert_path, key_path, lan_ip="192.168.50.2", days=20)
+
+        ctx = maa_api.APIContext(
+            home_dir=self.home,
+            scripts_dir=ROOT / "scripts",
+            state_dir=self.state_dir,
+            runs_dir=self.runs_dir,
+            daemon_dir=self.daemon_dir,
+            secrets_path=self.daemon_dir / "secrets.json",
+            rescue_html_path=ROOT / "daemon" / "rescue.html",
+        )
+        server = maa_api.create_server("127.0.0.1", 0, ctx, cert_path=cert_path, key_path=key_path)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(timeout=2.0)))
+
+        def fetch_peer_der() -> bytes:
+            cctx = ssl._create_unverified_context()
+            with socket.create_connection(("127.0.0.1", port), timeout=3.0) as raw:
+                with cctx.wrap_socket(raw, server_hostname="127.0.0.1") as tls:
+                    der = tls.getpeercert(binary_form=True)
+                    assert der is not None
+                    return der
+
+        der_before = fetch_peer_der()
+        served_before = server.get_active_cert_info()
+        assert served_before is not None
+        self.assertEqual(served_before["spki_sha256"], old_info["spki_sha256"])
+
+        # 仅替换磁盘证书为 5 年新证书，故意不重载服务端：巡检按在服务旧证书（20天）仍必须告警！
+        staged = rotate_tls.stage_next_cert(self.home, lan_ip="192.168.50.2", days=1825)
+        with self.assertRaises(RuntimeError):
+            rotate_tls.activate_next_cert(
+                self.home,
+                daemon_reloader=lambda _h, _s: (_ for _ in ()).throw(RuntimeError("daemon reload timeout")),
+                cloudflared_reloader=lambda _h: {"status": "not_running"},
+            )
+        sent: list[str] = []
+        check_path = self.daemon_dir / "tls_check.json"
+        r_old = maa_tls.check_cert_expiry_and_notify(
+            cert_path,
+            check_path,
+            warn_days=60,
+            served_info=server.get_active_cert_info(),
+            notify_fn=lambda title, _body, **_kw: (sent.append(title) or True),
+        )
+        self.assertTrue(r_old["warn_due"])
+        self.assertTrue(r_old["notified"])
+        self.assertEqual(len(sent), 1)
+
+        # 热重载 TLS 后：新连接收到新证书，且巡检识别新指纹不再告警。
+        new_meta = server.reload_tls()
+        self.assertEqual(new_meta["spki_sha256"], staged["spki_sha256"])
+        der_after = fetch_peer_der()
+        self.assertNotEqual(der_before, der_after)
+
+        r_new = maa_tls.check_cert_expiry_and_notify(
+            cert_path,
+            check_path,
+            warn_days=60,
+            served_info=server.get_active_cert_info(),
+            notify_fn=lambda title, _body, **_kw: (sent.append(title) or True),
+        )
+        self.assertFalse(r_new["warn_due"])
+        self.assertFalse(r_new["notified"])
+        self.assertEqual(len(sent), 1)
 
     def test_pure_python_qr_encoder_and_terminal_render(self) -> None:
         pairing = json.dumps(

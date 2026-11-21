@@ -5,9 +5,10 @@
 1. `--stage`：先生成 `daemon/tls/cert.next.pem` + `key.next.pem` 并输出新 SPKI 指纹，
    用户将其填入 iOS App 的「备用指纹」槽位；
 2. `--activate`：将 `next` 证书原子替换正式 `cert.pem` / `key.pem`（自动备份旧证书），
-   随后重载 `wados-maa-daemon` 与 `wados-maa-cloudflared`。
+   并**立即触发并核验**运行中的 `wados-maa-daemon` 热重载 TLS 证书与本目录对应的
+   `wados-maa-cloudflared` 重载新 `caPool`；重载失败会明确报错（退出码非 0）。
 
-也支持默认一步直接替换（`--now`）。
+也支持默认一步直接替换（先 stage 再 activate）。
 """
 
 from __future__ import annotations
@@ -15,10 +16,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import plistlib
 import shutil
+import signal
+import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_PATH = REPO_ROOT / "scripts"
@@ -27,6 +32,158 @@ if str(SCRIPTS_PATH) not in sys.path:
 
 import maa_common  # noqa: E402
 import maa_tls  # noqa: E402
+
+CLOUDFLARED_LABEL = "io.github.ffkiyo7.wados-maa.cloudflared"
+
+DaemonReloader = Callable[[Path, str], dict[str, Any]]
+CloudflaredReloader = Callable[[Path], dict[str, Any]]
+
+
+def _is_daemon_pid(pid: int) -> bool:
+    try:
+        proc = subprocess.run(
+            ["/bin/ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0:
+        return False
+    return any(Path(part).name == "maa_daemon.py" for part in proc.stdout.strip().split())
+
+
+def reload_running_daemon(
+    target_home: Path,
+    expected_spki: str,
+    *,
+    wait_seconds: float = 5.0,
+) -> dict[str, Any]:
+    """通知运行中的 `wados-maa-daemon` 热重载 TLS 证书并核对 `active_tls.json` 确已切换。"""
+    daemon_dir = target_home / "daemon"
+    pid_file = daemon_dir / "daemon.pid"
+    if not pid_file.is_file():
+        return {"status": "not_running", "reloaded": False}
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return {"status": "not_running", "reloaded": False}
+    if pid <= 1 or not _is_daemon_pid(pid):
+        return {"status": "not_running", "reloaded": False}
+
+    maa_common.atomic_write_text(
+        daemon_dir / "reload.flag",
+        maa_common.now_beijing().isoformat() + "\n",
+        mode=0o600,
+    )
+    try:
+        os.kill(pid, signal.SIGHUP)
+    except OSError as exc:
+        raise RuntimeError(f"向 wados-maa-daemon (pid={pid}) 发送 SIGHUP 失败：{exc}") from exc
+
+    active_path = daemon_dir / "active_tls.json"
+    deadline = time.monotonic() + max(0.5, wait_seconds)
+    while time.monotonic() < deadline:
+        info = maa_common.load_json(active_path, {})
+        if (
+            isinstance(info, dict)
+            and info.get("pid") == pid
+            and str(info.get("spki_sha256") or "") == expected_spki
+        ):
+            return {"status": "reloaded", "reloaded": True, "pid": pid, "spki_sha256": expected_spki}
+        time.sleep(0.1)
+
+    raise RuntimeError(
+        f"wados-maa-daemon (pid={pid}) 收到重载信号后 {wait_seconds:.1f}s 内未切换至新证书（预期 SPKI {expected_spki}），"
+        "请检查 daemon.log 并重启守护进程。"
+    )
+
+
+def _installed_cloudflared_plist() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{CLOUDFLARED_LABEL}.plist"
+
+
+def _plist_targets_home(plist_path: Path, target_home: Path) -> bool:
+    if not plist_path.is_file():
+        return False
+    try:
+        data = plistlib.loads(plist_path.read_bytes())
+    except (OSError, ValueError):
+        return False
+    args = data.get("ProgramArguments") if isinstance(data, dict) else None
+    if not isinstance(args, list):
+        return False
+    expected_cfg = str((target_home / "daemon" / "wados-maa-cloudflared.yml").resolve())
+    for item in args:
+        try:
+            if str(Path(str(item)).expanduser().resolve()) == expected_cfg:
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _find_target_cloudflared_pids(target_home: Path) -> list[int]:
+    expected_cfg = str(target_home / "daemon" / "wados-maa-cloudflared.yml")
+    resolved_cfg = str((target_home / "daemon" / "wados-maa-cloudflared.yml").resolve())
+    try:
+        proc = subprocess.run(
+            ["/bin/ps", "-ax", "-o", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    pids: list[int] = []
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or not parts[0].isdigit():
+            continue
+        cmd = parts[1]
+        if "cloudflared" in cmd and (expected_cfg in cmd or resolved_cfg in cmd):
+            pids.append(int(parts[0]))
+    return pids
+
+
+def reload_running_cloudflared(target_home: Path) -> dict[str, Any]:
+    """仅重载与 `target_home` 绑定的 `wados-maa-cloudflared`，绝不碰线上或其他隧道。"""
+    plist_path = _installed_cloudflared_plist()
+    uid = os.getuid()
+    domain_target = f"gui/{uid}/{CLOUDFLARED_LABEL}"
+
+    if _plist_targets_home(plist_path, target_home) and shutil.which("launchctl"):
+        probe = subprocess.run(
+            ["launchctl", "print", domain_target],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if probe.returncode == 0:
+            kick = subprocess.run(
+                ["launchctl", "kickstart", "-k", domain_target],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+            if kick.returncode != 0:
+                detail = (kick.stderr or kick.stdout or "").strip()[:300]
+                raise RuntimeError(f"重载 {domain_target} 失败：{detail}")
+            return {"status": "reloaded", "reloaded": True, "via": "launchctl", "target": domain_target}
+
+    pids = _find_target_cloudflared_pids(target_home)
+    if pids:
+        raise RuntimeError(
+            f"检测到独立运行的 cloudflared 进程（pid={pids}）未由 LaunchAgent 托管，无法自动重载新 caPool，请手动重启它。"
+        )
+    return {"status": "not_running", "reloaded": False}
 
 
 def stage_next_cert(
@@ -51,6 +208,9 @@ def activate_next_cert(
     target_home: Path,
     *,
     openssl_bin: str | None = None,
+    reload_services: bool = True,
+    daemon_reloader: DaemonReloader | None = None,
+    cloudflared_reloader: CloudflaredReloader | None = None,
 ) -> dict[str, Any]:
     tls_dir = target_home / "daemon" / "tls"
     next_cert = tls_dir / "cert.next.pem"
@@ -77,6 +237,25 @@ def activate_next_cert(
     os.chmod(live_key, 0o600)
     spki = maa_tls.compute_spki_sha256(live_cert, openssl_bin=openssl_bin)
     expiry = maa_tls.cert_expiry_info(live_cert, openssl_bin=openssl_bin)
+
+    reload_report: dict[str, Any] = {}
+    if reload_services:
+        d_reloader = daemon_reloader or reload_running_daemon
+        c_reloader = cloudflared_reloader or reload_running_cloudflared
+        errors: list[str] = []
+        try:
+            reload_report["daemon"] = d_reloader(target_home, spki)
+        except Exception as exc:  # noqa: BLE001 — (a) 收集并显式抛出重载失败原因
+            reload_report["daemon"] = {"status": "failed", "error": str(exc)}
+            errors.append(f"daemon: {exc}")
+        try:
+            reload_report["cloudflared"] = c_reloader(target_home)
+        except Exception as exc:  # noqa: BLE001 — (a) 收集并显式抛出重载失败原因
+            reload_report["cloudflared"] = {"status": "failed", "error": str(exc)}
+            errors.append(f"cloudflared: {exc}")
+        if errors:
+            raise RuntimeError("新证书已落盘，但服务重载未完成：" + "；".join(errors))
+
     return {
         "ok": True,
         "action": "activated",
@@ -86,6 +265,7 @@ def activate_next_cert(
         "spki_sha256": spki,
         "not_after": expiry["not_after"],
         "days_remaining": expiry["days_remaining"],
+        "reload": reload_report,
     }
 
 
@@ -95,9 +275,18 @@ def rotate_now(
     lan_ip: str = "192.168.50.2",
     days: int = maa_tls.DEFAULT_CERT_DAYS,
     openssl_bin: str | None = None,
+    reload_services: bool = True,
+    daemon_reloader: DaemonReloader | None = None,
+    cloudflared_reloader: CloudflaredReloader | None = None,
 ) -> dict[str, Any]:
     stage_next_cert(target_home, lan_ip=lan_ip, days=days, openssl_bin=openssl_bin)
-    result = activate_next_cert(target_home, openssl_bin=openssl_bin)
+    result = activate_next_cert(
+        target_home,
+        openssl_bin=openssl_bin,
+        reload_services=reload_services,
+        daemon_reloader=daemon_reloader,
+        cloudflared_reloader=cloudflared_reloader,
+    )
     result["action"] = "rotated"
     return result
 
@@ -107,18 +296,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--home", default="", help="目标 WADOS_MAA_HOME")
     parser.add_argument("--lan-ip", default="192.168.50.2", help="Mac mini 局域网 IP")
     parser.add_argument("--days", type=int, default=maa_tls.DEFAULT_CERT_DAYS, help="新证书有效期天数")
+    parser.add_argument("--no-reload", action="store_true", help="仅替换磁盘证书，不自动重载运行中的服务")
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--stage", action="store_true", help="仅预生成 next 证书并输出新 SPKI 指纹")
-    group.add_argument("--activate", action="store_true", help="激活已预生成的 next 证书并备份旧证书")
+    group.add_argument("--activate", action="store_true", help="激活已预生成的 next 证书并重载 daemon / cloudflared")
     args = parser.parse_args(argv)
 
     home = Path(args.home).expanduser() if args.home else maa_common.resolve_home()
-    if args.stage:
-        out = stage_next_cert(home, lan_ip=args.lan_ip, days=args.days)
-    elif args.activate:
-        out = activate_next_cert(home)
-    else:
-        out = rotate_now(home, lan_ip=args.lan_ip, days=args.days)
+    try:
+        if args.stage:
+            out = stage_next_cert(home, lan_ip=args.lan_ip, days=args.days)
+        elif args.activate:
+            out = activate_next_cert(home, reload_services=not args.no_reload)
+        else:
+            out = rotate_now(home, lan_ip=args.lan_ip, days=args.days, reload_services=not args.no_reload)
+    except Exception as exc:  # noqa: BLE001 — (a) CLI 顶层返回结构化失败回执与非零退出码
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
+        return 1
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return 0
 

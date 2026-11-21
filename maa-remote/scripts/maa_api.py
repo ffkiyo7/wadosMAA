@@ -1429,7 +1429,7 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
 
 
 class SafeTLSThreadingHTTPServer(ThreadingHTTPServer):
-    """线程内带超时 TLS 握手 + 来源 IP 收口的安全 HTTPS/SSE 服务器。
+    """线程内带超时 TLS 握手 + 来源 IP 收口 + 证书热重载的安全 HTTPS/SSE 服务器。
 
     关键防挂死保证（SPEC §4.2.3 & S2-1）：
     - 主 `accept()` 线程绝不执行 `do_handshake()`；
@@ -1447,12 +1447,39 @@ class SafeTLSThreadingHTTPServer(ThreadingHTTPServer):
         ctx: APIContext,
         *,
         ssl_context: ssl.SSLContext | None = None,
+        cert_path: Path | None = None,
+        key_path: Path | None = None,
     ) -> None:
         self.ctx = ctx
+        self._ssl_lock = threading.Lock()
         self.ssl_context = ssl_context
+        self._cert_path = cert_path
+        self._key_path = key_path
+        self.active_cert_info: dict[str, Any] | None = (
+            _read_served_cert_meta(cert_path) if (ssl_context is not None and cert_path is not None) else None
+        )
         self.shutting_down = threading.Event()
         self.sse_hub = SSEHub(ctx.build_sse_state, poll_interval=ctx.sse_poll_seconds)
         super().__init__(server_address, _APIRequestHandler)
+
+    def get_active_cert_info(self) -> dict[str, Any] | None:
+        with self._ssl_lock:
+            return dict(self.active_cert_info) if self.active_cert_info is not None else None
+
+    def reload_tls(self, cert_path: Path | None = None, key_path: Path | None = None) -> dict[str, Any]:
+        """原子重载服务端 TLS 证书；若新证书无效则保持旧 SSLContext 不受影响并抛异常。"""
+        cpath = cert_path or self._cert_path
+        kpath = key_path or self._key_path
+        if cpath is None or kpath is None:
+            raise RuntimeError("当前服务未配置 TLS 证书路径，无法重载。")
+        new_ctx = build_ssl_context(cpath, kpath)
+        meta = _read_served_cert_meta(cpath)
+        with self._ssl_lock:
+            self.ssl_context = new_ctx
+            self._cert_path = cpath
+            self._key_path = kpath
+            self.active_cert_info = meta
+        return dict(meta)
 
     def serve_forever(self, poll_interval: float = 0.5) -> None:
         self.sse_hub.start()
@@ -1478,12 +1505,15 @@ class SafeTLSThreadingHTTPServer(ThreadingHTTPServer):
                 pass
             return
 
+        with self._ssl_lock:
+            ssl_ctx = self.ssl_context
+
         conn: socket.socket = request
-        if self.ssl_context is not None:
+        if ssl_ctx is not None:
             tls_sock: ssl.SSLSocket | None = None
             try:
                 request.settimeout(self.ctx.handshake_timeout)
-                tls_sock = self.ssl_context.wrap_socket(
+                tls_sock = ssl_ctx.wrap_socket(
                     request,
                     server_side=True,
                     do_handshake_on_connect=False,
@@ -1507,6 +1537,19 @@ class SafeTLSThreadingHTTPServer(ThreadingHTTPServer):
             self.shutdown_request(conn)
 
 
+def _read_served_cert_meta(cert_path: Path) -> dict[str, Any]:
+    """读取并记录当前已加载进 SSLContext 的证书指纹与到期时间。"""
+    spki = maa_tls.compute_spki_sha256(cert_path)
+    expiry = maa_tls.cert_expiry_info(cert_path)
+    return {
+        "cert_path": str(cert_path),
+        "spki_sha256": spki,
+        "not_after": expiry["not_after"],
+        "not_after_utc": expiry["not_after_utc"],
+        "loaded_at": maa_common.now_beijing().isoformat(),
+    }
+
+
 def build_ssl_context(cert_path: Path, key_path: Path) -> ssl.SSLContext:
     """构建现代 TLS 1.2+ 服务端上下文。"""
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -1524,4 +1567,10 @@ def create_server(
     key_path: Path | None = None,
 ) -> SafeTLSThreadingHTTPServer:
     ssl_ctx = build_ssl_context(cert_path, key_path) if (cert_path and key_path) else None
-    return SafeTLSThreadingHTTPServer((host, port), ctx, ssl_context=ssl_ctx)
+    return SafeTLSThreadingHTTPServer(
+        (host, port),
+        ctx,
+        ssl_context=ssl_ctx,
+        cert_path=cert_path,
+        key_path=key_path,
+    )
