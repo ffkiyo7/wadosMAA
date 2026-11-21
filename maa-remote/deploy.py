@@ -237,9 +237,10 @@ SCRIPT_NAMES = (
     "maa_schedule.py",
     "maa_settings.py",
     "maa_upstream.py",
+    "maa_notify.py",
 )
 # swiftc 编译产物：线上是二进制，`--check` 只查存在。
-COMPILED_HELPERS = ("ocrbox", "winmove")
+COMPILED_HELPERS = ("ocrbox", "winmove", "barkcrypt")
 SKILL_RELATIVE_PATH = Path("skills") / "games" / "maa-operator" / "SKILL.md"
 
 
@@ -280,6 +281,14 @@ def deploy_winmove() -> None:
     _compile_swift(
         "winmove",
         "游戏窗口开在别的屏上时挪不回 MAA-Game，台前调度一挤它就截不到图！",
+    )
+
+
+def deploy_barkcrypt() -> None:
+    """Compile the AES-GCM Bark encryption helper (`barkcrypt.swift`)."""
+    _compile_swift(
+        "barkcrypt",
+        "Bark 端到端加密推送将不可用（通知自动降级不阻断跑场）。",
     )
 
 
@@ -1063,6 +1072,7 @@ def main(argv: list[str] | None = None) -> int:
     deploy_skland_token()
     deploy_ocrbox()
     deploy_winmove()
+    deploy_barkcrypt()
     patch_adapter()
     patch_local_patches()
     patch_env(channel_id)
