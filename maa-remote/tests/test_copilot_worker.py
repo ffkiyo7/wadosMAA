@@ -624,6 +624,26 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         self.assertTrue(rep["ok"])
         self.assertEqual((rep["won"], rep["total"]), (2, 2))
         self.assertEqual(len(rep["results"]), 2)
+        for res_item, step in zip(rep["results"], prog["steps"]):
+            self.assertIsInstance(res_item["started_at"], str)
+            self.assertIsInstance(res_item["finished_at"], str)
+            self.assertEqual(res_item["started_at"], step["started_at"])
+            self.assertEqual(res_item["finished_at"], step["finished_at"])
+
+    def test_copilot_report_skipped_stage_has_null_timestamps(self) -> None:
+        """跳过的关卡（如普通失败后的突袭）在 report.results 中 started_at/finished_at 为 None。"""
+        entries = [self._entry("SR-5", mode="normal"), self._entry("SR-5", mode="raid")]
+        result = self._run(entries, lambda *a: ("failed", "翻车"))
+        rep = result.report_file
+        self.assertIsNotNone(rep)
+        self.assertEqual(len(rep["results"]), 2)
+        first, second = rep["results"]
+        self.assertEqual(first["outcome"], "failed")
+        self.assertIsInstance(first["started_at"], str)
+        self.assertIsInstance(first["finished_at"], str)
+        self.assertEqual(second["outcome"], "skipped")
+        self.assertIsNone(second["started_at"])
+        self.assertIsNone(second["finished_at"])
 
     def test_copilot_progress_advance_list_stage_tracks_live_items(self) -> None:
         """多作业单进程模式下，CopilotListLoadTaskFileSuccess 推进逐关实时进度。"""
