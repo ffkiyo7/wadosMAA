@@ -44,9 +44,9 @@ Gate 1 ──┬──► S2-1 (TLS 防挂死 + 分域 Token + 证书/二维码�
      - 守护进程每日巡检 `cert.pem` 剩余有效期，到期前 60 天发 `timeSensitive` Bark 提醒（`id=tls-cert`）；
      - 初始化脚本在 Mac 终端输出配对 JSON 与一次性配对二维码（含 `lan_url`、`remote_url`、`spki_sha256`、`full_token`）。
 - **验收清单**：
-  - [ ] 模拟建立 TCP 连接后不发 TLS ClientHello（慢速半开连接），5 秒后自动断开且期间并发正常请求不受阻塞
-  - [ ] 来源 IP 白名单、无效 Token 401、`resign_only` 越权 403 单测全绿
-  - [ ] 证书生成、SPKI 指纹计算、到期前 60 天告警逻辑单测通过
+  - [x] 模拟建立 TCP 连接后不发 TLS ClientHello（慢速半开连接），5 秒后自动断开且期间并发正常请求不受阻塞（单测 + `devhome` 实测 3 条半开连接下 `/healthz` 11ms 返回，3/3 自动断开）
+  - [x] 来源 IP 白名单、无效 Token 401、`resign_only` 越权 403 单测全绿
+  - [x] 证书生成、SPKI 指纹计算、到期前 60 天告警逻辑单测通过
 
 ---
 
@@ -73,10 +73,10 @@ Gate 1 ──┬──► S2-1 (TLS 防挂死 + 分域 Token + 证书/二维码�
      - 严格动作白名单映射，后端受控组装 argv 调 `maa_action.py`（默认注入 `MAA_ACTION_SOURCE=ios`），绝不透传任意命令；
      - 覆盖：`/plan/stage`、`/plan/skip`、`/plan/fight`、`/run/local`、`/run/cancel`（**强制校验 body 中 `run_id`**）、`/copilot/preview`（接受客户端 UUID `request_id`，长请求超时 60s）、`DELETE /api/v1/copilot/preview/<request_id>`（按 `request_id` 终止进行中的搜索子进程或清理临时预览文件）、`/copilot/go`、`/copilot/auto`、`/copilot/mark`、`/schedule`（含 `depot_enabled` 并热重载调度器）、`/defaults`、`/config`、`/upstream/update`、`/notify/test`、`/ios/resign`（Phase 2 先接参数校验与 `not_configured` 占位，Phase 4 S4-1 接入真实续签）。
 - **验收清单**：
-  - [ ] §5.1 与 §5.2 全部 27 个端点（含 SSE）均有离线单测覆盖
-  - [ ] `DELETE /api/v1/copilot/preview/<request_id>` 可可靠中止正在搜索的子进程
-  - [ ] `/runs/<id>/*` 路径参数防穿越（`..`、`/` 均拒绝）
-  - [ ] `ruff` / `pyright` 0 报错
+  - [x] §5.1 与 §5.2 全部 27 个端点（含 SSE）均有离线单测覆盖（`test_daemon_api.py` + `test_daemon_sse.py`）
+  - [x] `DELETE /api/v1/copilot/preview/<request_id>` 可可靠中止正在搜索的子进程（单测 + `devhome` 实测零残留进程）
+  - [x] `/runs/<id>/*` 路径参数防穿越（`..`、`/` 均拒绝）
+  - [x] `ruff` / `pyright` 0 报错
 
 ---
 
@@ -88,8 +88,8 @@ Gate 1 ──┬──► S2-1 (TLS 防挂死 + 分域 Token + 证书/二维码�
   - `maa-remote/daemon/wados-maa-cloudflared.yml.tmpl`（隧道 ID `dcd1aac1-ff11-4a1f-b91c-9fb37b045716`，**必须含 `protocol: http2`** 适配本机 TUN/fake-ip，`ingress` 指向 `https://127.0.0.1:18170`，`originRequest.caPool` 指向 `~/.wados-maa/daemon/tls/cert.pem`，兜底 `http_status:404`）
   - `maa-remote/daemon/io.github.ffkiyo7.wados-maa.cloudflared.plist`（开机自启、`KeepAlive=true`，日志落 `~/.wados-maa/logs/cloudflared.log`）
 - **验收清单**：
-  - [ ] 模板渲染出的配置文件通过 `cloudflared tunnel ingress validate`
-  - [ ] `devhome` 联调期通过 `maa.luxraykit.com` 可正常反代至 `devhome` 守护进程，且与 `netease-mcp` 完全隔离
+  - [x] 模板渲染出的配置文件通过 `cloudflared tunnel --config <path> ingress validate`（输出 `OK`）
+  - [x] `devhome` 联调期通过 `maa.luxraykit.com` 可正常反代至 `devhome` 守护进程，且与 `netease-mcp` 完全隔离
 
 ---
 
@@ -103,8 +103,8 @@ Gate 1 ──┬──► S2-1 (TLS 防挂死 + 分域 Token + 证书/二维码�
   - 仅支持输入 `full` Bearer Token（存于页面内存或可选 `sessionStorage`，不拼进 URL query）；
   - 严格限定 3 个救命功能：① 刷新并展示当前 `lock` / `last_run` / `progress` 状态；② 携带当前 `run_id` 触发 `POST /api/v1/run/cancel`（带二次确认）；③ 触发 `POST /api/v1/ios/resign`。
 - **验收清单**：
-  - [ ] 无外网静态资源依赖，Safari 移动端排版清晰可用
-  - [ ] 错误 Token 提示鉴权失败；紧急停止必须携带 `run_id`
+  - [x] 无外网静态资源依赖，Safari 移动端排版清晰可用（零外部 URL / `<script src>` / `<link href>`）
+  - [x] 错误 Token 提示鉴权失败；紧急停止必须携带 `run_id`
 
 ---
 
@@ -119,7 +119,7 @@ Gate 1 ──┬──► S2-1 (TLS 防挂死 + 分域 Token + 证书/二维码�
   4. 调用 `POST /api/v1/notify/test` 收到真机解密 Bark 推送；
   5. 实测慢速半开 TLS 连接不阻塞并发正常请求；
   6. 实测 `resign_only` Token 访问 `/api/v1/snapshot`、`/api/v1/run/cancel` 返回 `403`。
-- **Gate 2 验收清单**：
-  - [ ] 上述 6 项双轨实测全部通过
-  - [ ] `unittest` / `ruff` / `pyright` 全部 0 报错
-  - [ ] 线上 `~/.hermes` 与 Discord 全程零改动
+- **Gate 2 验收清单（✅ 2026-11-21 20:10 通过）**：
+  - [x] 上述 6 项双轨实测全部通过（`devhome` 经 LAN `https://192.168.50.2:18170` 与公网 `https://maa.luxraykit.com` 实测通过：`healthz` / `rescue` / `snapshot` / `history` / `runs/*` / 零噪声 SSE + 25s `: keepalive`、`copilot/preview` + `DELETE` 中止子进程、手动日常开跑 + `run_changed` 拒绝旧 `run_id` + 真 `run_id` 取消收尾、真实 Bark 端到端加密测试推送、3 条慢速半开 TLS 抗挂死、`resign_only` 403 越权拦截）
+  - [x] `unittest`（887 项，Python 3.12 + 干净 `HOME` + 系统 Python 3.9）/ `ruff` / `pyright` 全部 0 报错
+  - [x] 线上 `~/.hermes` 与 Discord 全程零改动
