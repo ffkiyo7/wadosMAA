@@ -242,6 +242,29 @@ class DaemonAPITests(unittest.TestCase):
         self.assertFalse(page2["has_more"])
         self.assertEqual([item["id"] for item in page2["items"]], [old_id])
 
+        # GET /api/v1/history?kind=daily|copilot 过滤后计算 total 和 has_more
+        st, daily_p1 = self._json("GET", "/api/v1/history?kind=daily&limit=1&offset=0")
+        self.assertEqual(st, 200)
+        self.assertEqual(daily_p1["total"], 2)
+        self.assertTrue(daily_p1["has_more"])
+        self.assertEqual([item["id"] for item in daily_p1["items"]], [run_id])
+
+        st, daily_p2 = self._json("GET", "/api/v1/history?kind=daily&limit=1&offset=1")
+        self.assertEqual(st, 200)
+        self.assertEqual(daily_p2["total"], 2)
+        self.assertFalse(daily_p2["has_more"])
+        self.assertEqual([item["id"] for item in daily_p2["items"]], [old_id])
+
+        st, cop_only = self._json("GET", "/api/v1/history?kind=copilot&limit=10&offset=0")
+        self.assertEqual(st, 200)
+        self.assertEqual(cop_only["total"], 1)
+        self.assertFalse(cop_only["has_more"])
+        self.assertEqual([item["id"] for item in cop_only["items"]], [cop_id])
+
+        st, bad_kind = self._json("GET", "/api/v1/history?kind=unknown")
+        self.assertEqual(st, 400)
+        self.assertEqual(bad_kind["code"], "bad_args")
+
         # GET /api/v1/runs/<id>/report（日常 + 抄作业 + 旧命名 + 404）
         self.assertEqual(self._json("GET", f"/api/v1/runs/{run_id}/report")[1]["title"], "日常战报")
         self.assertEqual(self._json("GET", f"/api/v1/runs/{cop_id}/report")[1]["kind"], "copilot")

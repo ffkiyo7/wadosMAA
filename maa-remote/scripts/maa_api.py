@@ -761,10 +761,12 @@ class APIContext:
         capture("resign", self._read_resign)
         return out
 
-    def read_history(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    def read_history(self, *, limit: int = 50, offset: int = 0, kind: str | None = None) -> dict[str, Any]:
         clamped_limit = max(1, min(200, limit))
         clamped_offset = max(0, offset)
         rows = maa_common.read_run_index(self.runs_dir)
+        if kind is not None:
+            rows = [row for row in rows if row.get("kind") == kind]
         rows.reverse()  # 倒序：最新在前
         total = len(rows)
         items = rows[clamped_offset : clamped_offset + clamped_limit]
@@ -1149,7 +1151,14 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
             except ValueError:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "bad_args", "limit 和 offset 必须是整数。")
                 return
-            self._send_json(HTTPStatus.OK, self.ctx.read_history(limit=limit, offset=offset))
+            raw_kind = query.get("kind", [""])[0].strip().lower()
+            if raw_kind and raw_kind not in ("daily", "copilot"):
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "bad_args", "kind 仅支持 daily 或 copilot。")
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                self.ctx.read_history(limit=limit, offset=offset, kind=raw_kind or None),
+            )
             return
 
         # /api/v1/runs/<id>/(report|screenshot|log)
