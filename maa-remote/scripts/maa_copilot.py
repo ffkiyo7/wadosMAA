@@ -756,6 +756,16 @@ _EX_RE = re.compile(r"^(?P<prefix>[A-Za-z0-9]{1,8})-EX-(?P<seq>\d{1,2})$")
 _S_RE = re.compile(r"^(?P<prefix>[A-Za-z0-9]{1,8})-S-(?P<seq>\d{1,2})$")
 
 
+def stage_category(stage: str) -> Literal["normal", "ex", "s"]:
+    """区分关卡分组：普通（`normal`）/ EX（`ex`）/ S（`s`）。"""
+    text = str(stage or "").strip().upper()
+    if _EX_RE.match(text):
+        return "ex"
+    if _S_RE.match(text):
+        return "s"
+    return "normal"
+
+
 def activity_stage_codes(index: dict[str, Any], prefix: str) -> list[str]:
     """本地 Tile-Pos 索引里属于 `prefix` 的全部关，按**数字 → EX → S** 升序。
 
