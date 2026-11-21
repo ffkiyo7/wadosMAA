@@ -18,6 +18,7 @@ import ipaddress
 import os
 import secrets
 import shutil
+import ssl
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -100,6 +101,15 @@ def _validate_ip_list(ips: list[str]) -> list[str]:
     if not clean:
         raise ValueError("SAN IP 列表不能为空")
     return clean
+
+
+def compute_cert_sha256(cert_path: Path) -> str:
+    """用纯 Python 标准库计算 X.509 证书 DER 的 SHA-256 十六进制指纹（不依赖 openssl CLI）。"""
+    if not cert_path.is_file():
+        raise FileNotFoundError(f"证书文件不存在：{cert_path}")
+    pem_text = cert_path.read_text(encoding="utf-8")
+    der = ssl.PEM_cert_to_DER_cert(pem_text)
+    return hashlib.sha256(der).hexdigest()
 
 
 def compute_spki_sha256(cert_path: Path, *, openssl_bin: str | None = None) -> str:
@@ -313,6 +323,17 @@ def check_cert_expiry_and_notify(
     state = load_json(state_path, {})
     if not isinstance(state, dict):
         state = {}
+
+    if served_info is not None and served_info.get("meta_ok") is False:
+        # 服务正在运行，但因缺少 OpenSSL 3 等原因读不到内存实际在服务证书的到期时间：
+        # 绝不拿磁盘证书冒充在服务证书，也不崩溃、不误报，显式降级返回。
+        return {
+            "checked": False,
+            "degraded": True,
+            "reason": "served_meta_unavailable",
+            "detail": str(served_info.get("meta_error") or ""),
+            "notified": False,
+        }
 
     served_spki = str(served_info.get("spki_sha256") or "") if served_info else ""
     served_not_after: datetime | None = None

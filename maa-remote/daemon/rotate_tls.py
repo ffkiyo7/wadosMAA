@@ -67,9 +67,15 @@ def reload_running_daemon(
     target_home: Path,
     expected_spki: str,
     *,
+    expected_cert_sha256: str = "",
     wait_seconds: float = 5.0,
 ) -> dict[str, Any]:
-    """通知运行中的 `wados-maa-daemon` 热重载 TLS 证书并核对 `active_tls.json` 确已切换。"""
+    """通知运行中的 `wados-maa-daemon` 热重载 TLS 证书并核对 `active_tls.json` 确已切换。
+
+    优先比对 `spki_sha256`；当 daemon 因缺少 OpenSSL 3 无法产出 `spki_sha256` 时，
+    使用不依赖 openssl 命令的纯 Python `cert_sha256`（DER SHA-256）核验；
+    两者均无法确认匹配时绝不误报成功，超时明确抛 `RuntimeError`。
+    """
     daemon_dir = target_home / "daemon"
     pid_file = daemon_dir / "daemon.pid"
     if not pid_file.is_file():
@@ -80,6 +86,18 @@ def reload_running_daemon(
         return {"status": "not_running", "reloaded": False}
     if pid <= 1 or not _is_daemon_pid(pid):
         return {"status": "not_running", "reloaded": False}
+
+    cert_sha256 = expected_cert_sha256.strip().lower()
+    if not cert_sha256:
+        live_cert = daemon_dir / "tls" / "cert.pem"
+        if live_cert.is_file():
+            try:
+                cert_sha256 = maa_tls.compute_cert_sha256(live_cert)
+            except (OSError, ValueError):
+                cert_sha256 = ""
+
+    if not expected_spki and not cert_sha256:
+        raise RuntimeError("无法计算新证书指纹（SPKI 与 cert_sha256 均不可用），拒绝确认 daemon 重载成功。")
 
     maa_common.atomic_write_text(
         daemon_dir / "reload.flag",
@@ -95,16 +113,33 @@ def reload_running_daemon(
     deadline = time.monotonic() + max(0.5, wait_seconds)
     while time.monotonic() < deadline:
         info = maa_common.load_json(active_path, {})
-        if (
-            isinstance(info, dict)
-            and info.get("pid") == pid
-            and str(info.get("spki_sha256") or "") == expected_spki
-        ):
-            return {"status": "reloaded", "reloaded": True, "pid": pid, "spki_sha256": expected_spki}
+        if isinstance(info, dict) and info.get("pid") == pid:
+            actual_spki = str(info.get("spki_sha256") or "")
+            actual_cert_sha = str(info.get("cert_sha256") or "").strip().lower()
+            if expected_spki and actual_spki:
+                if actual_spki == expected_spki and (not cert_sha256 or not actual_cert_sha or actual_cert_sha == cert_sha256):
+                    return {
+                        "status": "reloaded",
+                        "reloaded": True,
+                        "pid": pid,
+                        "spki_sha256": expected_spki,
+                        "cert_sha256": actual_cert_sha or cert_sha256,
+                        "verified_via": "spki_sha256",
+                    }
+            elif cert_sha256 and actual_cert_sha and actual_cert_sha == cert_sha256:
+                return {
+                    "status": "reloaded",
+                    "reloaded": True,
+                    "pid": pid,
+                    "spki_sha256": actual_spki,
+                    "cert_sha256": cert_sha256,
+                    "verified_via": "cert_sha256",
+                }
         time.sleep(0.1)
 
     raise RuntimeError(
-        f"wados-maa-daemon (pid={pid}) 收到重载信号后 {wait_seconds:.1f}s 内未切换至新证书（预期 SPKI {expected_spki}），"
+        f"wados-maa-daemon (pid={pid}) 收到重载信号后 {wait_seconds:.1f}s 内未确认切换至新证书"
+        f"（预期 SPKI={expected_spki or '无'} / cert_sha256={cert_sha256 or '无'}），"
         "请检查 daemon.log 并重启守护进程。"
     )
 
@@ -243,8 +278,17 @@ def activate_next_cert(
     os.replace(next_key, live_key)
     os.chmod(live_cert, 0o600)
     os.chmod(live_key, 0o600)
-    spki = maa_tls.compute_spki_sha256(live_cert, openssl_bin=openssl_bin)
-    expiry = maa_tls.cert_expiry_info(live_cert, openssl_bin=openssl_bin)
+    cert_sha256 = maa_tls.compute_cert_sha256(live_cert)
+    spki = ""
+    not_after: str | None = None
+    days_remaining: float | None = None
+    try:
+        spki = maa_tls.compute_spki_sha256(live_cert, openssl_bin=openssl_bin)
+        expiry = maa_tls.cert_expiry_info(live_cert, openssl_bin=openssl_bin)
+        not_after = expiry["not_after"]
+        days_remaining = expiry["days_remaining"]
+    except Exception as exc:  # noqa: BLE001 — (c) OpenSSL 3 不可用时降级改由 cert_sha256 核验
+        print(f"warning: activate_next_cert metadata unavailable: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
 
     reload_report: dict[str, Any] = {}
     if reload_services:
@@ -321,9 +365,10 @@ def activate_next_cert(
         "cert_path": str(live_cert),
         "key_path": str(live_key),
         "backup_dir": str(backup_dir) if backup_dir else None,
+        "cert_sha256": cert_sha256,
         "spki_sha256": spki,
-        "not_after": expiry["not_after"],
-        "days_remaining": expiry["days_remaining"],
+        "not_after": not_after,
+        "days_remaining": days_remaining,
         "reload": reload_report,
     }
 

@@ -899,6 +899,107 @@ global.fetch = async (path, opts) => {{
         expected_der = ssl.PEM_cert_to_DER_cert(cert_path.read_text(encoding="utf-8"))
         self.assertEqual(peer_der, expected_der)
 
+    @unittest.skipUnless(_has_openssl3(), "生成测试用夹具证书需要 Homebrew OpenSSL 3")
+    def test_api_starts_reloads_and_verifies_without_openssl3_and_expiry_degrades_safely(self) -> None:
+        """复审【B】回归：无 OpenSSL 3 时 API 与 /rescue 照常启动、reload_tls 照常切换、到期巡检安全降级不崩不误报、rotate_tls 不误报确认。"""
+        from unittest.mock import patch
+
+        cert_path = self.daemon_dir / "tls" / "cert.pem"
+        key_path = self.daemon_dir / "tls" / "key.pem"
+        cert2_path = self.daemon_dir / "tls" / "cert2.pem"
+        key2_path = self.daemon_dir / "tls" / "key2.pem"
+        # 先准备两套合法测试证书，随后彻底屏蔽 find_openssl3 模拟无 OpenSSL 3 环境。
+        maa_tls.generate_self_signed_cert(cert_path, key_path, lan_ip="192.168.50.2", days=20)
+        maa_tls.generate_self_signed_cert(cert2_path, key2_path, lan_ip="192.168.50.2", days=1825)
+        expected_sha1 = maa_tls.compute_cert_sha256(cert_path)
+        expected_sha2 = maa_tls.compute_cert_sha256(cert2_path)
+        self.assertNotEqual(expected_sha1, expected_sha2)
+
+        ctx = maa_api.APIContext(
+            home_dir=self.home,
+            scripts_dir=ROOT / "scripts",
+            state_dir=self.state_dir,
+            runs_dir=self.runs_dir,
+            daemon_dir=self.daemon_dir,
+            secrets_path=self.daemon_dir / "secrets.json",
+            rescue_html_path=ROOT / "daemon" / "rescue.html",
+        )
+
+        with patch.object(maa_tls, "find_openssl3", side_effect=RuntimeError("openssl@3 missing")):
+            # 1. 无 OpenSSL 3 时服务器照常启动，/healthz 与 /rescue 均可访问
+            server = maa_api.create_server("127.0.0.1", 0, ctx, cert_path=cert_path, key_path=key_path)
+            port = server.server_address[1]
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
+            thread.start()
+            self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(timeout=2.0)))
+
+            st, health = _tls_request(port, "GET", "/healthz")
+            self.assertEqual(st, 200)
+            self.assertTrue(health["ok"])
+
+            cctx = ssl._create_unverified_context()
+            conn = http.client.HTTPSConnection("127.0.0.1", port, timeout=3.0, context=cctx)
+            try:
+                conn.request("GET", "/rescue")
+                r = conn.getresponse()
+                self.assertEqual(r.status, 200)
+                self.assertIn(b"Wado's MAA", r.read())
+            finally:
+                conn.close()
+
+            info1 = server.get_active_cert_info()
+            assert info1 is not None
+            self.assertFalse(info1["meta_ok"])
+            self.assertEqual(info1["spki_sha256"], "")
+            self.assertEqual(info1["cert_sha256"], expected_sha1)
+
+            # 2. 到期巡检在 served_info.meta_ok=False 时安全降级，不崩溃也不误报告警
+            sent: list[str] = []
+            chk = maa_tls.check_cert_expiry_and_notify(
+                cert_path,
+                self.daemon_dir / "tls_check.json",
+                warn_days=60,
+                served_info=info1,
+                notify_fn=lambda title, _body, **_kw: (sent.append(title) or True),
+            )
+            self.assertTrue(chk["degraded"])
+            self.assertFalse(chk["notified"])
+            self.assertEqual(sent, [])
+
+            # 3. 无 OpenSSL 3 时 reload_tls 仍可成功切换新证书并更新 cert_sha256
+            os.replace(cert2_path, cert_path)
+            os.replace(key2_path, key_path)
+            meta2 = server.reload_tls()
+            self.assertFalse(meta2["meta_ok"])
+            self.assertEqual(meta2["cert_sha256"], expected_sha2)
+
+            with socket.create_connection(("127.0.0.1", port), timeout=3.0) as raw:
+                with cctx.wrap_socket(raw, server_hostname="127.0.0.1") as tls:
+                    peer_der = tls.getpeercert(binary_form=True)
+            self.assertEqual(peer_der, ssl.PEM_cert_to_DER_cert(cert_path.read_text(encoding="utf-8")))
+
+            # 4. rotate_tls.reload_running_daemon：无 OpenSSL 3 时凭纯 Python cert_sha256 精确核验；
+            #    若 active_tls.json 指纹不匹配（仍是旧证书），绝不误报成功，超时明确报错。
+            pid = os.getpid()
+            (self.daemon_dir / "daemon.pid").write_text(f"{pid}\n", encoding="utf-8")
+            with patch.object(rotate_tls, "_is_daemon_pid", return_value=True), \
+                    patch.object(rotate_tls.os, "kill"):
+                maa_common.atomic_write_json(
+                    self.daemon_dir / "active_tls.json",
+                    {"pid": pid, "spki_sha256": "", "cert_sha256": expected_sha1},
+                )
+                with self.assertRaises(RuntimeError):
+                    rotate_tls.reload_running_daemon(self.home, "", wait_seconds=0.3)
+
+                maa_common.atomic_write_json(
+                    self.daemon_dir / "active_tls.json",
+                    {"pid": pid, "spki_sha256": "", "cert_sha256": expected_sha2},
+                )
+                ok_res = rotate_tls.reload_running_daemon(self.home, "", wait_seconds=0.5)
+                self.assertTrue(ok_res["reloaded"])
+                self.assertEqual(ok_res["verified_via"], "cert_sha256")
+                self.assertEqual(ok_res["cert_sha256"], expected_sha2)
+
 
 if __name__ == "__main__":
     unittest.main()

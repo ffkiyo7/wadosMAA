@@ -1573,16 +1573,41 @@ class SafeTLSThreadingHTTPServer(ThreadingHTTPServer):
 
 
 def _read_served_cert_meta(cert_path: Path) -> dict[str, Any]:
-    """读取并记录当前已加载进 SSLContext 的证书指纹与到期时间。"""
-    spki = maa_tls.compute_spki_sha256(cert_path)
-    expiry = maa_tls.cert_expiry_info(cert_path)
-    return {
+    """读取并记录当前已加载进 SSLContext 的证书指纹与到期时间。
+
+    `cert_sha256` 使用纯 Python 标准库计算（零外部依赖）；SPKI 与到期时间尽力用 OpenSSL 3 读取，
+    读取失败仅打警告并标记 `meta_ok=False`，绝不阻断 HTTPS API 启动或证书热切换。
+    """
+    cert_sha256 = ""
+    try:
+        cert_sha256 = maa_tls.compute_cert_sha256(cert_path)
+    except (OSError, ValueError) as exc:
+        print(f"warning: compute_cert_sha256 failed ({cert_path}): {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    meta: dict[str, Any] = {
         "cert_path": str(cert_path),
-        "spki_sha256": spki,
-        "not_after": expiry["not_after"],
-        "not_after_utc": expiry["not_after_utc"],
+        "cert_sha256": cert_sha256,
+        "spki_sha256": "",
+        "not_after": "",
+        "not_after_utc": "",
+        "meta_ok": False,
         "loaded_at": maa_common.now_beijing().isoformat(),
     }
+    try:
+        spki = maa_tls.compute_spki_sha256(cert_path)
+        expiry = maa_tls.cert_expiry_info(cert_path)
+        meta["spki_sha256"] = spki
+        meta["not_after"] = expiry["not_after"]
+        meta["not_after_utc"] = expiry["not_after_utc"]
+        meta["meta_ok"] = True
+    except Exception as exc:  # noqa: BLE001 — (c) 证书元信息仅用于到期巡检，失败记日志并降级，绝不阻断 API 启动/热重载
+        meta["meta_error"] = f"{type(exc).__name__}: {exc}"
+        print(
+            f"warning: TLS cert metadata unavailable ({cert_path}): {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return meta
 
 
 def build_ssl_context(cert_path: Path, key_path: Path) -> ssl.SSLContext:
