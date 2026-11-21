@@ -1,0 +1,407 @@
+"""Phase 2 S2-2 REST 全部读/写端点、`request_id` 预览子进程中止与路径防穿越单测。"""
+
+from __future__ import annotations
+
+import http.client
+import json
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from typing import Any
+from unittest.mock import patch
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+import _isolation  # noqa: E402
+import _helpers  # noqa: E402
+import maa_action  # noqa: E402
+import maa_api  # noqa: E402
+import maa_common  # noqa: E402
+import maa_copilot  # noqa: E402
+import maa_notify  # noqa: E402
+import maa_schedule  # noqa: E402
+import maa_tls  # noqa: E402
+import maa_upstream  # noqa: E402
+
+_DEVICE_GUARDS: list = []
+_MODULE_PATCHES: list = []
+
+
+def setUpModule() -> None:
+    _DEVICE_GUARDS[:] = _isolation.guard_devices()
+    _MODULE_PATCHES[:] = _helpers.start_module_patches()
+
+
+def tearDownModule() -> None:
+    _helpers.stop_patches(_MODULE_PATCHES)
+    for item in reversed(_DEVICE_GUARDS):
+        item.stop()
+    _isolation.assert_shared_home_clean()
+
+
+# 最小合法 1x1 PNG 字节，用于截图与缩略图测试。
+TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+    b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xcf\xc0"
+    b"\x00\x00\x03\x01\x01\x00\x18\xdd\x8d\xb0\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+class DaemonAPITests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="daemon-api-")
+        self.addCleanup(self._tmp.cleanup)
+        self.home = Path(self._tmp.name) / "home"
+        self.state_dir = self.home / "state" / "maa"
+        self.runs_dir = self.state_dir / "runs"
+        self.daemon_dir = self.home / "daemon"
+        self.previews_dir = self.state_dir / "copilot" / "previews"
+        for d in (self.runs_dir, self.daemon_dir, self.previews_dir):
+            d.mkdir(parents=True, exist_ok=True)
+
+        self.full_token = maa_tls.generate_token()
+        self.secrets_path = self.daemon_dir / "secrets.json"
+        maa_tls.merge_secrets(self.secrets_path, {"full_token_sha256": maa_tls.hash_token(self.full_token)})
+
+        self.recorded_actions: list[tuple[list[str], str]] = []
+        self.reloaded_count = 0
+
+        def fake_action(argv: list[str], source: str, _timeout: float) -> dict[str, Any]:
+            self.recorded_actions.append((argv, source))
+            if argv[:3] == ["run", "cancel", "--run-id"] and argv[3] == "old-run-id":
+                return {"ok": False, "code": "run_changed", "message": "当前运行的已经是另一场，没有停下。"}
+            return {"ok": True, "code": "dispatched", "message": "ok", "data": {"argv": argv, "source": source}}
+
+        self.ctx = maa_api.APIContext(
+            home_dir=self.home,
+            scripts_dir=ROOT / "scripts",
+            state_dir=self.state_dir,
+            runs_dir=self.runs_dir,
+            daemon_dir=self.daemon_dir,
+            secrets_path=self.secrets_path,
+            rescue_html_path=ROOT / "daemon" / "rescue.html",
+            action_runner=fake_action,
+            on_schedule_reload=self._bump_reload,
+        )
+        self.server = maa_api.create_server("127.0.0.1", 0, self.ctx)
+        self.port = self.server.server_address[1]
+        self._thread = threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
+        self._thread.start()
+        self.addCleanup(lambda: (self.server.shutdown(), self.server.server_close(), self._thread.join(timeout=2.0)))
+
+    def _bump_reload(self) -> None:
+        self.reloaded_count += 1
+
+    def _req(
+        self,
+        method: str,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        token: str | None = None,
+    ) -> tuple[int, str, bytes]:
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10.0)
+        headers: dict[str, str] = {}
+        tok = self.full_token if token is None else token
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+        raw = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else None
+        if raw is not None:
+            headers["Content-Type"] = "application/json"
+        try:
+            conn.request(method, path, body=raw, headers=headers)
+            resp = conn.getresponse()
+            return resp.status, resp.getheader("Content-Type", ""), resp.read()
+        finally:
+            conn.close()
+
+    def _json(self, method: str, path: str, *, body: dict[str, Any] | None = None) -> tuple[int, dict[str, Any]]:
+        st, _ct, raw = self._req(method, path, body=body)
+        return st, json.loads(raw.decode("utf-8"))
+
+    def test_all_read_endpoints_and_path_traversal_guard(self) -> None:
+        # 准备状态文件：last_run, progress, report, screenshot, log, index.jsonl, activity_watch, scheduler, resign
+        run_id = "2026-11-21-now-192135"
+        cop_id = "2026-11-21-copilot-abc123-193000"
+        old_id = "2026-11-10-am"
+        maa_common.atomic_write_json(
+            self.state_dir / "last_run.json",
+            {
+                "schema_version": 1,
+                "run_id": run_id,
+                "phase": "now",
+                "status": "running",
+                "started_at": "2026-11-21T19:21:35+08:00",
+                "progress": str(self.runs_dir / f"{run_id}.progress.json"),
+            },
+        )
+        maa_common.atomic_write_json(
+            self.runs_dir / f"{run_id}.progress.json",
+            {"schema_version": 1, "kind": "daily", "run_id": run_id, "status": "running", "current": "fight"},
+        )
+        maa_common.atomic_write_json(
+            self.runs_dir / f"{run_id}-report.json",
+            {"title": "日常战报", "run_id": run_id, "status": "success"},
+        )
+        maa_common.atomic_write_json(
+            self.runs_dir / f"{cop_id}-report.json",
+            {"title": "抄作业战报", "run_id": cop_id, "kind": "copilot"},
+        )
+        maa_common.atomic_write_json(
+            self.runs_dir / f"{old_id}-report.json",
+            {"title": "旧命名战报", "phase": "am"},
+        )
+        (self.runs_dir / f"{run_id}.png").write_bytes(TINY_PNG)
+        (self.runs_dir / f"{run_id}.log").write_text("line1\nline2\nline3\nline4\nline5\n", encoding="utf-8")
+        (self.runs_dir / "index.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps({"schema_version": 1, "id": old_id, "kind": "daily", "status": "success"}),
+                    "not-json-garbage",
+                    json.dumps({"schema_version": 999, "id": "future-schema", "kind": "daily"}),
+                    json.dumps({"schema_version": 1, "id": run_id, "kind": "daily", "status": "success"}),
+                    json.dumps({"schema_version": 1, "id": cop_id, "kind": "copilot", "status": "success"}),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        maa_common.atomic_write_json(self.state_dir / "activity_watch.json", {"status": "idle"})
+        maa_common.atomic_write_json(self.daemon_dir / "scheduler.json", {"schema_version": 1, "jobs": {}})
+        maa_common.atomic_write_json(self.daemon_dir / "resign.json", {"status": "ok", "expires_at": "2026-11-28T09:00:00+08:00"})
+
+        with patch.object(maa_common, "run_lock_holder", return_value={"holder": "daily", "detail": "手动", "pid": 123, "run_id": run_id}), \
+                patch.object(maa_common, "load_config", return_value={"schema_version": 1}), \
+                patch.object(maa_action, "plan_today", return_value=(True, "ok", {"date": "2026-11-21", "sessions": []})), \
+                patch.object(maa_schedule, "schedule_report", return_value={"backend": "daemon", "sessions": {}}), \
+                patch.object(maa_upstream, "status", return_value={"verdict": "ok"}), \
+                patch.object(maa_copilot, "auto_pause_state", return_value={"paused": True}), \
+                patch.object(maa_action, "run_choices", return_value=(True, "ok", {"choices": [{"stage": "1-7"}]})), \
+                patch.object(maa_action, "copilot_stages", return_value=(True, "ok", {"stages": [], "in_activity": False})), \
+                patch.object(maa_action, "config_get", return_value=(True, "ok", {"fields": [], "values": {}})), \
+                patch.object(maa_action, "defaults_show", return_value=(True, "ok", {"stage": "1-7", "tasks": {}})):
+
+            # GET /rescue
+            st, ct, raw = self._req("GET", "/rescue", token="")
+            self.assertEqual(st, 200)
+            self.assertIn("text/html", ct)
+            self.assertIn("Wado's MAA", raw.decode("utf-8"))
+
+            # GET /api/v1/snapshot
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertEqual(
+                set(snap),
+                {
+                    "lock",
+                    "last_run",
+                    "progress",
+                    "today_plan",
+                    "schedule",
+                    "upstream",
+                    "copilot_auto_paused",
+                    "activity",
+                    "scheduler",
+                    "resign",
+                },
+            )
+            self.assertEqual(snap["progress"]["run_id"], run_id)
+            self.assertTrue(snap["copilot_auto_paused"])
+            self.assertEqual(snap["resign"]["status"], "ok")
+
+            # GET /api/v1/choices, /copilot/stages, /config, /defaults
+            self.assertEqual(self._json("GET", "/api/v1/choices")[1], {"choices": [{"stage": "1-7"}]})
+            self.assertEqual(self._json("GET", "/api/v1/copilot/stages")[1], {"stages": [], "in_activity": False})
+            self.assertEqual(self._json("GET", "/api/v1/config")[1], {"fields": [], "values": {}})
+            self.assertEqual(self._json("GET", "/api/v1/defaults")[1], {"stage": "1-7", "tasks": {}})
+
+        # GET /api/v1/history 倒序分页 + 跳过损坏/高版本行
+        st, page1 = self._json("GET", "/api/v1/history?limit=2&offset=0")
+        self.assertEqual(st, 200)
+        self.assertEqual(page1["total"], 3)
+        self.assertTrue(page1["has_more"])
+        self.assertEqual([item["id"] for item in page1["items"]], [cop_id, run_id])
+
+        st, page2 = self._json("GET", "/api/v1/history?limit=2&offset=2")
+        self.assertEqual(st, 200)
+        self.assertFalse(page2["has_more"])
+        self.assertEqual([item["id"] for item in page2["items"]], [old_id])
+
+        # GET /api/v1/runs/<id>/report（日常 + 抄作业 + 旧命名 + 404）
+        self.assertEqual(self._json("GET", f"/api/v1/runs/{run_id}/report")[1]["title"], "日常战报")
+        self.assertEqual(self._json("GET", f"/api/v1/runs/{cop_id}/report")[1]["kind"], "copilot")
+        self.assertEqual(self._json("GET", f"/api/v1/runs/{old_id}/report")[1]["title"], "旧命名战报")
+        self.assertEqual(self._json("GET", "/api/v1/runs/no-such-run/report")[0], 404)
+
+        # GET /api/v1/runs/<id>/screenshot（原图 & thumb=1）
+        st, ct, img = self._req("GET", f"/api/v1/runs/{run_id}/screenshot")
+        self.assertEqual(st, 200)
+        self.assertEqual(ct, "image/png")
+        self.assertEqual(img, TINY_PNG)
+
+        st, ct, thumb = self._req("GET", f"/api/v1/runs/{run_id}/screenshot?thumb=1")
+        self.assertEqual(st, 200)
+        self.assertIn(ct, ("image/jpeg", "image/png"))
+        self.assertTrue(len(thumb) > 0)
+
+        # GET /api/v1/runs/<id>/log?tail=3
+        st, log_res = self._json("GET", f"/api/v1/runs/{run_id}/log?tail=3")
+        self.assertEqual(st, 200)
+        self.assertEqual(log_res["lines"], ["line3", "line4", "line5"])
+        self.assertTrue(log_res["truncated"])
+
+        st, log_full = self._json("GET", f"/api/v1/runs/{run_id}/log?tail=10")
+        self.assertEqual(st, 200)
+        self.assertEqual(len(log_full["lines"]), 5)
+        self.assertFalse(log_full["truncated"])
+
+        # 路径穿越防御
+        for bad_path in (
+            "/api/v1/runs/../report",
+            "/api/v1/runs/..%2fsecrets/report",
+            "/api/v1/runs/%2e%2e/report",
+            "/api/v1/runs/a%2fb/log",
+            "/api/v1/runs/a/b/log",
+        ):
+            st, _ = self._json("GET", bad_path)
+            self.assertEqual(st, 400, f"{bad_path} 应被拒为 400，实际 {st}")
+
+    def test_all_write_endpoints_map_to_controlled_argv_with_ios_source(self) -> None:
+        # 1. plan/stage (manual & auto)
+        st, _ = self._json("POST", "/api/v1/plan/stage", body={"phase": "am", "stage": "1-7"})
+        self.assertEqual(st, 200)
+        st, _ = self._json("POST", "/api/v1/plan/stage", body={"phase": "pm", "auto": True})
+        self.assertEqual(st, 200)
+
+        # 2. plan/skip & plan/fight
+        self.assertEqual(self._json("POST", "/api/v1/plan/skip", body={"phase": "am", "skip": True})[0], 200)
+        self.assertEqual(self._json("POST", "/api/v1/plan/fight", body={"phase": "pm", "fight": False})[0], 200)
+
+        # 3. run/local (with --force)
+        switches = {"fight": True, "infrast": True, "recruit": True, "mall": True, "award": True, "annihilation": False}
+        self.assertEqual(
+            self._json("POST", "/api/v1/run/local", body={"stage": "TL-9", "switches": switches, "force": True})[0],
+            200,
+        )
+
+        # 4. run/cancel 必须携带 run_id；缺失 400；旧 run_id 返回 run_changed
+        self.assertEqual(self._json("POST", "/api/v1/run/cancel", body={})[0], 400)
+        self.assertEqual(self._json("POST", "/api/v1/run/cancel", body={"run_id": ""})[0], 400)
+        st, changed_resp = self._json("POST", "/api/v1/run/cancel", body={"run_id": "old-run-id"})
+        self.assertEqual(st, 200)
+        self.assertEqual(changed_resp["code"], "run_changed")
+        self.assertEqual(self._json("POST", "/api/v1/run/cancel", body={"run_id": "2026-11-21-now-192135"})[0], 200)
+
+        # 5. copilot/go, copilot/auto, copilot/mark
+        self.assertEqual(self._json("POST", "/api/v1/copilot/go", body={"token": "abcdef123456", "candidate_id": 42})[0], 200)
+        self.assertEqual(self._json("POST", "/api/v1/copilot/auto", body={"enabled": False})[0], 200)
+        self.assertEqual(self._json("POST", "/api/v1/copilot/mark", body={"stage": "TL-9", "cleared": True, "mode": "all"})[0], 200)
+        self.assertEqual(self._json("POST", "/api/v1/copilot/mark", body={"stage": "TL-9", "cleared": False})[0], 200)
+
+        # 6. schedule（含 depot_enabled 与热重载回调）
+        self.assertEqual(self._json("POST", "/api/v1/schedule", body={"phase": "am", "time": "08:30", "enabled": True})[0], 200)
+        self.assertEqual(self._json("POST", "/api/v1/schedule", body={"depot_enabled": True})[0], 200)
+        self.assertEqual(self.reloaded_count, 2)
+
+        # 7. defaults, config, upstream/update
+        self.assertEqual(self._json("POST", "/api/v1/defaults", body={"stage": "CE-6"})[0], 200)
+        self.assertEqual(self._json("POST", "/api/v1/defaults", body={"task": "mall", "enabled": False})[0], 200)
+        self.assertEqual(self._json("POST", "/api/v1/config", body={"key": "recruit_times", "value": 4})[0], 200)
+        self.assertEqual(self._json("POST", "/api/v1/config", body={"patch": {"fight_times": 999}})[0], 200)
+        self.assertEqual(self._json("POST", "/api/v1/upstream/update", body={})[0], 200)
+
+        # 8. notify/test
+        with patch.object(maa_notify, "send_test", return_value=(True, "推送已发送", {"backend": "bark"})):
+            st, nres = self._json("POST", "/api/v1/notify/test", body={})
+            self.assertEqual(st, 200)
+            self.assertTrue(nres["ok"])
+            self.assertEqual(nres["code"], "notify_sent")
+
+        # 9. ios/resign
+        st, rres = self._json("POST", "/api/v1/ios/resign?if_due=1", body={})
+        self.assertEqual(st, 501)
+        self.assertEqual(rres["code"], "not_configured")
+
+        # 校验全部写动作均注入 source="ios" 且 argv 精确受控
+        self.assertTrue(all(src == "ios" for _argv, src in self.recorded_actions))
+        argvs = [argv for argv, _src in self.recorded_actions]
+        self.assertIn(["plan", "set-stage", "1-7", "am"], argvs)
+        self.assertIn(["plan", "auto-stage", "pm"], argvs)
+        self.assertIn(["plan", "skip-today", "on", "am"], argvs)
+        self.assertIn(["plan", "fight", "off", "pm"], argvs)
+        self.assertIn(["run", "cancel", "--run-id", "2026-11-21-now-192135"], argvs)
+        self.assertIn(["copilot", "go", "abcdef123456", "42"], argvs)
+        self.assertIn(["copilot", "auto", "off"], argvs)
+        self.assertIn(["copilot", "mark-cleared", "TL-9", "all"], argvs)
+        self.assertIn(["copilot", "unmark", "TL-9"], argvs)
+        self.assertIn(["schedule", "set", "am", "08:30"], argvs)
+        self.assertIn(["schedule", "enable", "am"], argvs)
+        self.assertIn(["schedule", "depot", "on"], argvs)
+        self.assertIn(["defaults", "set", "stage", "CE-6"], argvs)
+        self.assertIn(["defaults", "set", "task", "mall", "off"], argvs)
+        self.assertIn(["config", "set", "recruit_times", "4"], argvs)
+        self.assertIn(["config", "patch", '{"fight_times": 999}'], argvs)
+        self.assertIn(["upstream", "update"], argvs)
+
+    def test_delete_copilot_preview_kills_inflight_subprocess_and_cleans_file(self) -> None:
+        """S2-2 验收项 2：`DELETE /api/v1/copilot/preview/<request_id>` 可靠中止正在搜索的子进程。"""
+        spawned: list[subprocess.Popen[Any]] = []
+        started = threading.Event()
+
+        def slow_spawner(_argv: list[str], _env: dict[str, str]) -> subprocess.Popen[Any]:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            spawned.append(proc)
+            started.set()
+            return proc
+
+        self.ctx.preview_spawner = slow_spawner
+        req_id = "11111111-2222-3333-4444-555555555555"
+        post_result: dict[str, Any] = {}
+
+        def run_post() -> None:
+            st, body = self._json("POST", "/api/v1/copilot/preview", body={"stage": "TL-9", "request_id": req_id})
+            post_result["status"] = st
+            post_result["body"] = body
+
+        t = threading.Thread(target=run_post, daemon=True)
+        t.start()
+        self.assertTrue(started.wait(timeout=3.0), "预览子进程未启动")
+        time.sleep(0.1)
+
+        st, del_resp = self._json("DELETE", f"/api/v1/copilot/preview/{req_id}")
+        self.assertEqual(st, 200)
+        self.assertTrue(del_resp["ok"])
+        self.assertEqual(del_resp["code"], "preview_canceled")
+        self.assertTrue(del_resp["data"]["killed"])
+
+        t.join(timeout=5.0)
+        self.assertFalse(t.is_alive(), "中止后 POST 预览线程未及时返回")
+        self.assertEqual(post_result["status"], 200)
+        self.assertEqual(post_result["body"]["code"], "preview_canceled")
+        self.assertIsNotNone(spawned[0].poll(), "被取消的预览子进程仍存活")
+
+        # 已完成预览文件也可通过 DELETE 清理
+        preview_token = "a1b2c3d4e5f6"
+        preview_file = self.previews_dir / f"{preview_token}.json"
+        preview_file.write_text("{}", encoding="utf-8")
+        st2, del2 = self._json("DELETE", f"/api/v1/copilot/preview/{preview_token}")
+        self.assertEqual(st2, 200)
+        self.assertEqual(del2["code"], "preview_deleted")
+        self.assertFalse(preview_file.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

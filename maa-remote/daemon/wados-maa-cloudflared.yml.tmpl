@@ -1,0 +1,11 @@
+tunnel: __TUNNEL_ID__
+credentials-file: __CREDENTIALS_FILE__
+# 本机运行 Sparkle/mihomo TUN（fake-ip），QUIC(UDP 7844) 可能被拦，固定用 http2（P0 S0-2 实证）
+protocol: http2
+
+ingress:
+  - hostname: __HOSTNAME__
+    service: https://127.0.0.1:__API_PORT__
+    originRequest:
+      caPool: __TLS_CERT_PATH__
+  - service: http_status:404

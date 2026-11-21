@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Wado's MAA 应急入口</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --fg: #111827;
+    --muted: #6b7280;
+    --border: #e5e7eb;
+    --accent: #2563eb;
+    --danger: #dc2626;
+    --ok: #16a34a;
+    --warn: #d97706;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #181b22;
+      --fg: #f3f4f6;
+      --muted: #9ca3af;
+      --border: #2a2f3a;
+      --accent: #3b82f6;
+      --danger: #ef4444;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    line-height: 1.5;
+  }
+  .wrap { max-width: 520px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+  .sub { margin: 2px 0 0; font-size: 13px; color: var(--muted); }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px 16px;
+  }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .label { font-size: 13px; color: var(--muted); }
+  .value { font-size: 14px; font-weight: 600; text-align: right; word-break: break-all; }
+  .kv { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+  input[type="password"], input[type="text"] {
+    width: 100%;
+    padding: 11px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--fg);
+    font-size: 15px;
+    margin-top: 8px;
+  }
+  .check {
+    display: flex; align-items: center; gap: 8px;
+    margin-top: 10px; font-size: 13px; color: var(--muted);
+  }
+  .actions { display: grid; grid-template-columns: 1fr; gap: 10px; margin-top: 12px; }
+  button {
+    appearance: none;
+    border: 0;
+    border-radius: 11px;
+    padding: 12px 14px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    color: #fff;
+    background: var(--accent);
+    transition: opacity 0.15s;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+  button.danger { background: var(--danger); }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; background: var(--border); color: var(--fg);
+  }
+  .badge.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+  .badge.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+  .badge.danger { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+  .banner {
+    padding: 10px 12px; border-radius: 10px; font-size: 13px; display: none;
+    border: 1px solid var(--border); white-space: pre-wrap; word-break: break-word;
+  }
+  .banner.show { display: block; }
+  .banner.ok { border-color: var(--ok); color: var(--ok); }
+  .banner.err { border-color: var(--danger); color: var(--danger); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>Wado's MAA 应急入口</h1>
+    <p class="sub">仅提供运行态查看、带 run_id 紧急停止与 iOS 无线续签。</p>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <strong>访问令牌（Full Bearer Token）</strong>
+      <span id="authBadge" class="badge">未验证</span>
+    </div>
+    <input id="tokenInput" type="password" autocomplete="off" spellcheck="false" placeholder="粘贴 Full Bearer Token（绝不会写入 URL）">
+    <label class="check">
+      <input id="rememberSession" type="checkbox">
+      仅在当前标签页会话内暂存（sessionStorage，关闭标签即清空）
+    </label>
+    <div class="actions">
+      <button id="refreshBtn" type="button">刷新状态</button>
+    </div>
+  </div>
+
+  <div id="feedback" class="banner" role="status" aria-live="polite"></div>
+
+  <div class="card">
+    <div class="row">
+      <strong>当前运行状态</strong>
+      <span id="runBadge" class="badge">—</span>
+    </div>
+    <div class="kv">
+      <div class="row"><span class="label">锁持有者</span><span id="lockHolder" class="value">—</span></div>
+      <div class="row"><span class="label">当前 run_id</span><span id="runId" class="value mono">—</span></div>
+      <div class="row"><span class="label">当前进度</span><span id="progressText" class="value">—</span></div>
+      <div class="row"><span class="label">最近场次</span><span id="lastRunText" class="value">—</span></div>
+      <div class="row"><span class="label">刷新时间</span><span id="updatedAt" class="value mono">—</span></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <strong>应急操作</strong>
+    <div class="actions">
+      <button id="cancelBtn" class="danger" type="button" disabled>紧急停止当前场次</button>
+      <button id="resignBtn" class="secondary" type="button">触发 iOS 无线续签</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var STORAGE_KEY = "wados_maa_rescue_token";
+  var tokenInput = document.getElementById("tokenInput");
+  var rememberBox = document.getElementById("rememberSession");
+  var authBadge = document.getElementById("authBadge");
+  var runBadge = document.getElementById("runBadge");
+  var lockHolder = document.getElementById("lockHolder");
+  var runIdEl = document.getElementById("runId");
+  var progressEl = document.getElementById("progressText");
+  var lastRunEl = document.getElementById("lastRunText");
+  var updatedAtEl = document.getElementById("updatedAt");
+  var feedbackEl = document.getElementById("feedback");
+  var refreshBtn = document.getElementById("refreshBtn");
+  var cancelBtn = document.getElementById("cancelBtn");
+  var resignBtn = document.getElementById("resignBtn");
+
+  var state = { token: "", currentRunId: "", cancelable: false };
+
+  try {
+    var saved = window.sessionStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      state.token = saved;
+      tokenInput.value = saved;
+      rememberBox.checked = true;
+    }
+  } catch (_) {}
+
+  function syncToken() {
+    state.token = (tokenInput.value || "").trim();
+    try {
+      if (rememberBox.checked && state.token) {
+        window.sessionStorage.setItem(STORAGE_KEY, state.token);
+      } else {
+        window.sessionStorage.removeItem(STORAGE_KEY);
+      }
+    } catch (_) {}
+    return state.token;
+  }
+
+  tokenInput.addEventListener("input", syncToken);
+  rememberBox.addEventListener("change", syncToken);
+
+  function showFeedback(ok, text) {
+    feedbackEl.textContent = text;
+    feedbackEl.className = "banner show " + (ok ? "ok" : "err");
+  }
+
+  function setBadge(el, cls, text) {
+    el.className = "badge" + (cls ? " " + cls : "");
+    el.textContent = text;
+  }
+
+  async function apiFetch(path, options) {
+    var token = syncToken();
+    if (!token) {
+      setBadge(authBadge, "danger", "缺少令牌");
+      showFeedback(false, "请先输入 Full Bearer Token。");
+      return null;
+    }
+    var opts = Object.assign({ method: "GET" }, options || {});
+    opts.headers = Object.assign(
+      { "Authorization": "Bearer " + token, "Accept": "application/json" },
+      opts.headers || {}
+    );
+    var resp;
+    try {
+      resp = await fetch(path, opts);
+    } catch (err) {
+      showFeedback(false, "网络请求失败：" + (err && err.message ? err.message : String(err)));
+      return null;
+    }
+    var body = null;
+    try {
+      body = await resp.json();
+    } catch (_) {
+      body = null;
+    }
+    if (resp.status === 401) {
+      setBadge(authBadge, "danger", "鉴权失败");
+      showFeedback(false, (body && body.message) || "Token 无效或已失效（401）。");
+      return null;
+    }
+    if (resp.status === 403) {
+      setBadge(authBadge, "warn", "权限不足");
+      showFeedback(false, (body && body.message) || "当前 Token 无权访问该接口，请使用 Full Token（403）。");
+      return null;
+    }
+    setBadge(authBadge, "ok", "已验证");
+    return { status: resp.status, ok: resp.ok, body: body };
+  }
+
+  function formatProgress(progress) {
+    if (!progress) return "无";
+    var cur = progress.current || "";
+    var steps = Array.isArray(progress.steps) ? progress.steps : [];
+    var active = steps.find(function (s) { return s && (s.key === cur || s.state === "running"); });
+    var label = active ? active.label : (progress.status || "—");
+    var fight = progress.fight;
+    if (fight && typeof fight.done === "number") {
+      var est = typeof fight.estimate === "number" ? "/" + fight.estimate : "";
+      return label + "（已完成 " + fight.done + est + " 次）";
+    }
+    return label;
+  }
+
+  function renderSnapshot(snap) {
+    var lock = snap && snap.lock ? snap.lock : null;
+    var lastRun = snap && snap.last_run ? snap.last_run : null;
+    var progress = snap && snap.progress ? snap.progress : null;
+
+    if (lock) {
+      var holder = lock.holder || "unknown";
+      var detail = lock.detail ? " · " + lock.detail : "";
+      lockHolder.textContent = holder + detail;
+      state.currentRunId = String(lock.run_id || "");
+      state.cancelable = (holder === "daily" || holder === "copilot") && Boolean(state.currentRunId);
+      runIdEl.textContent = state.currentRunId || "（未提供 run_id）";
+      setBadge(runBadge, "warn", "运行中");
+    } else {
+      lockHolder.textContent = "空闲";
+      state.currentRunId = "";
+      state.cancelable = false;
+      runIdEl.textContent = "—";
+      setBadge(runBadge, "ok", "空闲");
+    }
+    cancelBtn.disabled = !state.cancelable;
+    progressEl.textContent = formatProgress(progress);
+
+    if (lastRun && lastRun.status) {
+      var phase = lastRun.phase || "";
+      var stage = (lastRun.plan && lastRun.plan.stage) || lastRun.stage || "";
+      var tail = stage ? " · " + stage : "";
+      lastRunEl.textContent = lastRun.status + (phase ? "（" + phase + tail + "）" : "");
+    } else {
+      lastRunEl.textContent = "暂无记录";
+    }
+    updatedAtEl.textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+  }
+
+  async function refreshStatus() {
+    refreshBtn.disabled = true;
+    try {
+      var res = await apiFetch("/api/v1/snapshot");
+      if (!res) return;
+      if (!res.ok || !res.body) {
+        showFeedback(false, (res.body && res.body.message) || ("读取快照失败（HTTP " + res.status + "）"));
+        return;
+      }
+      renderSnapshot(res.body);
+      showFeedback(true, "状态已刷新。");
+    } finally {
+      refreshBtn.disabled = false;
+    }
+  }
+
+  async function cancelCurrentRun() {
+    if (!state.currentRunId) {
+      showFeedback(false, "当前没有可停止的 run_id，请先刷新状态。");
+      return;
+    }
+    if (!window.confirm("确认停止当前场次？\nrun_id: " + state.currentRunId + "\n已打完的进度不受影响，游戏将被关闭。")) {
+      return;
+    }
+    cancelBtn.disabled = true;
+    try {
+      var res = await apiFetch("/api/v1/run/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ run_id: state.currentRunId })
+      });
+      if (!res) return;
+      var msg = (res.body && res.body.message) || ("返回 HTTP " + res.status);
+      showFeedback(Boolean(res.body && res.body.ok), msg);
+      await refreshStatus();
+    } finally {
+      cancelBtn.disabled = !state.cancelable;
+    }
+  }
+
+  async function triggerResign() {
+    if (!window.confirm("确认在 Mac mini 上触发 iOS App 无线续签？")) {
+      return;
+    }
+    resignBtn.disabled = true;
+    try {
+      var res = await apiFetch("/api/v1/ios/resign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
+      if (!res) return;
+      var msg = (res.body && res.body.message) || ("返回 HTTP " + res.status);
+      showFeedback(Boolean(res.body && res.body.ok), msg);
+    } finally {
+      resignBtn.disabled = false;
+    }
+  }
+
+  refreshBtn.addEventListener("click", refreshStatus);
+  cancelBtn.addEventListener("click", cancelCurrentRun);
+  resignBtn.addEventListener("click", triggerResign);
+
+  if (state.token) {
+    refreshStatus();
+  }
+})();
+</script>
+</body>
+</html>

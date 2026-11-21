@@ -238,6 +238,8 @@ SCRIPT_NAMES = (
     "maa_settings.py",
     "maa_upstream.py",
     "maa_notify.py",
+    "maa_tls.py",
+    "maa_api.py",
     "maa_daemon.py",
 )
 # swiftc 编译产物：线上是二进制，`--check` 只查存在。
@@ -397,16 +399,60 @@ def deploy_daemon_files(target_home: Path) -> None:
         )
         write_text(daemon_dir / plist_src.name, rendered, 0o600)
 
+    rescue_src = ROOT / "daemon" / "rescue.html"
+    if rescue_src.is_file():
+        copy_file(rescue_src, daemon_dir / "rescue.html", 0o600)
+
+    cf_tmpl = ROOT / "daemon" / "wados-maa-cloudflared.yml.tmpl"
+    cf_yml = daemon_dir / "wados-maa-cloudflared.yml"
+    if cf_tmpl.is_file():
+        dcfg = load_json(cfg_path, {})
+        api_port = int(dcfg.get("api_port") or 18170) if isinstance(dcfg, dict) else 18170
+        remote_url = str(dcfg.get("remote_url") or "https://maa.luxraykit.com") if isinstance(dcfg, dict) else "https://maa.luxraykit.com"
+        hostname = remote_url.replace("https://", "").replace("http://", "").split("/", 1)[0] or "maa.luxraykit.com"
+        tunnel_id = "dcd1aac1-ff11-4a1f-b91c-9fb37b045716"
+        creds = USER_HOME / ".cloudflared" / f"{tunnel_id}.json"
+        rendered_yml = (
+            cf_tmpl.read_text(encoding="utf-8")
+            .replace("__TUNNEL_ID__", tunnel_id)
+            .replace("__CREDENTIALS_FILE__", str(creds))
+            .replace("__HOSTNAME__", hostname)
+            .replace("__API_PORT__", str(api_port))
+            .replace("__TLS_CERT_PATH__", str(daemon_dir / "tls" / "cert.pem"))
+        )
+        write_text(cf_yml, rendered_yml, 0o600)
+
+    cf_plist_src = ROOT / "daemon" / "io.github.ffkiyo7.wados-maa.cloudflared.plist"
+    if cf_plist_src.is_file():
+        rendered_cf_plist = (
+            cf_plist_src.read_text(encoding="utf-8")
+            .replace("__CLOUDFLARED_CONFIG__", str(cf_yml))
+            .replace("__LOGS_DIR__", str(logs_dir))
+        )
+        write_text(daemon_dir / cf_plist_src.name, rendered_cf_plist, 0o600)
+
 
 def check_standalone(target_home: Path) -> dict[str, Any]:
-    """独立模式 `--check`（只读）：核对脚本、编译产物、maa-cli 配置与 daemon.json，不碰 Hermes。"""
+    """独立模式 `--check`（只读）：核对脚本、编译产物、maa-cli 配置与 daemon 产物，不碰 Hermes。"""
     script_pairs = [(ROOT / "scripts" / name, target_home / "scripts" / name) for name in SCRIPT_NAMES]
     exists_checked = [target for _source, target in script_pairs]
     exists_checked.extend(target_home / "scripts" / name for name in (*COMPILED_HELPERS, LAUNCHER_NAME))
     exists_checked.extend(target for _source, target in maa_config_file_pairs())
-    exists_checked.append(target_home / "daemon" / "daemon.json")
+    exists_checked.extend(
+        [
+            target_home / "daemon" / "daemon.json",
+            target_home / "daemon" / "rescue.html",
+            target_home / "daemon" / "wados-maa-cloudflared.yml",
+            target_home / "daemon" / "io.github.ffkiyo7.wados-maa.cloudflared.plist",
+        ]
+    )
     missing = [str(path) for path in exists_checked if not path.is_file()]
-    mismatched = content_mismatches([*script_pairs, *maa_config_content_checked_pairs()])
+    content_pairs = [
+        *script_pairs,
+        *maa_config_content_checked_pairs(),
+        (ROOT / "daemon" / "rescue.html", target_home / "daemon" / "rescue.html"),
+    ]
+    mismatched = content_mismatches(content_pairs)
     ok = not missing and not mismatched
     return {
         "ok": ok,

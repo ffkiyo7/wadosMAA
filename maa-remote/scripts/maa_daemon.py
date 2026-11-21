@@ -30,12 +30,15 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+import maa_api
+import maa_tls
 from maa_common import (
     BEIJING,
     DAEMON_DIR,
@@ -88,6 +91,17 @@ def default_daemon_config() -> dict[str, Any]:
         "bark_base_url": "https://api.day.app",
         "bark_icon_url": "",
         "depot_enabled": False,
+        "api_enabled": True,
+        "api_host": "0.0.0.0",
+        "api_port": 18170,
+        "lan_ip": "192.168.50.2",
+        "remote_url": "https://maa.luxraykit.com",
+        "allowed_cidrs": list(maa_api.DEFAULT_ALLOWED_CIDRS),
+        "tls_cert_path": "",
+        "tls_key_path": "",
+        "tls_handshake_timeout": maa_api.DEFAULT_HANDSHAKE_TIMEOUT,
+        "tls_warn_days": maa_tls.DEFAULT_WARN_DAYS,
+        "sse_keepalive_seconds": maa_api.DEFAULT_SSE_KEEPALIVE_SECONDS,
     }
 
 
@@ -484,12 +498,22 @@ class DaemonScheduler:
         self.state.save(self.state_path, config, daemon_cfg, now)
 
 
-def run_forever(*, poll_interval: float = 10.0) -> int:
+def _resolve_tls_paths(daemon_cfg: Mapping[str, Any]) -> tuple[Path, Path]:
+    raw_cert = str(daemon_cfg.get("tls_cert_path") or "").strip()
+    raw_key = str(daemon_cfg.get("tls_key_path") or "").strip()
+    cert_path = Path(raw_cert).expanduser() if raw_cert else DAEMON_DIR / "tls" / "cert.pem"
+    key_path = Path(raw_key).expanduser() if raw_key else DAEMON_DIR / "tls" / "key.pem"
+    return cert_path, key_path
+
+
+def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
     ensure_private_dir(DAEMON_DIR)
     atomic_write_text(DAEMON_PID_PATH, f"{os.getpid()}\n", mode=0o600)
     scheduler = DaemonScheduler()
     stop_flag = False
     reload_flag = False
+    api_server: maa_api.SafeTLSThreadingHTTPServer | None = None
+    api_thread: threading.Thread | None = None
 
     def _on_stop(_signum: int, _frame: object) -> None:
         nonlocal stop_flag
@@ -502,6 +526,58 @@ def run_forever(*, poll_interval: float = 10.0) -> int:
     signal.signal(signal.SIGTERM, _on_stop)
     signal.signal(signal.SIGINT, _on_stop)
     signal.signal(signal.SIGHUP, _on_reload)
+
+    daemon_cfg = load_daemon_config(DAEMON_CONFIG_PATH)
+    cert_path, key_path = _resolve_tls_paths(daemon_cfg)
+    if enable_api and bool(daemon_cfg.get("api_enabled", True)):
+        if cert_path.is_file() and key_path.is_file():
+            try:
+                allowed = daemon_cfg.get("allowed_cidrs")
+                allowed_cidrs = (
+                    tuple(str(item) for item in allowed)
+                    if isinstance(allowed, list) and allowed
+                    else maa_api.DEFAULT_ALLOWED_CIDRS
+                )
+                ctx = maa_api.APIContext.from_default_paths(
+                    allowed_cidrs=allowed_cidrs,
+                    handshake_timeout=float(daemon_cfg.get("tls_handshake_timeout", maa_api.DEFAULT_HANDSHAKE_TIMEOUT)),
+                    sse_keepalive_seconds=float(
+                        daemon_cfg.get("sse_keepalive_seconds", maa_api.DEFAULT_SSE_KEEPALIVE_SECONDS)
+                    ),
+                    on_schedule_reload=scheduler.reload,
+                )
+                api_host = str(daemon_cfg.get("api_host") or "0.0.0.0")
+                api_port = int(daemon_cfg.get("api_port") or 18170)
+                api_server = maa_api.create_server(
+                    api_host,
+                    api_port,
+                    ctx,
+                    cert_path=cert_path,
+                    key_path=key_path,
+                )
+                api_thread = threading.Thread(
+                    target=api_server.serve_forever,
+                    name="wados-maa-api",
+                    daemon=True,
+                )
+                api_thread.start()
+                print(
+                    f"wados-maa-api listening on https://{api_host}:{api_port} cert={cert_path}",
+                    flush=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — (a) API 启动异常不阻断内置调度器运行
+                print(
+                    f"wados-maa-api failed to start: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                api_server = None
+        else:
+            print(
+                f"wados-maa-api skipped: TLS cert/key not found ({cert_path}); run daemon/init_daemon.py first",
+                file=sys.stderr,
+                flush=True,
+            )
 
     print(
         f"wados-maa-daemon started pid={os.getpid()} lock={RUN_LOCK_PATH}",
@@ -517,6 +593,8 @@ def run_forever(*, poll_interval: float = 10.0) -> int:
                     pass
                 try:
                     scheduler.reload()
+                    if api_server is not None:
+                        api_server.sse_hub.notify_changed()
                     print("wados-maa-daemon reloaded schedule", flush=True)
                 except Exception as exc:  # noqa: BLE001 — (a) 守护进程顶层兜底，重载异常不退出
                     print(f"reload failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
@@ -524,6 +602,17 @@ def run_forever(*, poll_interval: float = 10.0) -> int:
                 scheduler.tick()
             except Exception as exc:  # noqa: BLE001 — (a) 守护进程顶层兜底，单拍异常不退出
                 print(f"scheduler tick failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            try:
+                cur_cfg = load_daemon_config(DAEMON_CONFIG_PATH)
+                cur_cert, _cur_key = _resolve_tls_paths(cur_cfg)
+                if cur_cert.is_file():
+                    maa_tls.check_cert_expiry_and_notify(
+                        cur_cert,
+                        DAEMON_DIR / "tls_check.json",
+                        warn_days=int(cur_cfg.get("tls_warn_days", maa_tls.DEFAULT_WARN_DAYS)),
+                    )
+            except Exception as exc:  # noqa: BLE001 — (c) 每日 TLS 到期巡检异常不阻断调度循环
+                print(f"tls cert check failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             # 短步进睡眠，保证 SIGHUP/SIGTERM 1 秒内响应。
             deadline = time.monotonic() + max(1.0, poll_interval)
             while not stop_flag and not reload_flag and time.monotonic() < deadline:
@@ -531,6 +620,14 @@ def run_forever(*, poll_interval: float = 10.0) -> int:
                     break
                 time.sleep(min(1.0, max(0.1, deadline - time.monotonic())))
     finally:
+        if api_server is not None:
+            try:
+                api_server.shutdown()
+                api_server.server_close()
+            except Exception as exc:  # noqa: BLE001 — (b) 关闭 API 服务端清理路径
+                print(f"api shutdown warning: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        if api_thread is not None:
+            api_thread.join(timeout=3.0)
         # 优雅退出守护进程时绝不杀运行中的业务子进程（已 start_new_session=True）。
         try:
             if DAEMON_PID_PATH.is_file() and DAEMON_PID_PATH.read_text(encoding="utf-8").strip() == str(os.getpid()):
@@ -548,6 +645,8 @@ def main(argv: list[str] | None = None) -> int:
         launched = scheduler.tick()
         print(json.dumps({"ok": True, "launched": launched}, ensure_ascii=False))
         return 0
+    if args == ["--no-api"]:
+        return run_forever(enable_api=False)
     return run_forever()
 
 

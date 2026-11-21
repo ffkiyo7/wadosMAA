@@ -5,22 +5,22 @@
 
 [tool.ruff]
 target-version = "py311"
-include = ["scripts/*.py", "deploy.py", "tests/*.py"]
+include = ["scripts/*.py", "daemon/*.py", "deploy.py", "tests/*.py"]
 
 [tool.ruff.lint]
 # E4/E7/E9：import、语句、语法类错误；F：pyflakes；BLE：裸 except Exception。不开 E501（行宽）。
 select = ["E4", "E7", "E9", "F", "BLE"]
 
 [tool.pyright]
-include = ["scripts", "deploy.py", "tests"]
+include = ["scripts", "daemon", "deploy.py", "tests"]
 exclude = ["**/__pycache__"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
-extraPaths = ["scripts", "tests"]
+extraPaths = ["scripts", "daemon", "tests"]
 # 测试里 `ledger["stages"]` / `result["x"]` / `found.endswith(...)` 这种访问本身就是断言：
 # 键不在 → KeyError、值是 None → TypeError / AttributeError，用例当场红，正是想要的效果。
 # 所以只在 tests/ 关掉「TypedDict 键可能不存在」和「可能是 None」这三条；scripts/ 照常全开。
 executionEnvironments = [
-  { root = "tests", extraPaths = [".", "scripts", "tests"], reportTypedDictNotRequiredAccess = "none", reportOptionalSubscript = "none", reportOptionalMemberAccess = "none" },
+  { root = "tests", extraPaths = [".", "scripts", "daemon", "tests"], reportTypedDictNotRequiredAccess = "none", reportOptionalSubscript = "none", reportOptionalMemberAccess = "none" },
   { root = "." },
 ]
