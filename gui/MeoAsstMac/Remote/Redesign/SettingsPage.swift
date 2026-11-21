@@ -67,6 +67,10 @@ struct SettingsPage: View {
                             (value.string ?? "").isEmpty ? "不挪游戏窗口" : nil
                         }
                         ConfigFieldRow(key: "disable_stage_manager_during_run")
+                        FormRow(title: "游戏资源版本", sub: resourceUpdated, help: "首页在有新版本、今天还没更新时会提示") {
+                            Text(store.upstream?.versions.maaCore ?? "未知")
+                                .foregroundStyle(WM.f2).monospacedDigit().textSelection(.enabled)
+                        }
                     }
                     .disabled(store.readOnly)
                     // copy-guard: developer
@@ -91,6 +95,12 @@ struct SettingsPage: View {
             }
             .frame(minWidth: 480, minHeight: 360)
         }
+    }
+
+    /// 「11 月 10 日 08:03 更新」；没成功更新过就不写。
+    private var resourceUpdated: String? {
+        guard let date = store.upstream?.lastSuccessAt.flatMap(RunLock.parseISO) else { return nil }
+        return "\(Beijing.monthDay(date)) \(RunLock.beijingClock(date)) 更新"
     }
 
     private var backgroundText: String {

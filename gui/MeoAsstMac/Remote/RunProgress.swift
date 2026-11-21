@@ -64,6 +64,15 @@ import Observation
     private(set) var notes: [Note] = []
     /// 预计几点结束；没有历史耗时或已结束时是 nil。
     private(set) var eta: Date?
+    /// 进度文件里的 7 格（计划里没有的也在，是 `skipped`）；旧版 maa-remote 退回 `steps`。首页进行中的场卡用。
+    private(set) var allSteps: [Step] = []
+    /// 刷理智时的理智（`fight.sanity`）；读不到是 nil。
+    private(set) var sanity: (current: Int, max: Int)?
+    /// 已掉落（`fight.drops`）。
+    private(set) var drops: [RunFightResult.Drop] = []
+
+    /// 首页步骤条：有进度文件的 7 格就用它，否则用计划里的那几格。
+    var boardSteps: [Step] { allSteps.isEmpty ? steps : allSteps }
 
     /// 有一场在跟（或刚跟完）。
     var hasRun: Bool { runKey != nil }
@@ -166,6 +175,13 @@ import Observation
         progressURL = nil
         plannedKeys = []
         resetFights()
+        resetBoard()
+    }
+
+    private func resetBoard() {
+        allSteps = []
+        sanity = nil
+        drops = []
     }
 
     private func begin(run: [String: JSONValue], key: String, started: Date?) {
@@ -183,6 +199,7 @@ import Observation
         eta = nil
         progressURL = nil
         resetFights()
+        resetBoard()
         let annihilation = run["plan"]?.object?["annihilation"]?.bool == true
         parser = RunStageParser(copilot: LastRunText.isCopilot(run), annihilationPlanned: annihilation)
         resetRead()
@@ -360,12 +377,14 @@ import Observation
         }
         let now = Date()
         var fresh: [Step] = []
+        var board: [Step] = []
         for item in file["steps"]?.array ?? [] {
             guard let object = item.object, let raw = object["key"]?.string else { continue }
             let key = Self.fileKeys[raw] ?? raw
-            if !plannedKeys.isEmpty, !plannedKeys.contains(key) { continue }
             let label = object["label"]?.string ?? key
             let state = Step.State(rawValue: object["state"]?.string ?? "") ?? .pending
+            board.append(Step(key: key, label: label, state: state))
+            if !plannedKeys.isEmpty, !plannedKeys.contains(key) { continue }
             let old = steps.first { $0.key == key }?.state
             if state != old {
                 let at = object["started_at"]?.string.flatMap(RunLock.parseISO)
@@ -379,6 +398,7 @@ import Observation
             fresh.append(Step(key: key, label: label, state: state))
         }
         if !fresh.isEmpty { steps = fresh }
+        if board != allSteps { allSteps = board }
 
         if let raw = file["current"]?.string, let step = steps.first(where: { $0.key == (Self.fileKeys[raw] ?? raw) }) {
             current = RunStage(key: step.key, label: step.label, doing: Self.doing(step.key, step.label))
@@ -390,6 +410,14 @@ import Observation
         fights = Int(fight["done"]?.number ?? 0)
         fightTotal = fight["estimate"]?.number.map { Int($0) }
         fightTotalExact = steps.first { $0.key == "Fight" }?.state == .done
+        let sanityObject = fight["sanity"]?.object
+        if let current = sanityObject?["current"]?.number, let max = sanityObject?["max"]?.number, max > 0 {
+            sanity = (Int(current), Int(max))
+        } else {
+            sanity = nil
+        }
+        let newDrops = RunFightResult.drops(fight)
+        if newDrops != drops { drops = newDrops }
 
         let all = (file["notes"]?.array ?? []).enumerated().compactMap { index, item -> Note? in
             guard let object = item.object, let text = object["text"]?.string, !text.isEmpty else { return nil }

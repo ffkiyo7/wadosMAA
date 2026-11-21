@@ -408,3 +408,32 @@ struct CopilotRules: View {
         return SessionLead.windows(store, minutes: minutes).map { "\($0) \(what)" }
     }
 }
+
+enum CopilotText {
+    /// 去掉 status_text 前面的 emoji。
+    static func status(_ row: CopilotStageRow) -> String {
+        let text = row.statusText ?? ""
+        return text.drop { !$0.isLetter && !$0.isNumber && $0 != "（" }.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// 进不去的关（maa-remote 的 no_nav / not_indexed）统一一个说法，不透出原因原文。
+    static func unsupported(_ row: CopilotStageRow) -> Bool {
+        row.nav == false || row.status == "no_nav" || row.status == "not_indexed"
+    }
+
+    static func state(_ row: CopilotStageRow) -> String {
+        if unsupported(row) { return "暂不支持自动前往" }
+        return status(row).isEmpty ? "" : status(row)
+    }
+
+    /// maa-remote 给的原因；进不去的关、没有原因时不占一行。
+    static func reason(_ row: CopilotStageRow) -> String? {
+        guard !unsupported(row), let reason = row.reason, !reason.isEmpty else { return nil }
+        return reason
+    }
+
+    static func detail(_ row: CopilotStageRow) -> String {
+        if unsupported(row) { return "暂不支持自动前往" }
+        return reason(row) ?? (row.status == "cleared" ? "已通" : "可以去搜作业")
+    }
+}

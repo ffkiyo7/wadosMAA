@@ -294,7 +294,7 @@ struct SavedChange: Identifiable, Equatable, Sendable {
     /// 正在改计划的那一场（`am` / `pm`）。
     private(set) var planChanging: String?
     private(set) var lastRun: [String: JSONValue] = [:]
-    /// 最近几场（`runs/index.jsonl`），最新的在前；还没有记录就是空。
+    /// 场次索引（`runs/index.jsonl`），最新的在前；还没有记录就是空。首页场卡和近况热力格用。
     private(set) var recentRuns: [RunRecord] = []
     private(set) var lockHolder: LockHolder?
     /// 自动抄作业暂停了（`copilot/auto_pause.json` 的 `paused`，DEV_GUIDE §12.3）。手动抄作业不受影响。
