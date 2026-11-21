@@ -870,23 +870,43 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
     def _should_close_connection(self) -> bool:
         if self.close_connection:
             return True
+        if getattr(self, "_is_chunked", False) and not getattr(self, "_body_consumed", False):
+            return True
         return getattr(self, "_declared_body_len", 0) > 0 and not getattr(self, "_body_consumed", False)
 
     def _begin_request(self, *, allow_body: bool) -> bool:
-        """校验 HTTP/1.1 请求帧边界：拒绝 Transfer-Encoding、重复/非法 Content-Length，标记未消费请求体。"""
+        """校验 HTTP/1.1 请求帧边界：仅允许单一 Transfer-Encoding: chunked（且禁与 CL 并存）、拒绝非法 CL，标记未消费请求体。"""
         self._body_consumed = False
         self._declared_body_len = 0
+        self._is_chunked = False
 
-        if self.headers.get_all("Transfer-Encoding"):
+        te_values = self.headers.get_all("Transfer-Encoding") or []
+        cl_values = self.headers.get_all("Content-Length") or []
+
+        if te_values and cl_values:
             self.close_connection = True
             self._send_error_json(
                 HTTPStatus.BAD_REQUEST,
-                "unsupported_transfer_encoding",
-                "不支持 Transfer-Encoding 请求。",
+                "bad_request",
+                "不允许同时携带 Transfer-Encoding 与 Content-Length。",
             )
             return False
 
-        cl_values = self.headers.get_all("Content-Length") or []
+        if te_values:
+            if len(te_values) != 1 or te_values[0].strip().lower() != "chunked":
+                self.close_connection = True
+                self._send_error_json(
+                    HTTPStatus.BAD_REQUEST,
+                    "unsupported_transfer_encoding",
+                    "仅支持单一 Transfer-Encoding: chunked 请求。",
+                )
+                return False
+            self._is_chunked = True
+            if not allow_body:
+                # GET / DELETE 不会读取分块请求体，响应后必须关闭连接以防剩余字节被当作下一条请求。
+                self.close_connection = True
+            return True
+
         if len(cl_values) > 1:
             self.close_connection = True
             self._send_error_json(HTTPStatus.BAD_REQUEST, "bad_request", "不允许多个 Content-Length 头。")
@@ -941,19 +961,69 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
             body["detail"] = detail
         self._send_json(status, body)
 
+    def _read_chunked_body(self) -> tuple[bytes | None, tuple[int, str, str] | None]:
+        """按 RFC 9112 严格解析 `Transfer-Encoding: chunked`（适配 cloudflared HTTP/2 空体/分块 POST）。"""
+        max_line_bytes = 1024
+        max_trailer_lines = 16
+        buf = bytearray()
+        while True:
+            size_line = self.rfile.readline(max_line_bytes + 1)
+            if not size_line or len(size_line) > max_line_bytes or not size_line.endswith(b"\r\n"):
+                self.close_connection = True
+                return None, (HTTPStatus.BAD_REQUEST, "bad_request", "无效的分块请求体。")
+            size_part = size_line[:-2].split(b";", 1)[0].strip()
+            if not size_part or len(size_part) > 16 or not all(c in b"0123456789abcdefABCDEF" for c in size_part):
+                self.close_connection = True
+                return None, (HTTPStatus.BAD_REQUEST, "bad_request", "无效的分块长度。")
+            chunk_size = int(size_part, 16)
+            if chunk_size == 0:
+                trailer_count = 0
+                while True:
+                    trailer = self.rfile.readline(max_line_bytes + 1)
+                    if not trailer or len(trailer) > max_line_bytes or not trailer.endswith(b"\r\n"):
+                        self.close_connection = True
+                        return None, (HTTPStatus.BAD_REQUEST, "bad_request", "无效的分块结尾。")
+                    if trailer == b"\r\n":
+                        self._body_consumed = True
+                        return bytes(buf), None
+                    trailer_count += 1
+                    if trailer_count > max_trailer_lines:
+                        self.close_connection = True
+                        return None, (HTTPStatus.BAD_REQUEST, "bad_request", "分块拖尾头过多。")
+            if len(buf) + chunk_size > MAX_REQUEST_BODY_BYTES:
+                self.close_connection = True
+                return None, (HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "payload_too_large", "请求体超过大小限制。")
+            chunk = self.rfile.read(chunk_size)
+            if len(chunk) < chunk_size:
+                self.close_connection = True
+                return None, (HTTPStatus.BAD_REQUEST, "bad_request", "分块请求体不完整。")
+            crlf = self.rfile.read(2)
+            if crlf != b"\r\n":
+                self.close_connection = True
+                return None, (HTTPStatus.BAD_REQUEST, "bad_request", "分块缺少换行分隔符。")
+            buf.extend(chunk)
+
     def _read_json_body(self) -> tuple[dict[str, Any] | None, tuple[int, str, str] | None]:
-        length = getattr(self, "_declared_body_len", 0)
-        if length < 0 or length > MAX_REQUEST_BODY_BYTES:
-            self.close_connection = True
-            return None, (HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "payload_too_large", "请求体超过大小限制。")
-        if length == 0:
+        if getattr(self, "_is_chunked", False):
+            raw, err = self._read_chunked_body()
+            if err is not None:
+                return None, err
+            assert raw is not None
+            if not raw:
+                return {}, None
+        else:
+            length = getattr(self, "_declared_body_len", 0)
+            if length < 0 or length > MAX_REQUEST_BODY_BYTES:
+                self.close_connection = True
+                return None, (HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "payload_too_large", "请求体超过大小限制。")
+            if length == 0:
+                self._body_consumed = True
+                return {}, None
+            raw = self.rfile.read(length)
+            if len(raw) < length:
+                self.close_connection = True
+                return None, (HTTPStatus.BAD_REQUEST, "bad_request", "请求体不完整。")
             self._body_consumed = True
-            return {}, None
-        raw = self.rfile.read(length)
-        if len(raw) < length:
-            self.close_connection = True
-            return None, (HTTPStatus.BAD_REQUEST, "bad_request", "请求体不完整。")
-        self._body_consumed = True
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):

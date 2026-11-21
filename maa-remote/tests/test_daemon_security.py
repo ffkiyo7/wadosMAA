@@ -697,15 +697,83 @@ class DaemonSecurityTests(unittest.TestCase):
         self.assertIn(b"HTTP/1.1 404 ", resp_del)
         self.assertEqual(resp_del.count(b"HTTP/1.1 "), 1)
 
-        # 5. 拒绝 Transfer-Encoding: chunked 且立即断连
-        raw_te = (
+        # 5. Transfer-Encoding: chunked 防走私与 cloudflared 兼容：
+        #    - 未鉴权的 chunked POST 不会消费请求体，必须返回 401 + Connection: close，绝不执行内嵌请求
+        raw_te_unauth = (
             b"POST /api/v1/plan/skip HTTP/1.1\r\nHost: localhost\r\n"
             b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n" + smuggled
         )
-        resp_te = send_raw(raw_te)
-        self.assertIn(b"HTTP/1.1 400 ", resp_te)
-        self.assertIn(b"unsupported_transfer_encoding", resp_te)
-        self.assertEqual(resp_te.count(b"HTTP/1.1 "), 1)
+        resp_te_unauth = send_raw(raw_te_unauth)
+        self.assertIn(b"HTTP/1.1 401 ", resp_te_unauth)
+        self.assertIn(b"Connection: close", resp_te_unauth)
+        self.assertEqual(resp_te_unauth.count(b"HTTP/1.1 "), 1)
+
+        #    - CL + TE 并存必须 400 拒绝并断连
+        raw_cl_te = (
+            b"POST /api/v1/notify/test HTTP/1.1\r\nHost: localhost\r\n"
+            + f"Authorization: Bearer {full_token}\r\n".encode()
+            + b"Content-Length: 5\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n"
+            + smuggled
+        )
+        resp_cl_te = send_raw(raw_cl_te)
+        self.assertIn(b"HTTP/1.1 400 ", resp_cl_te)
+        self.assertIn(b"Connection: close", resp_cl_te)
+        self.assertEqual(resp_cl_te.count(b"HTTP/1.1 "), 1)
+
+        #    - 非纯 chunked（如 gzip, chunked）必须 400 拒绝并断连
+        raw_te_bad = (
+            b"POST /api/v1/notify/test HTTP/1.1\r\nHost: localhost\r\n"
+            + f"Authorization: Bearer {full_token}\r\n".encode()
+            + b"Transfer-Encoding: gzip, chunked\r\n\r\n0\r\n\r\n"
+            + smuggled
+        )
+        resp_te_bad = send_raw(raw_te_bad)
+        self.assertIn(b"HTTP/1.1 400 ", resp_te_bad)
+        self.assertIn(b"unsupported_transfer_encoding", resp_te_bad)
+        self.assertIn(b"Connection: close", resp_te_bad)
+        self.assertEqual(resp_te_bad.count(b"HTTP/1.1 "), 1)
+
+        #    - 合法的空体 chunked POST（cloudflared 转发空体 POST 的真实形态）正常通过鉴权并进入端点
+        raw_te_empty_ok = (
+            b"POST /api/v1/ios/resign?if_due=1 HTTP/1.1\r\nHost: localhost\r\n"
+            + f"Authorization: Bearer {resign_token}\r\n".encode()
+            + b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n"
+        )
+        resp_te_empty_ok = send_raw(raw_te_empty_ok)
+        self.assertIn(b"HTTP/1.1 501 ", resp_te_empty_ok)
+        self.assertIn(b"not_configured", resp_te_empty_ok)
+
+        #    - 合法的多分块 JSON chunked POST 正常解码执行
+        part1 = b'{"if_due":'
+        part2 = b" true}"
+        raw_te_multi_ok = (
+            b"POST /api/v1/ios/resign HTTP/1.1\r\nHost: localhost\r\n"
+            + f"Authorization: Bearer {resign_token}\r\n".encode()
+            + b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            + f"{len(part1):x}\r\n".encode()
+            + part1
+            + b"\r\n"
+            + f"{len(part2):x}\r\n".encode()
+            + part2
+            + b"\r\n0\r\n\r\n"
+        )
+        resp_te_multi_ok = send_raw(raw_te_multi_ok)
+        self.assertIn(b"HTTP/1.1 501 ", resp_te_multi_ok)
+        self.assertIn(b'"if_due": true', resp_te_multi_ok)
+
+        #    - 超限 chunked POST 返回 413 并断连
+        oversize = maa_api.MAX_REQUEST_BODY_BYTES + 1
+        raw_te_413 = (
+            b"POST /api/v1/ios/resign HTTP/1.1\r\nHost: localhost\r\n"
+            + f"Authorization: Bearer {resign_token}\r\n".encode()
+            + b"Transfer-Encoding: chunked\r\n\r\n"
+            + f"{oversize:x}\r\n".encode()
+            + smuggled
+        )
+        resp_te_413 = send_raw(raw_te_413)
+        self.assertIn(b"HTTP/1.1 413 ", resp_te_413)
+        self.assertIn(b"Connection: close", resp_te_413)
+        self.assertEqual(resp_te_413.count(b"HTTP/1.1 "), 1)
 
     def test_rescue_cancel_feedback_is_not_overwritten_by_refresh(self) -> None:
         """评审【3】回归：rescue.html 停止回执（如 run_changed）不被随后的 refreshStatus 覆盖。"""
