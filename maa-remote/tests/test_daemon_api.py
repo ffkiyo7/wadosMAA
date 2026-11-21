@@ -216,6 +216,7 @@ class DaemonAPITests(unittest.TestCase):
                     "activity",
                     "scheduler",
                     "resign",
+                    "sanity",
                     "errors",
                 },
             )
@@ -223,6 +224,7 @@ class DaemonAPITests(unittest.TestCase):
             self.assertEqual(snap["progress"]["run_id"], run_id)
             self.assertTrue(snap["copilot_auto_paused"])
             self.assertEqual(snap["resign"]["status"], "ok")
+            self.assertIsNone(snap["sanity"])
 
             # GET /api/v1/choices, /copilot/stages, /config, /defaults
             self.assertEqual(self._json("GET", "/api/v1/choices")[1], {"choices": [{"stage": "1-7"}]})
@@ -542,6 +544,66 @@ class DaemonAPITests(unittest.TestCase):
             },
         )
         self.assertIsNone(self.ctx._read_active_progress(None, last_run))
+
+    def test_snapshot_sanity_returns_estimated_fields_and_null_when_missing(self) -> None:
+        from datetime import datetime
+
+        base_dt = datetime(2026, 11, 21, 10, 0, 0, tzinfo=maa_common.BEIJING)
+        now_dt = datetime(2026, 11, 21, 11, 0, 0, tzinfo=maa_common.BEIJING)
+        self.ctx.clock = lambda: now_dt
+
+        with patch.object(maa_common, "run_lock_holder", return_value=None), \
+                patch.object(maa_common, "load_config", return_value={"schema_version": 1}), \
+                patch.object(maa_action, "plan_today", return_value=(True, "ok", {"date": "2026-11-21", "sessions": []})), \
+                patch.object(maa_schedule, "schedule_report", return_value={"backend": "daemon", "sessions": {}}), \
+                patch.object(maa_upstream, "status", return_value={"verdict": "ok"}), \
+                patch.object(maa_copilot, "auto_pause_state", return_value=None):
+            # 1. 无 roster.json 时 sanity 为 None
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertIsNone(snap["sanity"])
+
+            # 2. 写入有效 roster.json（10:00 测得 80/208，11:00 应估算为 90/208）
+            ts = int(base_dt.timestamp())
+            roster_path = self.state_dir / "copilot" / "roster.json"
+            maa_common.atomic_write_json(
+                roster_path,
+                {
+                    "fetched_at": base_dt.isoformat(),
+                    "source": "skland",
+                    "chars": {},
+                    "sanity": {
+                        "current": 80,
+                        "max": 208,
+                        "last_ap_add_at": ts,
+                        "server_current_at": ts,
+                    },
+                },
+            )
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertEqual(
+                snap["sanity"],
+                {
+                    "current": 80,
+                    "max": 208,
+                    "measured_at": base_dt.isoformat(),
+                    "estimated_now": 90,
+                },
+            )
+
+            # 3. 写入更新的 operbox 快照（无 sanity）→ 返回 None
+            maa_common.atomic_write_json(
+                self.state_dir / "copilot" / "roster-operbox.json",
+                {
+                    "fetched_at": now_dt.isoformat(),
+                    "source": "operbox",
+                    "chars": {},
+                },
+            )
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertIsNone(snap["sanity"])
 
 
 if __name__ == "__main__":

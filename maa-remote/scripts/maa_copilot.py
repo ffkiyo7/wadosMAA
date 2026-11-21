@@ -1685,7 +1685,7 @@ def _roster_fetched_at(roster: dict[str, Any]) -> datetime | None:
         return None
 
 
-def load_roster() -> dict[str, Any] | None:
+def load_roster(*, copilot_dir: Path | None = None) -> dict[str, Any] | None:
     """练度快照：森空岛那份与 OperBox 后备里**更新的那一份**（四期步骤 5）。
 
     OperBox 快照只在森空岛不可用时才写（`maa_depot.run_depot()`），所以森空岛
@@ -1695,7 +1695,12 @@ def load_roster() -> dict[str, Any] | None:
     """
     best: dict[str, Any] | None = None
     best_at: datetime | None = None
-    for path in (ROSTER_PATH, OPERBOX_ROSTER_PATH):
+    paths = (
+        (copilot_dir / "roster.json", copilot_dir / "roster-operbox.json")
+        if copilot_dir is not None
+        else (ROSTER_PATH, OPERBOX_ROSTER_PATH)
+    )
+    for path in paths:
         try:
             roster = load_json(path, None)
         except (ValueError, OSError):
