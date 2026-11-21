@@ -217,6 +217,7 @@ class DaemonAPITests(unittest.TestCase):
                     "scheduler",
                     "resign",
                     "sanity",
+                    "notify",
                     "errors",
                 },
             )
@@ -225,6 +226,7 @@ class DaemonAPITests(unittest.TestCase):
             self.assertTrue(snap["copilot_auto_paused"])
             self.assertEqual(snap["resign"]["status"], "ok")
             self.assertIsNone(snap["sanity"])
+            self.assertEqual(snap["notify"], {"configured": False})
 
             # GET /api/v1/choices, /copilot/stages, /config, /defaults
             self.assertEqual(self._json("GET", "/api/v1/choices")[1], {"choices": [{"stage": "1-7"}]})
@@ -604,6 +606,48 @@ class DaemonAPITests(unittest.TestCase):
             st, snap = self._json("GET", "/api/v1/snapshot")
             self.assertEqual(st, 200)
             self.assertIsNone(snap["sanity"])
+
+    def test_snapshot_notify_configured_flag_never_leaks_secrets(self) -> None:
+        secret_device = "SUPER_SECRET_BARK_DEVICE_KEY_999"
+        secret_aes = "0123456789abcdef0123456789abcdef"  # 32 bytes
+
+        with patch.object(maa_common, "run_lock_holder", return_value=None), \
+                patch.object(maa_common, "load_config", return_value={"schema_version": 1}), \
+                patch.object(maa_action, "plan_today", return_value=(True, "ok", {"date": "2026-11-21", "sessions": []})), \
+                patch.object(maa_schedule, "schedule_report", return_value={"backend": "daemon", "sessions": {}}), \
+                patch.object(maa_upstream, "status", return_value={"verdict": "ok"}), \
+                patch.object(maa_copilot, "auto_pause_state", return_value=None):
+            # 1. 未配置 → False
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertEqual(snap["notify"], {"configured": False})
+
+            # 2. 配置 bark 但缺 aes key → False
+            maa_common.atomic_write_json(self.daemon_dir / "daemon.json", {"notify_backend": "bark"})
+            maa_tls.merge_secrets(self.secrets_path, {"bark_device_key": secret_device})
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertEqual(snap["notify"], {"configured": False})
+
+            # 3. 补齐 32 字节 aes key → True，且绝不泄露任何密钥
+            maa_tls.merge_secrets(self.secrets_path, {"bark_aes_key": secret_aes})
+            st, _ct, raw = self._req("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            text = raw.decode("utf-8")
+            snap = json.loads(text)
+            self.assertEqual(snap["notify"], {"configured": True})
+            self.assertEqual(set(snap["notify"]), {"configured"})
+            self.assertNotIn(secret_device, text)
+            self.assertNotIn(secret_aes, text)
+            self.assertNotIn("bark_device_key", text)
+            self.assertNotIn("bark_aes_key", text)
+            self.assertNotIn("full_token_sha256", text)
+
+            # 4. backend 切回 none → False
+            maa_common.atomic_write_json(self.daemon_dir / "daemon.json", {"notify_backend": "none"})
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertEqual(snap["notify"], {"configured": False})
 
 
 if __name__ == "__main__":

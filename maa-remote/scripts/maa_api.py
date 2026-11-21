@@ -720,6 +720,12 @@ class APIContext:
             "estimated_now": estimated_now,
         }
 
+    def _read_notify(self) -> dict[str, bool]:
+        raw_cfg = maa_common.load_json(self.daemon_dir / "daemon.json", {})
+        cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
+        sec = self.load_secrets()
+        return {"configured": maa_notify.is_configured(config=cfg, secret_map=sec)}
+
     def build_snapshot(self) -> dict[str, Any]:
         """`GET /api/v1/snapshot` 首屏聚合快照（SPEC §5.1）。
 
@@ -760,6 +766,7 @@ class APIContext:
         scheduler = safe("scheduler", self._read_scheduler)
         resign = safe("resign", self._read_resign)
         sanity = safe("sanity", self._read_sanity)
+        notify = safe("notify", self._read_notify)
 
         return {
             "lock": lock,
@@ -773,6 +780,7 @@ class APIContext:
             "scheduler": scheduler,
             "resign": resign,
             "sanity": sanity,
+            "notify": notify,
             "errors": errors,
         }
 
