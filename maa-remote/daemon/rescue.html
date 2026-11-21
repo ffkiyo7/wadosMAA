@@ -201,13 +201,15 @@
   }
 
   async function apiFetch(path, options) {
+    var silentErrors = Boolean(options && options.silentErrors);
     var token = syncToken();
     if (!token) {
       setBadge(authBadge, "danger", "缺少令牌");
-      showFeedback(false, "请先输入 Full Bearer Token。");
+      if (!silentErrors) showFeedback(false, "请先输入 Full Bearer Token。");
       return null;
     }
     var opts = Object.assign({ method: "GET" }, options || {});
+    delete opts.silentErrors;
     opts.headers = Object.assign(
       { "Authorization": "Bearer " + token, "Accept": "application/json" },
       opts.headers || {}
@@ -216,7 +218,7 @@
     try {
       resp = await fetch(path, opts);
     } catch (err) {
-      showFeedback(false, "网络请求失败：" + (err && err.message ? err.message : String(err)));
+      if (!silentErrors) showFeedback(false, "网络请求失败：" + (err && err.message ? err.message : String(err)));
       return null;
     }
     var body = null;
@@ -227,12 +229,12 @@
     }
     if (resp.status === 401) {
       setBadge(authBadge, "danger", "鉴权失败");
-      showFeedback(false, (body && body.message) || "Token 无效或已失效（401）。");
+      if (!silentErrors) showFeedback(false, (body && body.message) || "Token 无效或已失效（401）。");
       return null;
     }
     if (resp.status === 403) {
       setBadge(authBadge, "warn", "权限不足");
-      showFeedback(false, (body && body.message) || "当前 Token 无权访问该接口，请使用 Full Token（403）。");
+      if (!silentErrors) showFeedback(false, (body && body.message) || "当前 Token 无权访问该接口，请使用 Full Token（403）。");
       return null;
     }
     setBadge(authBadge, "ok", "已验证");
@@ -287,17 +289,27 @@
     updatedAtEl.textContent = new Date().toLocaleTimeString("zh-CN", { hour12: false });
   }
 
-  async function refreshStatus() {
+  async function refreshStatus(options) {
+    var preserveFeedback = Boolean(options && options.preserveFeedback);
     refreshBtn.disabled = true;
     try {
-      var res = await apiFetch("/api/v1/snapshot");
+      var res = await apiFetch("/api/v1/snapshot", { silentErrors: preserveFeedback });
       if (!res) return;
       if (!res.ok || !res.body) {
-        showFeedback(false, (res.body && res.body.message) || ("读取快照失败（HTTP " + res.status + "）"));
+        if (!preserveFeedback) {
+          showFeedback(false, (res.body && res.body.message) || ("读取快照失败（HTTP " + res.status + "）"));
+        }
         return;
       }
       renderSnapshot(res.body);
-      showFeedback(true, "状态已刷新。");
+      if (!preserveFeedback) {
+        var errs = res.body.errors && typeof res.body.errors === "object" ? Object.keys(res.body.errors) : [];
+        if (errs.length > 0) {
+          showFeedback(true, "状态已刷新（部分只读项降级：" + errs.join("、") + "，不影响紧急停止）。");
+        } else {
+          showFeedback(true, "状态已刷新。");
+        }
+      }
     } finally {
       refreshBtn.disabled = false;
     }
@@ -321,7 +333,7 @@
       if (!res) return;
       var msg = (res.body && res.body.message) || ("返回 HTTP " + res.status);
       showFeedback(Boolean(res.body && res.body.ok), msg);
-      await refreshStatus();
+      await refreshStatus({ preserveFeedback: true });
     } finally {
       cancelBtn.disabled = !state.cancelable;
     }
@@ -346,7 +358,7 @@
     }
   }
 
-  refreshBtn.addEventListener("click", refreshStatus);
+  refreshBtn.addEventListener("click", function () { return refreshStatus(); });
   cancelBtn.addEventListener("click", cancelCurrentRun);
   resignBtn.addEventListener("click", triggerResign);
 

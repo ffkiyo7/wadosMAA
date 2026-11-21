@@ -523,6 +523,76 @@ class DaemonSecurityTests(unittest.TestCase):
         self.assertIn(b"unsupported_transfer_encoding", resp_te)
         self.assertEqual(resp_te.count(b"HTTP/1.1 "), 1)
 
+    def test_rescue_cancel_feedback_is_not_overwritten_by_refresh(self) -> None:
+        """评审【3】回归：rescue.html 停止回执（如 run_changed）不被随后的 refreshStatus 覆盖。"""
+        html = (ROOT / "daemon" / "rescue.html").read_text(encoding="utf-8")
+        self.assertIn("refreshStatus({ preserveFeedback: true })", html)
+        match = re.search(r"<script>(.*)</script>", html, re.DOTALL)
+        self.assertIsNotNone(match)
+        assert match is not None
+        script_src = match.group(1)
+
+        # 若本机装有 node，直接执行页面脚本端到端验证 DOM 反馈状态。
+        node = shutil.which("node")
+        if node:
+            harness = f"""
+const elements = {{}};
+function mkEl(id) {{
+  const el = {{
+    id, value: "", checked: false, disabled: false, textContent: "", className: "",
+    listeners: {{}},
+    addEventListener(ev, fn) {{ this.listeners[ev] = fn; }}
+  }};
+  elements[id] = el;
+  return el;
+}}
+["tokenInput","rememberSession","authBadge","runBadge","lockHolder","runId",
+ "progressText","lastRunText","updatedAt","feedback","refreshBtn","cancelBtn","resignBtn"].forEach(mkEl);
+global.document = {{ getElementById: (id) => elements[id] }};
+global.window = {{
+  sessionStorage: {{ getItem: () => null, setItem() {{}}, removeItem() {{}} }},
+  confirm: () => true,
+}};
+let step = 0;
+global.fetch = async (path, opts) => {{
+  if (path === "/api/v1/snapshot") {{
+    step += 1;
+    return {{
+      status: 200, ok: true,
+      json: async () => ({{
+        lock: {{ holder: "daily", detail: "手动", run_id: step === 1 ? "run-old" : "run-new" }},
+        last_run: {{ status: "running", phase: "now" }},
+        progress: null,
+        errors: {{}},
+      }}),
+    }};
+  }}
+  if (path === "/api/v1/run/cancel") {{
+    return {{
+      status: 200, ok: true,
+      json: async () => ({{ ok: false, code: "run_changed", message: "当前运行的已经是另一场，没有停下。" }}),
+    }};
+  }}
+  throw new Error("unexpected " + path);
+}};
+{script_src}
+(async () => {{
+  elements.tokenInput.value = "tok-full";
+  await elements.refreshBtn.listeners.click();
+  await elements.cancelBtn.listeners.click();
+  console.log(JSON.stringify({{
+    feedback: elements.feedback.textContent,
+    cls: elements.feedback.className,
+    runId: elements.runId.textContent,
+  }}));
+}})();
+"""
+            proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, check=True, timeout=10)
+            out = json.loads(proc.stdout.strip())
+            self.assertEqual(out["feedback"], "当前运行的已经是另一场，没有停下。")
+            self.assertIn("err", out["cls"])
+            self.assertEqual(out["runId"], "run-new")
+
 
 if __name__ == "__main__":
     unittest.main()
