@@ -246,9 +246,13 @@ class StatusTests(UpstreamTestCase):
         self.assertEqual(maa_upstream.resource_head(), SHA_B)
 
     def test_gate_refuses_the_dev_copy_and_the_session_blackout(self) -> None:
-        with patch.object(maa_upstream, "HERMES_HOME", self.root / "devhome"):
+        with patch.object(maa_upstream, "WADOS_MAA_HOME", self.root / "devhome"), \
+                patch.object(maa_upstream, "HERMES_HOME", self.root / "devhome"):
             self.assertIn("开发副本", maa_upstream.update_gate({}, self.now))
-        with patch.object(maa_upstream, "HERMES_HOME", maa_upstream.LIVE_HERMES_HOME):
+        with patch.object(maa_upstream, "WADOS_MAA_HOME", maa_upstream.LIVE_HOME), \
+                patch.object(maa_upstream, "HERMES_HOME", maa_upstream.LIVE_HOME):
+            self.assertEqual(maa_upstream.LIVE_HOME, Path.home() / ".wados-maa")
+            self.assertTrue(maa_upstream.is_live_home())
             self.assertIn("不到 30 分钟", maa_upstream.update_gate({}, self.now))
             self.assertEqual(maa_upstream.update_gate({}, self.now.replace(hour=14)), "")
 

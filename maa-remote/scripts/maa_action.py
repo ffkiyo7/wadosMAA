@@ -53,6 +53,7 @@ from maa_common import (
     discord_request,
     discord_token,
     effective_plan,
+    is_app_source,
     is_plan_phase,
     is_run_locked,
     lock_holder_text,
@@ -148,7 +149,7 @@ def emit(
     但 message 照样截。
     """
     detail = detail[:DETAIL_LIMIT]
-    if detail and action_source() != "gui":
+    if detail and not is_app_source(action_source()):
         message = f"{message}\n（{detail}）"
     payload: dict[str, Any] = {"ok": ok, "code": code or ("ok" if ok else "failed"), "message": message}
     if detail:
@@ -238,8 +239,8 @@ def _save_override(phase: PlanPhase, key: str, value: Any, **extra: Any) -> Plan
         plan["schema_version"] = PLAN_SCHEMA_VERSION
         # There is deliberately no stone field in this write path.
         atomic_write_json(PLAN_PATH, plan)
-    if action_source() == "gui":
-        # K3：GUI 改了这一场的计划，Discord 上那张计划卡也要跟着变。PATCH 要建卡、
+    if is_app_source(action_source()):
+        # K3：App 改了这一场的计划，Discord 上那张计划卡也要跟着变。PATCH 要建卡、
         # 可能算材料推荐，放进脱离会话的子进程，不占这条回执。
         _spawn_action(["plan", "refresh-card", phase])
     return effective_plan(phase=phase)
@@ -1337,7 +1338,7 @@ def copilot_mark_cleared(stage: str, mode_arg: str = "") -> tuple[bool, str]:
     )
     if not marked:
         return True, f"ℹ️ {code} 账本里已经记着通关了，没有改动。"
-    if action_source() == "gui":
+    if is_app_source(action_source()):
         return True, f"✅ 已把 {labels} 记为通关，自动抄作业不再排这一关。"
     return True, (
         f"✅ 已把 {labels} 记为手动通关；自动抄作业不再排这一关，"
@@ -1358,7 +1359,7 @@ def copilot_unmark(stage: str) -> tuple[bool, str]:
             maa_copilot.save_ledger(ledger, maa_copilot.ledger_path(activity_key))
     if not cleared:
         return True, f"ℹ️ {code} 账本里本来就没有通关记录，没有改动。"
-    if action_source() == "gui":
+    if is_app_source(action_source()):
         return True, f"↩️ 已撤销 {code} 的通关记录，自动抄作业会重新考虑它。"
     return True, f"↩️ 已撤销 {code} 的通关记账（{'、'.join(cleared)}）；下一轮自动排轮会重新考虑它。"
 
@@ -1932,7 +1933,7 @@ def copilot_auto(value: str) -> tuple[bool, str]:
                 note = "已作废还没开打的一轮" + note + "。"
         elif status == "executing":
             note = "当前这一关打完就停，不会再开下一关。"
-    if action_source() == "gui":
+    if is_app_source(action_source()):
         return True, "⏸️ 已暂停自动作业。" + note
     return True, (
         "⏸️ 已暂停自动作业。" + note
@@ -2011,16 +2012,25 @@ def _is_run_process(command: list[str], script: str, subcommand: str) -> bool:
     return has_script and (not subcommand or subcommand in command)
 
 
-def run_cancel() -> tuple[bool, str]:
+def run_cancel(expected_run_id: str = "") -> tuple[bool, str]:
     """停下正在跑的日常 / 抄作业（REVIEW §2.2，不变量 #64）。
 
-    读 `run.lock` 的持有者标记 → 只认 `daily` / `copilot` → 核对那个 pid 的命令行真是
-    `maa_daily.py` / `maa_copilot_worker.py run-batch` → 发 SIGINT。对方自己收尾：关游戏、
+    读 `run.lock` 的持有者标记 → 只认 `daily` / `copilot` → 如传入 `expected_run_id`
+    严格比对 `run.lock.run_id` → 核对那个 pid 的命令行真是 `maa_daily.py` /
+    `maa_copilot_worker.py run-batch` → 发 SIGINT。对方自己收尾：关游戏、
     还原台前调度、发战报、`last_run.status = cancelled`、放锁。这里不等它，立即回执。
     """
     marker = run_lock_holder()
     if not marker:
         return refuse("not_running", "现在没有在跑的日常或抄作业。")
+    if expected_run_id:
+        current_run_id = str(marker.get("run_id") or "")
+        if current_run_id != expected_run_id:
+            return refuse(
+                "run_changed",
+                "当前运行的已经是另一场，没有停下。",
+                detail=f"expected_run_id={expected_run_id} actual_run_id={current_run_id or 'none'}",
+            )
     holder = str(marker.get("holder") or "")
     detail = str(marker.get("detail") or "")
     if holder not in CANCELABLE_RUNS:
@@ -2151,7 +2161,7 @@ def plan_auto_stage(phase: str) -> tuple[bool, str, dict[str, Any]]:
         return refuse("auto_unavailable", "现在定不下来自动刷哪关，原来的关没有改。", {}, detail=why)
     was_running = is_run_locked()
     apply_auto_stage(result, phase, force=True)
-    if action_source() == "gui":
+    if is_app_source(action_source()):
         _spawn_action(["plan", "refresh-card", phase])
     plan = effective_plan(phase=phase)
     return done("stage_auto", _confirmation(plan, was_running, phase), {"stage": stage})
@@ -2216,6 +2226,8 @@ def dispatch(argv: list[str]) -> tuple[bool, str]:
         return run_now()
     if argv == ["run", "cancel"]:
         return run_cancel()
+    if argv[:3] == ["run", "cancel", "--run-id"] and len(argv) == 4 and argv[3].strip():
+        return run_cancel(argv[3].strip())
     if argv[:2] == ["run", "start"] and len(argv) == 4:
         return run_start(argv[2], argv[3])
     if argv[:2] == ["run", "expire"] and len(argv) == 3:

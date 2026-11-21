@@ -52,6 +52,39 @@ def tearDownModule() -> None:
 
 
 class PlanTests(unittest.TestCase):
+    def test_resolve_home_priority_and_state_lock_location(self) -> None:
+        self.assertEqual(
+            maa_common.resolve_home({"WADOS_MAA_HOME": "/tmp/a", "HERMES_HOME": "/tmp/b"}),
+            Path("/tmp/a"),
+        )
+        self.assertEqual(
+            maa_common.resolve_home({"HERMES_HOME": "/tmp/b"}),
+            Path("/tmp/b"),
+        )
+        self.assertEqual(
+            maa_common.resolve_home({}),
+            Path.home() / ".wados-maa",
+        )
+        self.assertEqual(maa_common.STATE_LOCK_PATH, maa_common.STATE_DIR / "state.lock")
+        self.assertEqual(maa_common.DAEMON_DIR, maa_common.WADOS_MAA_HOME / "daemon")
+        self.assertEqual(maa_common.LOGS_DIR, maa_common.WADOS_MAA_HOME / "logs")
+        self.assertTrue(maa_common.is_app_source("gui"))
+        self.assertTrue(maa_common.is_app_source("ios"))
+        self.assertFalse(maa_common.is_app_source("discord"))
+
+    def test_run_lock_persists_run_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            lock_path = Path(raw) / "run.lock"
+            with patch.object(maa_common, "STATE_DIR", Path(raw)), \
+                    patch.object(maa_common, "RUN_LOCK_PATH", lock_path):
+                with maa_common.run_lock(
+                    blocking=False, holder="daily", detail="手动", run_id="2026-11-21-now-143205"
+                ) as acquired:
+                    self.assertTrue(acquired)
+                    marker = json.loads(lock_path.read_text(encoding="utf-8").strip())
+                    self.assertEqual(marker["run_id"], "2026-11-21-now-143205")
+                    self.assertEqual(marker["holder"], "daily")
+
     def test_last_run_merge_holds_its_dedicated_lock(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "last_run.json"

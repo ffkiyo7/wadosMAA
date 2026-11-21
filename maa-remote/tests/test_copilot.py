@@ -1214,7 +1214,7 @@ class SklandTests(unittest.TestCase):
                               side_effect=RuntimeError("skland HTTP 401: 登录已过期")):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    r"python3 ~/.hermes/scripts/maa_skland.py link",
+                    r"python3 ~/.wados-maa/scripts/maa_skland.py link",
                 ):
                     maa_skland.fetch_roster(initial)
             persisted = json.loads(state_path.read_text(encoding="utf-8"))
@@ -1242,7 +1242,7 @@ class SklandTests(unittest.TestCase):
                               side_effect=RuntimeError("skland HTTP 401: 用户未登录")):
                 with self.assertRaisesRegex(
                     RuntimeError,
-                    r"python3 ~/.hermes/scripts/maa_skland.py link",
+                    r"python3 ~/.wados-maa/scripts/maa_skland.py link",
                 ):
                     maa_skland.fetch_roster(initial)
             persisted = json.loads(state_path.read_text(encoding="utf-8"))

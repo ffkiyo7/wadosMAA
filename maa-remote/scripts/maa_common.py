@@ -29,12 +29,25 @@ if TYPE_CHECKING:
 
 
 BEIJING = ZoneInfo("Asia/Shanghai")
-HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
+
+
+def resolve_home(env: Mapping[str, str] | None = None) -> Path:
+    """解析运行根目录：`WADOS_MAA_HOME` → `HERMES_HOME` → `~/.wados-maa`。"""
+    source = os.environ if env is None else env
+    raw = (source.get("WADOS_MAA_HOME") or source.get("HERMES_HOME") or "").strip()
+    return Path(raw).expanduser() if raw else Path.home() / ".wados-maa"
+
+
+WADOS_MAA_HOME = resolve_home()
+# 过渡别名，兼容既有脚本与单测引用。
+HERMES_HOME = WADOS_MAA_HOME
 MAA_CONFIG_DIR = Path(
     os.environ.get("MAA_CONFIG_DIR", Path.home() / ".config" / "maa-cli")
 )
-SCRIPTS_DIR = HERMES_HOME / "scripts"
-STATE_DIR = HERMES_HOME / "state" / "maa"
+SCRIPTS_DIR = WADOS_MAA_HOME / "scripts"
+STATE_DIR = WADOS_MAA_HOME / "state" / "maa"
+DAEMON_DIR = WADOS_MAA_HOME / "daemon"
+LOGS_DIR = WADOS_MAA_HOME / "logs"
 RUNS_DIR = STATE_DIR / "runs"
 CONFIG_PATH = STATE_DIR / "config.json"
 DEFAULTS_PATH = STATE_DIR / "defaults.json"
@@ -79,10 +92,9 @@ SESSION_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 PLAN_CARD_LEAD_MINUTES = 10
 PHASE_NAMES = {"am": "早场", "pm": "晚场", "now": "手动场"}
 
-# Hermes' persistent-button patch intentionally has one global registry. MAA
-# must merge its keys under the same lock used by agent-book.
+# Hermes 按钮登记表保留过渡路径；内部状态锁迁至 `state/maa/state.lock`，不再依赖 Hermes 目录。
 BUTTONS_PATH = HERMES_HOME / "state" / "agent-book" / "buttons.json"
-STATE_LOCK_PATH = HERMES_HOME / "state" / "agent-book" / "state.lock"
+STATE_LOCK_PATH = STATE_DIR / "state.lock"
 
 DISCORD_API_BASE = "https://discord.com/api/v10"
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -304,6 +316,7 @@ class LastRun(TypedDict, total=False):
     """
 
     schema_version: int
+    run_id: str
     status: RunStatus
     phase: str
     plan: Plan
@@ -359,13 +372,34 @@ class LastRun(TypedDict, total=False):
 # 跨场的（`threads`、剿灭记账、depot、资源更新、锁冲突）不在这里。
 # `emulator_probe` 是旧版写的，现在没人写，顺手清掉。
 RUN_SCOPED_LAST_RUN_KEYS: frozenset[str] = frozenset({
-    "status", "phase", "plan", "stage", "ok", "started_at", "finished_at",
+    "run_id", "status", "phase", "plan", "stage", "ok", "started_at", "finished_at",
     "duration_seconds", "return_code", "log", "salvage_log", "snapshot", "screenshot",
     "screenshot_error", "startup_error", "summary", "skip_reason", "game_probe",
     "emulator_probe", "home_verified", "home_verify_detail", "cleanup_errors",
     "proxy_failure_batches", "proxy_failure_sanity_refunded", "connect_retries",
     "offline_retries", "inventory_error", "thread_id", "report", "progress",
 })
+
+
+_RUN_ID_TIME_SUFFIX_RE = re.compile(r"-\d{6}$")
+
+
+def make_run_id(phase: str, started: datetime | None = None) -> str:
+    """精确到秒的场次唯一 ID（如 `2026-11-21-now-143205`、`2026-11-21-copilot-abc-151022`）。"""
+    moment = (started or now_beijing()).astimezone(BEIJING)
+    return f"{moment.date().isoformat()}-{phase}-{moment:%H%M%S}"
+
+
+def resolve_run_artifact(runs_dir: Path, run_id: str, suffix: str) -> Path | None:
+    """按 `run_id` 定位场次产物，兼容既有 `<日期>-<场次>` 旧命名。"""
+    direct = runs_dir / f"{run_id}{suffix}"
+    if direct.is_file():
+        return direct
+    if _RUN_ID_TIME_SUFFIX_RE.search(run_id):
+        legacy = runs_dir / f"{run_id[:-7]}{suffix}"
+        if legacy.is_file():
+            return legacy
+    return None
 
 
 def now_beijing() -> datetime:
@@ -505,7 +539,7 @@ LOCK_HOLDER_LABELS = {
 
 @contextmanager
 def run_lock(
-    *, blocking: bool = False, holder: str = "", detail: str = ""
+    *, blocking: bool = False, holder: str = "", detail: str = "", run_id: str = ""
 ) -> Iterator[bool]:
     """Yield whether this process owns the single MAA execution lock.
 
@@ -522,12 +556,14 @@ def run_lock(
         except BlockingIOError:
             pass
         if acquired and holder:
-            marker = {
+            marker: dict[str, Any] = {
                 "holder": holder,
                 "detail": detail,
                 "pid": os.getpid(),
                 "since": now_beijing().isoformat(),
             }
+            if run_id:
+                marker["run_id"] = run_id
             lock_file.seek(0)
             lock_file.truncate()
             lock_file.write(json.dumps(marker, ensure_ascii=False) + "\n")
@@ -774,14 +810,20 @@ def load_config() -> Config:
     return cast(Config, raw)
 
 
-# 谁在改（K3：界面上要标「几点由 GUI / Discord 改」）。Wado's MAA 调 `maa_action` 时带
-# `MAA_ACTION_SOURCE=gui`；Discord 按钮和聊天不带，记成 discord。
-ACTION_SOURCES = ("gui", "discord")
+# 谁在改（K3：界面上要标「几点由 GUI / iOS / Discord 改」）。Mac GUI 带 `gui`，
+# iOS App / 守护进程带 `ios`；Discord 按钮和聊天不带，记成 `discord`。
+ACTION_SOURCES = ("gui", "ios", "discord")
+APP_ACTION_SOURCES = frozenset({"gui", "ios"})
 
 
 def action_source() -> str:
     value = os.environ.get("MAA_ACTION_SOURCE", "")
     return value if value in ACTION_SOURCES else "discord"
+
+
+def is_app_source(source: str | None) -> bool:
+    """调用方是否为原生 App（Mac GUI 或 iOS App）。"""
+    return source in APP_ACTION_SOURCES
 
 
 def update_config(

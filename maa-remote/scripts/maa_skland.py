@@ -26,8 +26,10 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Callable
 
+import maa_common
 from maa_common import Config, atomic_write_json, atomic_write_text, load_json, now_beijing
 import maa_copilot
 
@@ -343,10 +345,7 @@ def fetch_roster(state: dict[str, Any]) -> dict[str, Any]:
         # expired cred: one re-grant, one retry
         state.pop("cred", None)
         state.pop("sign_token", None)
-        guidance = (
-            "cred 过期且重认证失败；请在本机终端运行 "
-            "python3 ~/.hermes/scripts/maa_skland.py link"
-        )
+        guidance = f"cred 过期且重认证失败；请在本机终端运行 {link_command()}"
         try:
             state = _ensure_cred(state)
             return attempt()
@@ -369,7 +368,7 @@ def refresh_roster() -> dict[str, Any]:
     """Fetch and persist roster.json (0600). Returns the roster."""
     state = load_skland_state()
     if state is None:
-        raise RuntimeError("未配置森空岛 token；请在本机终端运行 python3 maa_skland.py link")
+        raise RuntimeError(f"未配置森空岛 token；请在本机终端运行 {link_command()}")
     data = fetch_roster(state)
     roster = {
         "fetched_at": now_beijing().isoformat(),
@@ -391,7 +390,18 @@ def refresh_roster() -> dict[str, Any]:
     return roster
 
 
-LINK_COMMAND = "python3 ~/.hermes/scripts/maa_skland.py link"
+def link_command() -> str:
+    """按当前 `SCRIPTS_DIR` 动态生成森空岛重绑命令。"""
+    script = maa_common.SCRIPTS_DIR / "maa_skland.py"
+    try:
+        rel = script.relative_to(Path.home())
+        display = f"~/{rel.as_posix()}"
+    except ValueError:
+        display = str(script)
+    return f"python3 {display} link"
+
+
+LINK_COMMAND = link_command()
 
 
 def daily_health_check(
@@ -418,7 +428,7 @@ def daily_health_check(
             title,
             "影响：自动抄作业停止排轮（读不到活动进度和实时理智），练度快照不再更新。\n"
             + (
-                f"修复：在本机终端运行 `{LINK_COMMAND}`，粘贴鹰角 token 后回车。\n"
+                f"修复：在本机终端运行 `{link_command()}`，粘贴鹰角 token 后回车。\n"
                 if expired
                 else "多半是网络或森空岛接口临时故障，明天会再探一次。\n"
             )

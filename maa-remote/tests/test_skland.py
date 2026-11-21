@@ -148,6 +148,14 @@ class SklandSanityEstimateTests(unittest.TestCase):
         self.assertEqual(maa_copilot.estimated_sanity(snapshot, at_eight), 164)
         self.assertTrue(maa_copilot.sanity_preflight({"sanity": snapshot}, 30, read_at)["enough"])
 
+    def test_link_command_follows_scripts_dir(self) -> None:
+        import maa_skland
+
+        with patch.object(maa_common, "SCRIPTS_DIR", Path.home() / ".wados-maa" / "scripts"):
+            self.assertEqual(maa_skland.link_command(), "python3 ~/.wados-maa/scripts/maa_skland.py link")
+        with patch.object(maa_common, "SCRIPTS_DIR", Path("/opt/custom/scripts")):
+            self.assertEqual(maa_skland.link_command(), "python3 /opt/custom/scripts/maa_skland.py link")
+
     def test_the_estimate_never_exceeds_the_cap(self) -> None:
         snapshot = {"current": 200, "max": 208, "last_ap_add_at": 1, "server_current_at": 2}
         self.assertEqual(maa_copilot.estimated_sanity(snapshot), 208)

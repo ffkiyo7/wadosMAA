@@ -179,12 +179,27 @@ class ReceiptOutputTests(unittest.TestCase):
                 self.assertEqual((receipt["ok"], receipt["code"]), (ok, code), receipt)
 
     def test_detail_stays_out_of_the_gui_message_but_reaches_discord(self) -> None:
-        receipt = self.run_main("defaults", "set", "nonsense", "x")
-        self.assertIn("defaults set stage", receipt["detail"])
-        self.assertNotIn("defaults set", receipt["message"])
+        for app_source in ("gui", "ios"):
+            with self.subTest(source=app_source):
+                receipt = self.run_main("defaults", "set", "nonsense", "x", source=app_source)
+                self.assertIn("defaults set stage", receipt["detail"])
+                self.assertNotIn("defaults set", receipt["message"])
         discord = self.run_main("defaults", "set", "nonsense", "x", source="discord")
         self.assertIn(receipt["message"], discord["message"])
         self.assertIn(receipt["detail"], discord["message"])
+
+    def test_run_cancel_checks_expected_run_id(self) -> None:
+        marker = {"holder": "daily", "detail": "早", "pid": 4242, "run_id": "2026-11-21-am-080000"}
+        with patch.object(maa_action, "run_lock_holder", return_value=marker), \
+                patch.object(maa_action, "_process_command", return_value=["python3", "maa_daily.py"]), \
+                patch.object(maa_action.os, "kill") as kill:
+            mismatch = self.run_main("run", "cancel", "--run-id", "2026-11-21-am-070000", source="ios")
+            self.assertEqual((mismatch["ok"], mismatch["code"]), (False, "run_changed"))
+            kill.assert_not_called()
+
+            matched = self.run_main("run", "cancel", "--run-id", "2026-11-21-am-080000", source="ios")
+            self.assertEqual((matched["ok"], matched["code"]), (True, "stopping"))
+            kill.assert_called_once_with(4242, maa_action.signal.SIGINT)
 
     def test_a_crash_is_a_plain_sentence_with_the_exception_in_detail(self) -> None:
         with patch.object(maa_action, "config_get", side_effect=TypeError("boom")):

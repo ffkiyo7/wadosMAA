@@ -20,6 +20,7 @@ import maa_depot
 import maa_playcover
 from maa_upstream import hard_block as upstream_hard_block
 from maa_common import (
+    ACTION_SOURCES,
     BEIJING,
     DEFAULT_TASKS,
     LAST_RUN_PATH,
@@ -53,6 +54,7 @@ from maa_common import (
     load_config,
     load_json,
     maa_subprocess_env,
+    make_run_id,
     medicine_label,
     merge_last_run,
     now_beijing,
@@ -1109,6 +1111,7 @@ class RunProgressFile:
         config: Config,
         started: datetime,
         kind: str = "daily",
+        run_id: str = "",
     ) -> None:
         self.path = path
         self.phase = phase
@@ -1116,6 +1119,7 @@ class RunProgressFile:
         self.config = config
         self.started = started
         self.kind = kind
+        self.run_id = run_id or make_run_id(phase, started)
         self.status = "running"
         self.final = False
         self.booting = False
@@ -1305,6 +1309,7 @@ class RunProgressFile:
         return {
             "schema_version": PROGRESS_SCHEMA_VERSION,
             "kind": self.kind,
+            "run_id": self.run_id,
             "phase": self.phase,
             "started_at": self.started.isoformat(),
             "updated_at": now_beijing().isoformat(),
@@ -2559,7 +2564,7 @@ def record_daily_run(
             rescue = "fallback"
         fight_on = bool((plan.get("tasks") or {}).get("fight", True))
         row: dict[str, Any] = {
-            "id": f"{started.date().isoformat()}-{phase}-{started:%H%M%S}",
+            "id": progress.run_id if progress is not None else make_run_id(phase, started),
             "kind": "daily",
             "phase": phase,
             "stage": str(plan.get("stage") or "") if fight_on else "",
@@ -2630,8 +2635,9 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
             return 1
         request = found
         base_plan["stage"] = str(found.get("stage") or "")
-        # 谁派的就记谁：Wado's MAA 的 `run local` 写 `source="gui"`，选关卡没有这个字段。
-        base_plan["stage_source"] = "gui" if found.get("source") == "gui" else "discord"
+        # 谁派的就记谁：保留白名单内的真实来源（gui / ios / discord）。
+        raw_source = str(found.get("source") or "")
+        base_plan["stage_source"] = raw_source if raw_source in ACTION_SOURCES else "discord"
         base_plan["farming_drops"] = {}
         base_plan["farming_fallback_stage"] = ""
     plan = attach_sanity_yield(
@@ -2639,7 +2645,8 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
         config,
         started,
     )
-    run_stem = f"{started.date().isoformat()}-{phase}"
+    run_id = make_run_id(phase, started)
+    run_stem = run_id
     snapshot_path = RUNS_DIR / f"{run_stem}.json"
     log_path = RUNS_DIR / f"{run_stem}.log"
     screenshot_path = RUNS_DIR / f"{run_stem}.png"
@@ -2655,13 +2662,14 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
                 MIN_RUN_TIMEOUT, int(config.get("maa_run_timeout", 3000)) - int(waited)
             ),
         })
-    with run_lock(blocking=False, holder="daily", detail=PHASE_LABELS[phase]) as acquired:
+    with run_lock(blocking=False, holder="daily", detail=PHASE_LABELS[phase], run_id=run_id) as acquired:
         if not acquired:
             report_lock_conflict(config, token, channel_id, phase, started)
             return 1
         marks["locked"] = True
         cleanup_run_files(int(config.get("retention_days", 14)), started)
         snapshot = {
+            "run_id": run_id,
             "date": started.date().isoformat(),
             "phase": phase,
             "started_at": started.isoformat(),
@@ -2672,7 +2680,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
         atomic_write_json(snapshot_path, snapshot)
         # 本场进度文件（#65）：先写一份空的，盖掉同名旧场；之后每 5 秒和收尾各写一次。
         progress = RunProgressFile(
-            progress_path, phase=phase, plan=plan, config=config, started=started
+            progress_path, phase=phase, plan=plan, config=config, started=started, run_id=run_id
         )
         marks["progress"] = progress
 
@@ -2689,6 +2697,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
         marks["record"] = record
         merge_last_run(
             {
+                "run_id": run_id,
                 "status": "running",
                 "phase": phase,
                 "started_at": started.isoformat(),

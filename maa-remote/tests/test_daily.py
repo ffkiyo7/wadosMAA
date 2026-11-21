@@ -1135,10 +1135,10 @@ class DiscordOptionalTests(unittest.TestCase):
             close = stub(maa_playcover, "close_game", return_value=[])
             if progress_path is not None:
                 stub(maa_daily, "progress_path_for", return_value=progress_path)
-            report_path = Path(raw) / "2026-11-09-pm-report.json"
+            report_path = Path(raw) / "2026-11-09-pm-220000-report.json"
             code = maa_daily.execute("pm")
             report = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else None
-            progress_file = Path(raw) / "2026-11-09-pm.progress.json"
+            progress_file = Path(raw) / "2026-11-09-pm-220000.progress.json"
             progress = json.loads(progress_file.read_text("utf-8")) if progress_file.is_file() else None
             index = maa_common.read_run_index(Path(raw))
         finished = merge.call_args_list[-1].args[0]
@@ -1154,7 +1154,7 @@ class DiscordOptionalTests(unittest.TestCase):
         result.close.assert_called_once()
         self.assertEqual(result.finished["status"], "success")
         self.assertIsNone(result.finished["startup_error"])
-        self.assertTrue(str(result.finished["report"]).endswith("2026-11-09-pm-report.json"))
+        self.assertTrue(str(result.finished["report"]).endswith("2026-11-09-pm-220000-report.json"))
         self.assertIsNotNone(result.report)
         self.assertIn("完成", result.report["embeds"][0]["title"])
 
@@ -1200,8 +1200,8 @@ class DiscordOptionalTests(unittest.TestCase):
         self.assertEqual((row["status"], row["failure"], row["skip_reason"]), ("success", None, None))
         self.assertEqual((row["retries"], row["restarts"], row["window_fixes"], row["rescue"]), (0, 0, 0, None))
         self.assertEqual(row["report"], result.finished["report"])
-        self.assertTrue(row["progress"].endswith("2026-11-09-pm.progress.json"))
-        self.assertTrue(row["log"].endswith("2026-11-09-pm.log"))
+        self.assertTrue(row["progress"].endswith("2026-11-09-pm-220000.progress.json"))
+        self.assertTrue(row["log"].endswith("2026-11-09-pm-220000.log"))
         self.assertEqual(row["duration_seconds"], 0)
 
     def test_a_failed_run_is_indexed_with_its_cause_and_counts(self) -> None:
@@ -1269,9 +1269,9 @@ class CancelledRunTests(unittest.TestCase):
             close = stub(maa_playcover, "close_game", return_value=[])
             report = stub(maa_daily, "send_report")
             code = maa_daily.execute("am")
-            report_file = Path(raw) / "2026-11-09-am-report.json"
+            report_file = Path(raw) / "2026-11-09-am-080000-report.json"
             saved = json.loads(report_file.read_text("utf-8")) if report_file.is_file() else None
-            progress_file = Path(raw) / "2026-11-09-am.progress.json"
+            progress_file = Path(raw) / "2026-11-09-am-080000.progress.json"
             progress = json.loads(progress_file.read_text("utf-8")) if progress_file.is_file() else None
             index = maa_common.read_run_index(Path(raw))
         return SimpleNamespace(
@@ -2310,12 +2310,13 @@ class GameProbeTests(unittest.TestCase):
         )
         log = Path(str(running["log"]))
         self.assertEqual(log.parent, maa_daily.RUNS_DIR)
-        self.assertTrue(log.name.endswith("-am.log"), log.name)
+        self.assertRegex(log.name, r"^\d{4}-\d{2}-\d{2}-am-\d{6}\.log$")
         self.assertEqual(log.name.removesuffix(".log"), Path(str(running["snapshot"])).stem)
+        self.assertEqual(running["run_id"], log.stem)
 
     def test_manual_run_records_who_picked_the_stage(self) -> None:
-        # 2026-11-06：GUI 派的手动场快照里写成了 discord。
-        for source, expected in (("gui", "gui"), ("discord", "discord"), (None, "discord")):
+        # 2026-11-06：GUI 派的手动场快照里写成了 discord；S1-1 同时保留 ios 来源。
+        for source, expected in (("gui", "gui"), ("ios", "ios"), ("discord", "discord"), (None, "discord")):
             with self.subTest(source=source):
                 request = {"token": "tok", "status": "dispatched", "stage": "TL-9"}
                 if source:
@@ -2879,7 +2880,52 @@ class ProgressFileTests(unittest.TestCase):
         self.assertIsNone(result.progress["current"])
         self.assertIn("已按你的要求停下", [note["text"] for note in result.progress["notes"]])
         self.assertTrue(str(result.merge.call_args_list[0].args[0]["progress"]).endswith(
-            "2026-11-09-am.progress.json"))
+            "2026-11-09-am-080000.progress.json"))
+
+    def test_two_manual_runs_on_same_day_never_overwrite_each_other(self) -> None:
+        """S1-1：同日连跑两场手动场，五类文件均以 run_id 唯一命名、互不覆盖。"""
+        with tempfile.TemporaryDirectory() as raw:
+            runs_dir = Path(raw)
+            first_at = datetime(2026, 11, 21, 14, 32, 5, tzinfo=BEIJING)
+            second_at = datetime(2026, 11, 21, 15, 10, 22, tzinfo=BEIJING)
+            for moment in (first_at, second_at):
+                lock = unittest.mock.MagicMock()
+                lock.__enter__.return_value = True
+                lock.__exit__.return_value = False
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.object(maa_daily, "RUNS_DIR", runs_dir))
+                    stack.enter_context(patch.object(maa_daily, "now_beijing", return_value=moment))
+                    stack.enter_context(patch.object(maa_daily, "load_config", return_value={"maa_config_dir": raw}))
+                    stack.enter_context(patch.object(maa_daily, "load_json", return_value={}))
+                    stack.enter_context(patch.object(maa_daily, "effective_plan", return_value=maa_common.normalize_plan({"stage": "1-7"})))
+                    stack.enter_context(patch.object(maa_daily, "run_lock", return_value=lock))
+                    stack.enter_context(patch.object(maa_daily, "cleanup_run_files"))
+                    stack.enter_context(patch.object(maa_daily, "atomic_write_text"))
+                    stack.enter_context(patch.object(maa_daily, "should_skip", return_value=False))
+                    stack.enter_context(patch.object(maa_daily, "upstream_hard_block", return_value=""))
+                    stack.enter_context(patch.object(maa_daily, "merge_last_run"))
+                    stack.enter_context(patch.object(maa_daily, "require_executable"))
+                    stack.enter_context(patch.object(maa_playcover, "verify_game_installed"))
+                    stack.enter_context(patch.object(maa_playcover, "launch_game"))
+                    stack.enter_context(patch.object(maa_playcover, "wait_for_game"))
+                    stack.enter_context(patch.object(maa_playcover, "settle_game_window", return_value=""))
+                    stack.enter_context(patch.object(maa_daily, "run_maa_resilient", return_value=(0, [], [], 0, 0)))
+                    stack.enter_context(patch.object(maa_daily, "capture_home_screenshot", side_effect=lambda _c, p: (p.write_bytes(b"PNG"), (True, "", True, ""))[1]))
+                    stack.enter_context(patch.object(maa_playcover, "close_game", return_value=[]))
+                    code = maa_daily.execute("now")
+                self.assertEqual(code, 0)
+            for run_id in ("2026-11-21-now-143205", "2026-11-21-now-151022"):
+                self.assertTrue((runs_dir / f"{run_id}.json").is_file())
+                self.assertTrue((runs_dir / f"{run_id}.png").is_file())
+                self.assertTrue((runs_dir / f"{run_id}-report.json").is_file())
+                self.assertTrue((runs_dir / f"{run_id}.progress.json").is_file())
+            # 历史读取兼容旧 <日期>-<场次> 命名
+            legacy = runs_dir / "2026-11-20-pm-report.json"
+            legacy.write_text("{}", encoding="utf-8")
+            self.assertEqual(
+                maa_common.resolve_run_artifact(runs_dir, "2026-11-20-pm-220000", "-report.json"),
+                legacy,
+            )
 
     def test_a_failing_write_never_touches_the_run(self) -> None:
         blocker = self.dir / "not-a-dir"

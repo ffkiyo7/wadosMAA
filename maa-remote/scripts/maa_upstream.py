@@ -36,6 +36,7 @@ from maa_common import (
     HERMES_HOME,
     MAA_CONFIG_DIR,
     STATE_DIR,
+    WADOS_MAA_HOME,
     Config,
     atomic_write_json,
     check_schema,
@@ -57,11 +58,18 @@ DEFAULT_MAA_CLI_FORMULA = "MaaAssistantArknights/tap/maa-cli"
 MAA_RESOURCE_REMOTE = "https://github.com/MaaAssistantArknights/MaaResource.git"
 MAA_DATA_DIR = Path.home() / "Library" / "Application Support" / "com.loong.maa"
 MAA_CACHE_DIR = Path.home() / "Library" / "Caches" / "com.loong.maa"
-LIVE_HERMES_HOME = Path.home() / ".hermes"
+LIVE_HOME = Path.home() / ".wados-maa"
+# 过渡别名，兼容老测试引用。
+LIVE_HERMES_HOME = LIVE_HOME
 # K18：「已经更新过」= 本游戏日（北京时间 04:00 换日）成功更新过一次。
 GAME_DAY_RESET = timedelta(hours=4)
 DEFAULT_BLACKOUT_MINUTES = 30
-SOURCE_LABELS = {"plan_card": "07:50 计划卡", "gui": "Wado's MAA", "manual": "终端"}
+SOURCE_LABELS = {
+    "plan_card": "07:50 计划卡",
+    "gui": "Wado's MAA",
+    "ios": "Wado's MAA (iOS)",
+    "manual": "终端",
+}
 # `cli.toml` 里必须钉住的几项（spike §5 V10）：值按 TOML 原文比。
 PINNED_CLI_TOML = {
     ("core", "channel"): '"Beta"',
@@ -176,7 +184,8 @@ def _maa_bin(config: Config) -> str:
 
 def is_live_home() -> bool:
     try:
-        return HERMES_HOME.resolve() == LIVE_HERMES_HOME.resolve()
+        current = HERMES_HOME if HERMES_HOME != WADOS_MAA_HOME else WADOS_MAA_HOME
+        return current.resolve() == LIVE_HOME.resolve()
     except OSError:
         return False
 
