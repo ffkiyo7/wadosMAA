@@ -524,10 +524,58 @@ def _clear_active_tls_if_mine() -> None:
         pass
 
 
+class AsyncCertMonitor:
+    """非阻塞后台 TLS 到期巡检器：防止网络推送超时阻塞调度主循环，且同一时刻最多跑一轮。"""
+
+    def __init__(self, checker: Callable[..., dict[str, Any]] = maa_tls.check_cert_expiry_and_notify) -> None:
+        self._checker = checker
+        self._lock = threading.Lock()
+        self._running = False
+        self._thread: threading.Thread | None = None
+
+    def trigger(
+        self,
+        cert_path: Path,
+        state_path: Path,
+        *,
+        warn_days: int,
+        served_info: Mapping[str, Any] | None = None,
+    ) -> bool:
+        with self._lock:
+            if self._running:
+                return False
+            self._running = True
+
+        def _worker() -> None:
+            try:
+                self._checker(
+                    cert_path,
+                    state_path,
+                    warn_days=warn_days,
+                    served_info=served_info,
+                )
+            except Exception as exc:  # noqa: BLE001 — (c) 后台 TLS 巡检异常不阻断调度主循环
+                print(f"tls cert check failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            finally:
+                with self._lock:
+                    self._running = False
+
+        t = threading.Thread(target=_worker, name="wados-tls-check", daemon=True)
+        self._thread = t
+        t.start()
+        return True
+
+    def wait(self, timeout: float = 2.0) -> None:
+        t = self._thread
+        if t is not None and t.ident is not None:
+            t.join(timeout=timeout)
+
+
 def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
     ensure_private_dir(DAEMON_DIR)
     atomic_write_text(DAEMON_PID_PATH, f"{os.getpid()}\n", mode=0o600)
     scheduler = DaemonScheduler()
+    cert_monitor = AsyncCertMonitor()
     stop_flag = False
     reload_flag = False
     api_server: maa_api.SafeTLSThreadingHTTPServer | None = None
@@ -632,14 +680,14 @@ def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
                 cur_cert, _cur_key = _resolve_tls_paths(cur_cfg)
                 served_info = api_server.get_active_cert_info() if api_server is not None else None
                 if served_info is not None or cur_cert.is_file():
-                    maa_tls.check_cert_expiry_and_notify(
+                    cert_monitor.trigger(
                         cur_cert,
                         DAEMON_DIR / "tls_check.json",
                         warn_days=int(cur_cfg.get("tls_warn_days", maa_tls.DEFAULT_WARN_DAYS)),
                         served_info=served_info,
                     )
-            except Exception as exc:  # noqa: BLE001 — (c) 每日 TLS 到期巡检异常不阻断调度循环
-                print(f"tls cert check failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            except Exception as exc:  # noqa: BLE001 — (c) 每日 TLS 到期巡检派发异常不阻断调度循环
+                print(f"tls cert check dispatch failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             # 短步进睡眠，保证 SIGHUP/SIGTERM 1 秒内响应。
             deadline = time.monotonic() + max(1.0, poll_interval)
             while not stop_flag and not reload_flag and time.monotonic() < deadline:

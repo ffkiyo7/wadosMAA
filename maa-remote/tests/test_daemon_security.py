@@ -419,6 +419,111 @@ class DaemonSecurityTests(unittest.TestCase):
         self.assertFalse(r_new["notified"])
         self.assertEqual(len(sent), 1)
 
+    @unittest.skipUnless(_has_openssl3(), "需要 Homebrew OpenSSL 3")
+    def test_cert_expiry_notify_backoff_disabled_skip_and_nonblocking_monitor(self) -> None:
+        """评审【7】回归：推送失败每小时最多重试一次、未启用推送不重试、后台巡检不阻塞调度主循环。"""
+        import maa_daemon
+
+        cert_path = self.daemon_dir / "tls" / "cert.pem"
+        key_path = self.daemon_dir / "tls" / "key.pem"
+        maa_tls.generate_self_signed_cert(cert_path, key_path, lan_ip="192.168.50.2", days=20)
+        check_path = self.daemon_dir / "tls_check.json"
+
+        # 1. 未启用推送：记录 skipped，当天不再重试
+        day1 = datetime(2026, 11, 21, 9, 0, tzinfo=BEIJING)
+        calls = 0
+
+        def failing_notify(_t: str, _b: str, **_kw: Any) -> bool:
+            nonlocal calls
+            calls += 1
+            return False
+
+        r_disabled_1 = maa_tls.check_cert_expiry_and_notify(
+            cert_path, check_path, now=day1, warn_days=60, notify_fn=failing_notify, notify_enabled=False
+        )
+        self.assertTrue(r_disabled_1["skipped"])
+        self.assertEqual(calls, 0)
+        r_disabled_2 = maa_tls.check_cert_expiry_and_notify(
+            cert_path,
+            check_path,
+            now=day1 + timedelta(hours=2),
+            warn_days=60,
+            notify_fn=failing_notify,
+            notify_enabled=False,
+        )
+        self.assertTrue(r_disabled_2["cached"])
+        self.assertTrue(r_disabled_2["skipped"])
+        self.assertEqual(calls, 0)
+
+        # 2. 启用推送但失败：10 秒 / 30 分钟内退避不重试，满 1 小时才允许重试一次
+        r_fail_1 = maa_tls.check_cert_expiry_and_notify(
+            cert_path,
+            check_path,
+            now=day1 + timedelta(hours=3),
+            warn_days=60,
+            notify_fn=failing_notify,
+            notify_enabled=True,
+            retry_backoff_seconds=3600,
+        )
+        self.assertFalse(r_fail_1["notified"])
+        self.assertEqual(calls, 1)
+
+        r_backoff_10s = maa_tls.check_cert_expiry_and_notify(
+            cert_path,
+            check_path,
+            now=day1 + timedelta(hours=3, seconds=10),
+            warn_days=60,
+            notify_fn=failing_notify,
+            notify_enabled=True,
+            retry_backoff_seconds=3600,
+        )
+        self.assertTrue(r_backoff_10s["backoff"])
+        self.assertEqual(calls, 1)
+
+        r_backoff_30m = maa_tls.check_cert_expiry_and_notify(
+            cert_path,
+            check_path,
+            now=day1 + timedelta(hours=3, minutes=30),
+            warn_days=60,
+            notify_fn=failing_notify,
+            notify_enabled=True,
+            retry_backoff_seconds=3600,
+        )
+        self.assertTrue(r_backoff_30m["backoff"])
+        self.assertEqual(calls, 1)
+
+        r_retry_1h = maa_tls.check_cert_expiry_and_notify(
+            cert_path,
+            check_path,
+            now=day1 + timedelta(hours=4, seconds=1),
+            warn_days=60,
+            notify_fn=failing_notify,
+            notify_enabled=True,
+            retry_backoff_seconds=3600,
+        )
+        self.assertTrue(r_retry_1h["checked"])
+        self.assertEqual(calls, 2)
+
+        # 3. AsyncCertMonitor 后台异步执行且防重入，绝不阻塞调度主循环
+        gate = threading.Event()
+        started = threading.Event()
+
+        def slow_checker(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            started.set()
+            gate.wait(timeout=2.0)
+            return {"checked": True}
+
+        monitor = maa_daemon.AsyncCertMonitor(checker=slow_checker)
+        t0 = time.monotonic()
+        self.assertTrue(monitor.trigger(cert_path, check_path, warn_days=60))
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 0.1, f"后台巡检派发阻塞了主循环：{elapsed:.2f}s")
+        self.assertTrue(started.wait(timeout=1.0))
+        # 运行中再次 trigger 立即跳过，不重叠堆积线程
+        self.assertFalse(monitor.trigger(cert_path, check_path, warn_days=60))
+        gate.set()
+        monitor.wait(timeout=2.0)
+
     def test_pure_python_qr_encoder_and_terminal_render(self) -> None:
         pairing = json.dumps(
             {

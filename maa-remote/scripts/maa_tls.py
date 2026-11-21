@@ -44,6 +44,7 @@ DEFAULT_KEY_PATH = DEFAULT_TLS_DIR / "key.pem"
 DEFAULT_TLS_CHECK_PATH = DAEMON_DIR / "tls_check.json"
 DEFAULT_CERT_DAYS = 365 * 5
 DEFAULT_WARN_DAYS = 60
+DEFAULT_RETRY_BACKOFF_SECONDS = 3600
 
 
 def find_openssl3(explicit: str | None = None) -> str:
@@ -276,6 +277,18 @@ def _expiry_from_not_after_utc(
     }
 
 
+def _default_notify_enabled() -> bool:
+    """检查默认通知通道是否实际启用且配置齐备（未启用时不进入重试循环）。"""
+    import maa_notify
+
+    cfg = maa_notify.load_notify_config()
+    backend = str(cfg.get("notify_backend") or "none").strip().lower()
+    if backend != "bark":
+        return False
+    sec = maa_notify.load_notify_secrets()
+    return bool(str(sec.get("bark_device_key") or "").strip() and str(sec.get("bark_aes_key") or "").strip())
+
+
 def check_cert_expiry_and_notify(
     cert_path: Path,
     state_path: Path,
@@ -285,11 +298,15 @@ def check_cert_expiry_and_notify(
     openssl_bin: str | None = None,
     notify_fn: Callable[..., bool] | None = None,
     served_info: Mapping[str, Any] | None = None,
+    retry_backoff_seconds: int = DEFAULT_RETRY_BACKOFF_SECONDS,
+    notify_enabled: bool | None = None,
 ) -> dict[str, Any]:
     """每日巡检 TLS 证书剩余有效期；到期前 `warn_days`（默认 60 天）发 timeSensitive Bark 提醒。
 
-    当传入 `served_info`（内存实际正在服务的证书元数据，含 `not_after_utc` / `spki_sha256`）时，
-    以实际在服务的证书为准，避免仅换了磁盘文件但服务未重载导致旧证书到期不告警。
+    关键防抖与不阻塞保证：
+    - 传入 `served_info` 时以内存实际在服务证书的 `not_after_utc` 为准；
+    - 未启用推送时记录跳过且当天不再重试；
+    - 推送失败后按 `retry_backoff_seconds`（默认 3600s，每小时最多一次）退避，绝不高频狂重试。
     """
     moment = (now or now_beijing()).astimezone(BEIJING)
     today = moment.date().isoformat()
@@ -308,18 +325,45 @@ def check_cert_expiry_and_notify(
     if served_not_after is None and not cert_path.is_file():
         return {"checked": False, "reason": "missing_cert", "notified": False}
 
+    effective_enabled = (
+        notify_enabled
+        if notify_enabled is not None
+        else (True if notify_fn is not None else _default_notify_enabled())
+    )
+
     # 若在服务证书指纹发生变化（例如刚刚热重载了新证书），不能复用旧证书的当日缓存。
     same_cert = not served_spki or state.get("spki_sha256") == served_spki
-    if same_cert and state.get("last_checked_date") == today and (
-        not state.get("warn_due") or state.get("last_notified_date") == today
-    ):
-        return {
-            "checked": False,
-            "cached": True,
-            "notified": False,
-            "days_remaining": state.get("days_remaining"),
-            "warn_due": bool(state.get("warn_due")),
-        }
+    if same_cert and state.get("last_checked_date") == today:
+        if not state.get("warn_due") or state.get("last_notified_date") == today:
+            return {
+                "checked": False,
+                "cached": True,
+                "notified": False,
+                "days_remaining": state.get("days_remaining"),
+                "warn_due": bool(state.get("warn_due")),
+            }
+        if not effective_enabled and state.get("notify_skipped_date") == today:
+            return {
+                "checked": False,
+                "cached": True,
+                "skipped": True,
+                "notified": False,
+                "days_remaining": state.get("days_remaining"),
+                "warn_due": True,
+            }
+        if effective_enabled and retry_backoff_seconds > 0 and state.get("last_attempt_at"):
+            try:
+                last_attempt = datetime.fromisoformat(str(state["last_attempt_at"])).astimezone(BEIJING)
+                if (moment - last_attempt).total_seconds() < retry_backoff_seconds:
+                    return {
+                        "checked": False,
+                        "backoff": True,
+                        "notified": False,
+                        "days_remaining": state.get("days_remaining"),
+                        "warn_due": True,
+                    }
+            except ValueError:
+                pass
 
     if served_not_after is not None:
         info = _expiry_from_not_after_utc(
@@ -334,31 +378,37 @@ def check_cert_expiry_and_notify(
         info["spki_sha256"] = served_spki
 
     notified = False
+    skipped = False
+    attempted = False
     if info["warn_due"] and (not same_cert or state.get("last_notified_date") != today):
-        sender = notify_fn
-        if sender is None:
-            import maa_notify
-
-            sender = maa_notify.notify
-        days_int = max(0, int(info["days_remaining"]))
-        if info["expired"]:
-            title = "⚠️ 本地 TLS 证书已过期"
-            body = "请在 Mac mini 运行 rotate_tls.py 轮换证书并更新 iOS App 证书指纹，否则局域网直连和远程隧道将中断。"
+        if not effective_enabled:
+            skipped = True
         else:
-            title = f"⚠️ 本地 TLS 证书将在 {days_int} 天后到期"
-            body = (
-                f"到期时间：{str(info['not_after'])[:10]}。"
-                "建议提前在 iOS App 写入备用指纹并在 Mac mini 运行 rotate_tls.py 实现零中断轮换。"
+            attempted = True
+            sender = notify_fn
+            if sender is None:
+                import maa_notify
+
+                sender = maa_notify.notify
+            days_int = max(0, int(info["days_remaining"]))
+            if info["expired"]:
+                title = "⚠️ 本地 TLS 证书已过期"
+                body = "请在 Mac mini 运行 rotate_tls.py 轮换证书并更新 iOS App 证书指纹，否则局域网直连和远程隧道将中断。"
+            else:
+                title = f"⚠️ 本地 TLS 证书将在 {days_int} 天后到期"
+                body = (
+                    f"到期时间：{str(info['not_after'])[:10]}。"
+                    "建议提前在 iOS App 写入备用指纹并在 Mac mini 运行 rotate_tls.py 实现零中断轮换。"
+                )
+            notified = bool(
+                sender(
+                    title,
+                    body,
+                    level="timeSensitive",
+                    url="wadosmaa://settings",
+                    notification_id="tls-cert",
+                )
             )
-        notified = bool(
-            sender(
-                title,
-                body,
-                level="timeSensitive",
-                url="wadosmaa://settings",
-                notification_id="tls-cert",
-            )
-        )
 
     new_state = {
         "schema_version": 1,
@@ -369,12 +419,19 @@ def check_cert_expiry_and_notify(
         "days_remaining": info["days_remaining"],
         "warn_due": info["warn_due"],
         "last_notified_date": today if notified else (state.get("last_notified_date", "") if same_cert else ""),
+        "notify_skipped_date": today if skipped else ("" if effective_enabled else state.get("notify_skipped_date", "")),
+        "last_attempt_at": (
+            ""
+            if notified
+            else (moment.isoformat() if attempted else (state.get("last_attempt_at", "") if same_cert else ""))
+        ),
     }
     ensure_private_dir(state_path.parent)
     atomic_write_json(state_path, new_state)
     return {
         "checked": True,
         "notified": notified,
+        "skipped": skipped,
         "days_remaining": info["days_remaining"],
         "not_after": info["not_after"],
         "warn_due": info["warn_due"],
