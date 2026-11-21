@@ -571,6 +571,45 @@ class AsyncCertMonitor:
             t.join(timeout=timeout)
 
 
+def _handle_reload(
+    scheduler: DaemonScheduler,
+    api_server: maa_api.SafeTLSThreadingHTTPServer | None,
+    *,
+    daemon_config_path: Path | None = None,
+) -> dict[str, bool]:
+    """独立容错处理 SIGHUP / reload.flag：调度重载失败（如 config.json 损坏）绝不阻止 TLS 重载。"""
+    cfg_path = daemon_config_path or DAEMON_CONFIG_PATH
+    result = {"schedule_ok": False, "tls_ok": False}
+
+    try:
+        scheduler.reload()
+        result["schedule_ok"] = True
+        print("wados-maa-daemon reloaded schedule", flush=True)
+    except Exception as exc:  # noqa: BLE001 — (a) 调度重载独立容错，不阻断 TLS 证书热重载
+        print(f"schedule reload failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    if api_server is not None:
+        try:
+            cur_cfg = load_daemon_config(cfg_path)
+            cur_cert, cur_key = _resolve_tls_paths(cur_cfg)
+            if cur_cert.is_file() and cur_key.is_file():
+                meta = api_server.reload_tls(cur_cert, cur_key)
+                _write_active_tls(meta)
+                result["tls_ok"] = True
+                print(
+                    f"wados-maa-api reloaded TLS spki={meta.get('spki_sha256') or '(unavailable)'}",
+                    flush=True,
+                )
+        except Exception as exc:  # noqa: BLE001 — (a) TLS 重载独立容错，异常不退出守护进程
+            print(f"tls reload failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        try:
+            api_server.sse_hub.notify_changed()
+        except Exception as exc:  # noqa: BLE001 — (c) SSE 唤醒失败不影响主循环
+            print(f"sse notify_changed failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    return result
+
+
 def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
     ensure_private_dir(DAEMON_DIR)
     atomic_write_text(DAEMON_PID_PATH, f"{os.getpid()}\n", mode=0o600)
@@ -658,19 +697,7 @@ def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
                     RELOAD_FLAG_PATH.unlink(missing_ok=True)
                 except OSError:
                     pass
-                try:
-                    scheduler.reload()
-                    if api_server is not None:
-                        cur_cfg = load_daemon_config(DAEMON_CONFIG_PATH)
-                        cur_cert, cur_key = _resolve_tls_paths(cur_cfg)
-                        if cur_cert.is_file() and cur_key.is_file():
-                            meta = api_server.reload_tls(cur_cert, cur_key)
-                            _write_active_tls(meta)
-                            print(f"wados-maa-api reloaded TLS spki={meta.get('spki_sha256')}", flush=True)
-                        api_server.sse_hub.notify_changed()
-                    print("wados-maa-daemon reloaded schedule", flush=True)
-                except Exception as exc:  # noqa: BLE001 — (a) 守护进程顶层兜底，重载异常不退出
-                    print(f"reload failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                _handle_reload(scheduler, api_server, daemon_config_path=DAEMON_CONFIG_PATH)
             try:
                 scheduler.tick()
             except Exception as exc:  # noqa: BLE001 — (a) 守护进程顶层兜底，单拍异常不退出

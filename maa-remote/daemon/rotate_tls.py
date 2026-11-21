@@ -39,6 +39,14 @@ DaemonReloader = Callable[[Path, str], dict[str, Any]]
 CloudflaredReloader = Callable[[Path], dict[str, Any]]
 
 
+class RotationReloadError(RuntimeError):
+    """证书已落盘但服务重载失败时抛出，附带结构化回执与恢复指引。"""
+
+    def __init__(self, message: str, *, report: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.report = report
+
+
 def _is_daemon_pid(pid: int) -> bool:
     try:
         proc = subprocess.run(
@@ -242,19 +250,70 @@ def activate_next_cert(
     if reload_services:
         d_reloader = daemon_reloader or reload_running_daemon
         c_reloader = cloudflared_reloader or reload_running_cloudflared
-        errors: list[str] = []
+        daemon_failed_err = ""
         try:
-            reload_report["daemon"] = d_reloader(target_home, spki)
+            d_res = d_reloader(target_home, spki)
+            reload_report["daemon"] = d_res
+            if isinstance(d_res, dict) and d_res.get("status") == "failed":
+                daemon_failed_err = str(d_res.get("error") or "daemon 返回重载失败状态")
         except Exception as exc:  # noqa: BLE001 — (a) 收集并显式抛出重载失败原因
-            reload_report["daemon"] = {"status": "failed", "error": str(exc)}
-            errors.append(f"daemon: {exc}")
+            daemon_failed_err = str(exc)
+            reload_report["daemon"] = {"status": "failed", "reloaded": False, "error": daemon_failed_err}
+
+        if daemon_failed_err:
+            # 关键防断链：daemon 未确认切换至新证书前绝不重载 cloudflared，
+            # 否则 cloudflared 改信新 caPool 而 daemon 仍服务旧证书会导致公网隧道与 /rescue 中断。
+            reload_report["cloudflared"] = {
+                "status": "skipped",
+                "reloaded": False,
+                "reason": "daemon_reload_failed",
+            }
+            recovery = (
+                f"可先检查 {target_home / 'logs' / 'daemon.log'} 排障后重启 wados-maa-daemon 与 "
+                "wados-maa-cloudflared；若需立刻恢复磁盘与在服务证书一致，请将 "
+                f"{backup_dir or (tls_dir / 'backup-<timestamp>')} 下的旧 cert.pem/key.pem 拷回 {tls_dir}。"
+            )
+            msg = (
+                f"新证书已落盘但 wados-maa-daemon 重载失败（{daemon_failed_err}）；"
+                "为避免公网隧道中断，cloudflared 未重载（仍信任旧证书）。"
+                f"当前磁盘 cert.pem 与 daemon 在服务证书不一致。下一步：{recovery}"
+            )
+            fail_report: dict[str, Any] = {
+                "ok": False,
+                "action": "activated",
+                "cert_path": str(live_cert),
+                "key_path": str(live_key),
+                "backup_dir": str(backup_dir) if backup_dir else None,
+                "spki_sha256": spki,
+                "disk_cert_matches_served": False,
+                "reload": reload_report,
+                "recovery": recovery,
+                "error": msg,
+            }
+            raise RotationReloadError(msg, report=fail_report)
+
         try:
             reload_report["cloudflared"] = c_reloader(target_home)
         except Exception as exc:  # noqa: BLE001 — (a) 收集并显式抛出重载失败原因
-            reload_report["cloudflared"] = {"status": "failed", "error": str(exc)}
-            errors.append(f"cloudflared: {exc}")
-        if errors:
-            raise RuntimeError("新证书已落盘，但服务重载未完成：" + "；".join(errors))
+            reload_report["cloudflared"] = {"status": "failed", "reloaded": False, "error": str(exc)}
+            recovery = (
+                "wados-maa-daemon 已切换至新证书，但 cloudflared 尚未重载新 caPool；"
+                "请手动重启对应 wados-maa-cloudflared 进程/LaunchAgent 使公网隧道加载新证书。"
+            )
+            msg = f"新证书已落盘且 daemon 已切换，但 cloudflared 重载失败（{exc}）。下一步：{recovery}"
+            fail_report = {
+                "ok": False,
+                "action": "activated",
+                "cert_path": str(live_cert),
+                "key_path": str(live_key),
+                "backup_dir": str(backup_dir) if backup_dir else None,
+                "spki_sha256": spki,
+                "disk_cert_matches_served": True,
+                "reload": reload_report,
+                "recovery": recovery,
+                "error": msg,
+            }
+            raise RotationReloadError(msg, report=fail_report) from exc
 
     return {
         "ok": True,
@@ -310,6 +369,9 @@ def main(argv: list[str] | None = None) -> int:
             out = activate_next_cert(home, reload_services=not args.no_reload)
         else:
             out = rotate_now(home, lan_ip=args.lan_ip, days=args.days, reload_services=not args.no_reload)
+    except RotationReloadError as exc:
+        print(json.dumps(exc.report, ensure_ascii=False, indent=2), file=sys.stderr)
+        return 1
     except Exception as exc:  # noqa: BLE001 — (a) CLI 顶层返回结构化失败回执与非零退出码
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False, indent=2), file=sys.stderr)
         return 1

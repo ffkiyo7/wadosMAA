@@ -777,6 +777,128 @@ global.fetch = async (path, opts) => {{
             self.assertIn("err", out["cls"])
             self.assertEqual(out["runId"], "run-new")
 
+    @unittest.skipUnless(_has_openssl3(), "需要 Homebrew OpenSSL 3")
+    def test_rotate_tls_skips_cloudflared_when_daemon_reload_fails(self) -> None:
+        """复审【A】回归 1：daemon 重载失败时绝不调用 cloudflared_reloader，报错与回执写清未重载、不一致与恢复步骤。"""
+        cert_path = self.daemon_dir / "tls" / "cert.pem"
+        key_path = self.daemon_dir / "tls" / "key.pem"
+        maa_tls.generate_self_signed_cert(cert_path, key_path, lan_ip="192.168.50.2", days=30)
+        rotate_tls.stage_next_cert(self.home, lan_ip="192.168.50.2", days=1825)
+
+        cf_calls: list[Path] = []
+
+        def failing_daemon(_home: Path, _spki: str) -> dict[str, Any]:
+            raise RuntimeError("daemon SIGHUP timeout")
+
+        def spy_cloudflared(home: Path) -> dict[str, Any]:
+            cf_calls.append(home)
+            return {"status": "reloaded"}
+
+        with self.assertRaises(rotate_tls.RotationReloadError) as caught:
+            rotate_tls.activate_next_cert(
+                self.home,
+                daemon_reloader=failing_daemon,
+                cloudflared_reloader=spy_cloudflared,
+            )
+
+        self.assertEqual(cf_calls, [], "daemon 重载失败后不应调用 cloudflared reloader")
+        msg = str(caught.exception)
+        self.assertIn("cloudflared 未重载", msg)
+        self.assertIn("不一致", msg)
+        self.assertIn("下一步", msg)
+        rep = caught.exception.report
+        self.assertFalse(rep["ok"])
+        self.assertFalse(rep["disk_cert_matches_served"])
+        self.assertEqual(rep["reload"]["daemon"]["status"], "failed")
+        self.assertEqual(rep["reload"]["cloudflared"]["status"], "skipped")
+        self.assertTrue(rep.get("backup_dir"))
+        self.assertTrue(rep.get("recovery"))
+
+    @unittest.skipUnless(_has_openssl3(), "需要 Homebrew OpenSSL 3")
+    def test_daemon_sighup_reloads_tls_even_when_config_json_is_corrupted(self) -> None:
+        """复审【A】回归 2：config.json 损坏导致调度重载失败时，真实 SIGHUP 仍完成 TLS 热重载并切换在服务证书。"""
+        import signal
+
+        cert_path = self.daemon_dir / "tls" / "cert.pem"
+        key_path = self.daemon_dir / "tls" / "key.pem"
+        old_info = maa_tls.generate_self_signed_cert(cert_path, key_path, lan_ip="192.168.50.2", days=30)
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+
+        maa_common.atomic_write_json(
+            self.daemon_dir / "daemon.json",
+            {
+                "schema_version": 1,
+                "notify_backend": "none",
+                "depot_enabled": False,
+                "api_enabled": True,
+                "api_host": "127.0.0.1",
+                "api_port": port,
+                "allowed_cidrs": ["127.0.0.1/32"],
+            },
+        )
+        (self.state_dir / "config.json").write_text("{broken-json", encoding="utf-8")
+
+        env = dict(os.environ)
+        env["WADOS_MAA_HOME"] = str(self.home)
+        proc = subprocess.Popen(
+            [sys.executable, str(ROOT / "scripts" / "maa_daemon.py")],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+
+        def _cleanup_proc() -> None:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2.0)
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+
+        self.addCleanup(_cleanup_proc)
+
+        active_path = self.daemon_dir / "active_tls.json"
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            if active_path.is_file():
+                doc = json.loads(active_path.read_text(encoding="utf-8"))
+                if doc.get("spki_sha256") == old_info["spki_sha256"]:
+                    break
+            time.sleep(0.1)
+        self.assertTrue(active_path.is_file(), "daemon 未及时写出 active_tls.json")
+
+        staged = rotate_tls.stage_next_cert(self.home, lan_ip="192.168.50.2", days=1825)
+        os.replace(self.daemon_dir / "tls" / "cert.next.pem", cert_path)
+        os.replace(self.daemon_dir / "tls" / "key.next.pem", key_path)
+        proc.send_signal(signal.SIGHUP)
+
+        switched = False
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            doc = json.loads(active_path.read_text(encoding="utf-8"))
+            if doc.get("spki_sha256") == staged["spki_sha256"]:
+                switched = True
+                break
+            time.sleep(0.1)
+        self.assertTrue(switched, "config.json 损坏时 SIGHUP 未完成 TLS 热重载")
+
+        cctx = ssl._create_unverified_context()
+        with socket.create_connection(("127.0.0.1", port), timeout=3.0) as raw:
+            with cctx.wrap_socket(raw, server_hostname="127.0.0.1") as tls:
+                peer_der = tls.getpeercert(binary_form=True)
+        expected_der = ssl.PEM_cert_to_DER_cert(cert_path.read_text(encoding="utf-8"))
+        self.assertEqual(peer_der, expected_der)
+
 
 if __name__ == "__main__":
     unittest.main()
