@@ -58,6 +58,11 @@ class IsolationTests(unittest.TestCase):
             os.listdir(_isolation.REAL_HOME / ".hermes")
         with self.assertRaises(_isolation.RealHomeTouched):
             maa_common.atomic_write_json(live.with_name("probe.json"), {})
+        live_wados = _isolation.REAL_HOME / ".wados-maa" / "state" / "maa" / "config.json"
+        with self.assertRaises(_isolation.RealHomeTouched):
+            live_wados.read_text(encoding="utf-8")
+        with self.assertRaises(_isolation.RealHomeTouched):
+            os.listdir(_isolation.REAL_HOME / ".wados-maa")
 
     def test_reaching_the_internet_raises_but_loopback_is_allowed(self) -> None:
         if _isolation.LIVE_TESTS:

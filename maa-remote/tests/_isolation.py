@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any
 
 REAL_HOME = Path(pwd.getpwuid(os.getuid()).pw_dir)
-_PROTECTED_NAMES = (".hermes", ".config/maa-cli", "Library")
+_PROTECTED_NAMES = (".hermes", ".wados-maa", ".config/maa-cli", "Library")
 
 
 def _protected_roots() -> tuple[str, ...]:
@@ -174,6 +174,7 @@ TEMP_HOME = Path(tempfile.mkdtemp(prefix="maa-tests-home-"))
 atexit.register(shutil.rmtree, TEMP_HOME, ignore_errors=True)
 
 os.environ["HOME"] = str(TEMP_HOME)
+os.environ["WADOS_MAA_HOME"] = str(TEMP_HOME / ".wados-maa")
 os.environ["HERMES_HOME"] = str(TEMP_HOME / ".hermes")
 os.environ["MAA_CONFIG_DIR"] = str(TEMP_HOME / ".config" / "maa-cli")
 # deploy 读这两个变量决定频道和森空岛 token；开发机 shell 里设过就会改变用例行为。
@@ -194,8 +195,10 @@ sys.addaudithook(_audit)
 # 所以约定：**用例自己的状态文件写进自己的临时目录**，共享 HOME 里只许留下面这两个
 # 空锁文件（`fcntl` 锁随文件关闭释放，空文件不携带状态；2026-11-04 实测整套跑完只剩它们）。
 SHARED_HOME_ALLOWED = frozenset({
-    ".hermes/state/maa/run.lock",  # maa_common.RUN_LOCK_PATH
-    ".hermes/state/agent-book/state.lock",  # maa_common.STATE_LOCK_PATH
+    ".wados-maa/state/maa/run.lock",  # maa_common.RUN_LOCK_PATH
+    ".wados-maa/state/maa/state.lock",  # maa_common.STATE_LOCK_PATH
+    ".hermes/state/maa/run.lock",  # 兼容过渡期旧路径
+    ".hermes/state/agent-book/state.lock",  # 兼容过渡期旧路径
 })
 
 
