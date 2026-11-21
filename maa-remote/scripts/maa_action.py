@@ -1512,11 +1512,13 @@ def _schedule_text(report: dict[str, Any]) -> str:
         drift = [
             f"{maa_schedule.SCRIPT_NAMES[script]} cron 是 {task['expr'] or '（找不到）'}"
             f"{'' if task['enabled'] else '（暂停）'}"
-            for script, task in item["cron"].items()
-            if not task["in_sync"]
+            for script, task in (item.get("cron") or {}).items()
+            if not task.get("in_sync", True)
         ]
         tail = f"；与配置不一致：{'、'.join(drift)}" if drift else ""
         lines.append(f"· {PHASE_NAMES[phase]} {item['time']}（{state}）{tail}")
+    if "depot_enabled" in report:
+        lines.append(f"· 仓库对表 04:30（{'开' if report['depot_enabled'] else '关'}）")
     return "场次时间：\n" + "\n".join(lines)
 
 
@@ -1552,10 +1554,7 @@ def _schedule_write(
         changed_config = maa_common.update_config({"session_schedule": updated}, action_source())
     label = maa_common.session_label(changed_config, phase)
     try:
-        # 对齐细节（cron 改了什么）不进给人看的回执，开发者区里 `schedule show` 能看。
-        maa_schedule.sync_phase(
-            changed_config, phase, _hermes_bin(changed_config), toggle=enabled is not None
-        )
+        maa_schedule.sync_phase(changed_config, phase, toggle=enabled is not None)
     except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
         report = maa_schedule.schedule_report(changed_config)
         return refuse(
@@ -1573,17 +1572,25 @@ def schedule_set(phase: str, value: str) -> tuple[bool, str, dict[str, Any]]:
     return _schedule_write(phase, time_value=value)
 
 
+def schedule_depot(enabled: bool) -> tuple[bool, str, dict[str, Any]]:
+    maa_schedule.set_depot_enabled(enabled)
+    report = maa_schedule.schedule_report(load_config())
+    state = "开" if enabled else "关"
+    return done("schedule_saved", f"仓库对表已设为：{state}。", report)
+
+
 def schedule_toggle(phase: str, enabled: bool) -> tuple[bool, str, dict[str, Any]]:
+    if phase == "depot":
+        return schedule_depot(enabled)
     return _schedule_write(phase, enabled=enabled)
 
 
 def schedule_sync() -> tuple[bool, str, dict[str, Any]]:
-    """只把 cron 的**时间**对齐到配置，不碰暂停状态。"""
+    """通知内置调度器按配置重载。"""
     config = load_config()
-    hermes = _hermes_bin(config)
     notes: list[str] = []
     for phase in PLAN_PHASES:
-        notes.extend(maa_schedule.sync_phase(config, phase, hermes))
+        notes.extend(maa_schedule.sync_phase(config, phase))
     report = maa_schedule.schedule_report(config)
     if notes:
         return done("schedule_synced", "到点自动开始的时间已对齐。", report, detail="；".join(notes))
@@ -2227,6 +2234,8 @@ def dispatch_gui(argv: list[str]) -> tuple[bool, str, dict[str, Any]] | None:
         return schedule_set(argv[2], argv[3])
     if argv[:2] in (["schedule", "enable"], ["schedule", "disable"]) and len(argv) == 3:
         return schedule_toggle(argv[2], argv[1] == "enable")
+    if argv[:2] == ["schedule", "depot"] and len(argv) == 3 and argv[2] in ("on", "off"):
+        return schedule_depot(argv[2] == "on")
     if argv == ["schedule", "sync"]:
         return schedule_sync()
     if argv in (["upstream", "status"], ["upstream", "status", "--online"]):

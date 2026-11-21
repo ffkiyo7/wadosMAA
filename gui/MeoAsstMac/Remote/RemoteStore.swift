@@ -124,7 +124,13 @@ struct ChangeMeta: Decodable, Sendable, Equatable {
 
     /// 「由 Wado's MAA 于 11-06 14:03 改」。
     var text: String {
-        let who = source == "gui" ? "Wado's MAA" : source == "discord" ? "Discord" : (source ?? "未知")
+        let who: String
+        switch source {
+        case "gui": who = "Wado's MAA"
+        case "ios": who = "Wado's MAA (iOS)"
+        case "discord": who = "Discord"
+        default: who = source ?? "未知"
+        }
         guard let updatedAt, let date = RunLock.parseISO(updatedAt) else { return "由 \(who) 改" }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = RunLock.beijing
@@ -165,26 +171,85 @@ struct ScheduleReport: Decodable, Sendable {
         let expectedExpr: String
         let enabled: Bool
         let inSync: Bool
+        let nextRunAt: String?
+        let lastStatus: String?
 
         enum CodingKeys: String, CodingKey {
             case id, expr, enabled
             case expectedExpr = "expected_expr"
             case inSync = "in_sync"
+            case nextRunAt = "next_run_at"
+            case lastStatus = "last_status"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decodeIfPresent(String.self, forKey: .id) ?? ""
+            expr = try c.decodeIfPresent(String.self, forKey: .expr) ?? ""
+            expectedExpr = try c.decodeIfPresent(String.self, forKey: .expectedExpr) ?? expr
+            enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? false
+            inSync = try c.decodeIfPresent(Bool.self, forKey: .inSync) ?? true
+            nextRunAt = try c.decodeIfPresent(String.self, forKey: .nextRunAt)
+            lastStatus = try c.decodeIfPresent(String.self, forKey: .lastStatus)
+        }
+    }
+
+    struct ScheduledJob: Decodable, Sendable {
+        let id: String
+        let enabled: Bool
+        let nextRunAt: String?
+        let lastRunAt: String?
+        let lastStatus: String?
+        let lastDetail: String?
+
+        enum CodingKeys: String, CodingKey {
+            case id, enabled
+            case nextRunAt = "next_run_at"
+            case lastRunAt = "last_run_at"
+            case lastStatus = "last_status"
+            case lastDetail = "last_detail"
         }
     }
 
     struct Session: Decodable, Sendable {
         let time: String
         let enabled: Bool
+        let planCardTime: String?
+        let dailyTime: String?
         let cron: [String: CronJob]
+
+        enum CodingKeys: String, CodingKey {
+            case time, enabled, cron
+            case planCardTime = "plan_card_time"
+            case dailyTime = "daily_time"
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            time = try c.decode(String.self, forKey: .time)
+            enabled = try c.decode(Bool.self, forKey: .enabled)
+            planCardTime = try c.decodeIfPresent(String.self, forKey: .planCardTime)
+            dailyTime = try c.decodeIfPresent(String.self, forKey: .dailyTime)
+            cron = try c.decodeIfPresent([String: CronJob].self, forKey: .cron) ?? [:]
+        }
     }
 
+    let backend: String?
     let timezone: String
-    let jobsPath: String
+    let depotEnabled: Bool?
+    let schedulerPath: String?
+    let jobsPath: String?
     let sessions: [String: Session]
+    let jobs: [String: ScheduledJob]?
+
+    var displayPath: String {
+        schedulerPath ?? jobsPath ?? ""
+    }
 
     enum CodingKeys: String, CodingKey {
-        case timezone, sessions
+        case backend, timezone, sessions, jobs
+        case depotEnabled = "depot_enabled"
+        case schedulerPath = "scheduler_path"
         case jobsPath = "jobs_path"
     }
 }

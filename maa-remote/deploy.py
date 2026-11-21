@@ -238,9 +238,13 @@ SCRIPT_NAMES = (
     "maa_settings.py",
     "maa_upstream.py",
     "maa_notify.py",
+    "maa_daemon.py",
 )
 # swiftc 编译产物：线上是二进制，`--check` 只查存在。
 COMPILED_HELPERS = ("ocrbox", "winmove", "barkcrypt")
+LAUNCHER_NAME = "wados-maa-launcher"
+LAUNCHER_IDENTIFIER = "io.github.ffkiyo7.wados-maa.launcher"
+LAUNCHER_SIGN_IDENTITY = "Apple Development"
 SKILL_RELATIVE_PATH = Path("skills") / "games" / "maa-operator" / "SKILL.md"
 
 
@@ -290,6 +294,158 @@ def deploy_barkcrypt() -> None:
         "barkcrypt",
         "Bark 端到端加密推送将不可用（通知自动降级不阻断跑场）。",
     )
+
+
+def deploy_launcher(target_home: Path | None = None) -> None:
+    """编译并以固定身份签名 S0-4 方案 B Swift launcher (`wados-maa-launcher`)。"""
+    home = target_home or HERMES_HOME
+    source = ROOT / "daemon" / f"{LAUNCHER_NAME}.swift"
+    target = home / "scripts" / LAUNCHER_NAME
+    if not source.is_file() or shutil.which("swiftc") is None:
+        return
+    needs_build = not target.is_file() or target.stat().st_mtime < source.stat().st_mtime
+    if needs_build:
+        ensure_dir(target.parent, 0o700)
+        try:
+            result = subprocess.run(
+                ["swiftc", "-O", str(source), "-o", str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=180,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr[-500:])
+            os.chmod(target, 0o700)
+            changed.append(str(target))
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            print(
+                f"{LAUNCHER_NAME} 编译失败（{type(exc).__name__}: {exc}）——守护进程将缺少固定签名入口。",
+                file=sys.stderr,
+            )
+            return
+    if shutil.which("codesign"):
+        identity = os.environ.get("WADOS_LAUNCHER_SIGN_IDENTITY", LAUNCHER_SIGN_IDENTITY).strip()
+        if identity:
+            sign = subprocess.run(
+                [
+                    "codesign",
+                    "--force",
+                    "--sign",
+                    identity,
+                    "--identifier",
+                    LAUNCHER_IDENTIFIER,
+                    str(target),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+            if sign.returncode != 0:
+                print(
+                    f"{LAUNCHER_NAME} 签名跳过（{sign.stderr.strip()[-200:]}）",
+                    file=sys.stderr,
+                )
+
+
+def is_standalone_mode(explicit: bool = False) -> bool:
+    """是否走独立模式：显式 `--standalone`，或仅设置了 `WADOS_MAA_HOME`（未设 `HERMES_HOME`）。"""
+    if explicit:
+        return True
+    wados = os.environ.get("WADOS_MAA_HOME", "").strip()
+    hermes = os.environ.get("HERMES_HOME", "").strip()
+    return bool(wados) and not hermes
+
+
+def resolve_standalone_home(explicit_home: str = "") -> Path:
+    raw = explicit_home.strip() or os.environ.get("WADOS_MAA_HOME", "").strip()
+    return Path(raw).expanduser() if raw else USER_HOME / ".wados-maa"
+
+
+def deploy_daemon_files(target_home: Path) -> None:
+    """独立模式初始化 `daemon/daemon.json` 与 LaunchAgent plist 模板渲染（不碰 ~/Library/LaunchAgents）。"""
+    daemon_dir = target_home / "daemon"
+    logs_dir = target_home / "logs"
+    ensure_dir(daemon_dir, 0o700)
+    ensure_dir(logs_dir, 0o700)
+
+    cfg_path = daemon_dir / "daemon.json"
+    if not cfg_path.exists():
+        write_json(
+            cfg_path,
+            {
+                "schema_version": 1,
+                "notify_backend": "none",
+                "bark_base_url": "https://api.day.app",
+                "bark_icon_url": "",
+                "depot_enabled": False,
+            },
+        )
+
+    plist_src = ROOT / "daemon" / "io.github.ffkiyo7.wados-maa.daemon.plist"
+    if plist_src.is_file():
+        config = load_json(target_home / "state" / "maa" / "config.json", {})
+        proxy = str(config.get("upstream_proxy") or "http://127.0.0.1:7890") if isinstance(config, dict) else "http://127.0.0.1:7890"
+        rendered = (
+            plist_src.read_text(encoding="utf-8")
+            .replace("__SCRIPTS_DIR__", str(target_home / "scripts"))
+            .replace("__PYTHON_BIN__", sys.executable)
+            .replace("__WADOS_MAA_HOME__", str(target_home))
+            .replace("__LOGS_DIR__", str(logs_dir))
+            .replace("__UPSTREAM_PROXY__", proxy)
+        )
+        write_text(daemon_dir / plist_src.name, rendered, 0o600)
+
+
+def check_standalone(target_home: Path) -> dict[str, Any]:
+    """独立模式 `--check`（只读）：核对脚本、编译产物、maa-cli 配置与 daemon.json，不碰 Hermes。"""
+    script_pairs = [(ROOT / "scripts" / name, target_home / "scripts" / name) for name in SCRIPT_NAMES]
+    exists_checked = [target for _source, target in script_pairs]
+    exists_checked.extend(target_home / "scripts" / name for name in (*COMPILED_HELPERS, LAUNCHER_NAME))
+    exists_checked.extend(target for _source, target in maa_config_file_pairs())
+    exists_checked.append(target_home / "daemon" / "daemon.json")
+    missing = [str(path) for path in exists_checked if not path.is_file()]
+    mismatched = content_mismatches([*script_pairs, *maa_config_content_checked_pairs()])
+    ok = not missing and not mismatched
+    return {
+        "ok": ok,
+        "mode": "standalone",
+        "home": str(target_home),
+        "missing": missing,
+        "mismatched": mismatched,
+    }
+
+
+def deploy_standalone(target_home: Path) -> dict[str, Any]:
+    """独立模式部署到 `target_home`（绝不触碰 `~/.hermes` 的任何文件）。"""
+    global HERMES_HOME
+    previous_home = HERMES_HOME
+    HERMES_HOME = target_home
+    try:
+        deploy_scripts()
+        existing = load_json(target_home / "state" / "maa" / "config.json", {})
+        existing_channel = str(existing.get("channel_id") or "") if isinstance(existing, dict) else ""
+        channel_id = os.environ.get("MAA_CHANNEL_ID", "").strip() or existing_channel
+        if channel_id == CHANNEL_PLACEHOLDER:
+            channel_id = ""
+        deploy_state(channel_id)
+        deploy_maa_config()
+        deploy_skland_token()
+        deploy_ocrbox()
+        deploy_winmove()
+        deploy_barkcrypt()
+        deploy_launcher(target_home)
+        deploy_daemon_files(target_home)
+        return {
+            "ok": True,
+            "mode": "standalone",
+            "home": str(target_home),
+            "changed": list(changed),
+            "backup": str(backup_root()),
+        }
+    finally:
+        HERMES_HOME = previous_home
 
 
 def _compile_swift(name: str, consequence: str) -> None:
@@ -1058,7 +1214,19 @@ def check_deployment() -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true", help="only report whether deployment is current (read-only)")
+    parser.add_argument("--standalone", action="store_true", help="deploy standalone Wado's MAA home without touching Hermes")
+    parser.add_argument("--target-home", default="", help="target home directory for standalone mode")
     args = parser.parse_args(argv)
+    if is_standalone_mode(args.standalone):
+        target_home = resolve_standalone_home(args.target_home)
+        if args.check:
+            report = check_standalone(target_home)
+            print(json.dumps(report, ensure_ascii=False))
+            return 0 if report["ok"] else 1
+        result = deploy_standalone(target_home)
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
+
     if args.check:
         report = check_deployment()
         print(json.dumps(report, ensure_ascii=False))

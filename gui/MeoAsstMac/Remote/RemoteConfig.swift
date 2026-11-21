@@ -9,9 +9,14 @@
 import Foundation
 
 enum RemoteConfig {
-    /// 开发期（K1）用状态副本；S7 切线上时改成 `~/.hermes`，或在设置里改。
+    /// 开发期（K1）用状态副本；Phase 3 生产切线后线上迁至 `~/.wados-maa`。
     static let developmentHermesHome = "~/Developer/forks/maa-remote-devhome"
+    static let liveWadosHome = "~/.wados-maa"
     static let liveHermesHome = "~/.hermes"
+
+    /// Phase 3 生产切线防回落开关：开启后代码层拒绝解析到已停用的 `~/.hermes`。
+    /// Phase 1–2 过渡期保持 `false`，切线时统一置 `true`。
+    static let disallowLegacyHermesHome = false
 
     static let hermesHomeKey = "RemoteHermesHome"
     static let pythonKey = "RemotePython"
@@ -20,20 +25,37 @@ enum RemoteConfig {
         URL(fileURLWithPath: (path as NSString).expandingTildeInPath, isDirectory: true)
     }
 
-    /// 解析顺序：进程环境 `HERMES_HOME` → 设置里填的 → 开发副本。
+    private static func standardizedPath(_ url: URL) -> String {
+        url.resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    /// 解析顺序：`WADOS_MAA_HOME` → `HERMES_HOME` → 设置里填的 → 开发副本。
     static var hermesHome: URL {
-        if let env = ProcessInfo.processInfo.environment["HERMES_HOME"], !env.isEmpty {
-            return expand(env)
+        let env = ProcessInfo.processInfo.environment
+        let candidate: URL
+        if let raw = env["WADOS_MAA_HOME"], !raw.isEmpty {
+            candidate = expand(raw)
+        } else if let raw = env["HERMES_HOME"], !raw.isEmpty {
+            candidate = expand(raw)
+        } else if let stored = UserDefaults.standard.string(forKey: hermesHomeKey), !stored.isEmpty {
+            candidate = expand(stored)
+        } else {
+            candidate = expand(developmentHermesHome)
         }
-        if let stored = UserDefaults.standard.string(forKey: hermesHomeKey), !stored.isEmpty {
-            return expand(stored)
+        if disallowLegacyHermesHome && isLegacyHermesHome(candidate) {
+            return expand(liveWadosHome)
         }
-        return expand(developmentHermesHome)
+        return candidate
+    }
+
+    static func isLegacyHermesHome(_ url: URL) -> Bool {
+        standardizedPath(url) == standardizedPath(expand(liveHermesHome))
     }
 
     static var isLiveHome: Bool {
-        hermesHome.resolvingSymlinksInPath().standardizedFileURL.path
-            == expand(liveHermesHome).resolvingSymlinksInPath().standardizedFileURL.path
+        let current = standardizedPath(hermesHome)
+        return current == standardizedPath(expand(liveWadosHome))
+            || (!disallowLegacyHermesHome && current == standardizedPath(expand(liveHermesHome)))
     }
 
     static var stateDirectory: URL { hermesHome.appending(path: "state/maa", directoryHint: .isDirectory) }
@@ -68,6 +90,7 @@ enum RemoteConfig {
     /// 子进程环境：从 Finder 起的 App 没有 Homebrew 的 PATH；改动记成「由 Wado's MAA 改的」。
     static func environment() -> [String: String] {
         var env = ProcessInfo.processInfo.environment
+        env["WADOS_MAA_HOME"] = hermesHome.path
         env["HERMES_HOME"] = hermesHome.path
         env["MAA_ACTION_SOURCE"] = "gui"
         env["PYTHONIOENCODING"] = "utf-8"

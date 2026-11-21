@@ -210,22 +210,44 @@ struct AdvancedSection: View {
     private var cronPopover: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let schedule = store.schedule {
-                Text("时区 \(schedule.timezone)").foregroundStyle(WM.f2)
+                Text("时区 \(schedule.timezone)" + (schedule.backend == "daemon" ? " · 内置调度器" : ""))
+                    .foregroundStyle(WM.f2)
                 ForEach(["am", "pm"], id: \.self) { phase in
                     if let session = schedule.sessions[phase] {
-                        ForEach(session.cron.keys.sorted(), id: \.self) { script in
-                            if let job = session.cron[script] {
-                                HStack {
-                                    Text((phase == "am" ? "早场 " : "晚场 ") + (script == "maa_plan_card.py" ? "计划卡" : "日常"))
-                                    Spacer(minLength: 20)
-                                    Text(cronText(job)).font(.system(size: 12, design: .monospaced))
-                                        .foregroundStyle(job.inSync ? WM.f2 : WM.game)
+                        if session.cron.isEmpty {
+                            HStack {
+                                Text(phase == "am" ? "早场" : "晚场")
+                                Spacer(minLength: 20)
+                                Text("\(session.time)（\(session.enabled ? "运行中" : "已暂停")）")
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(WM.f2)
+                            }
+                        } else {
+                            ForEach(session.cron.keys.sorted(), id: \.self) { script in
+                                if let job = session.cron[script] {
+                                    HStack {
+                                        Text((phase == "am" ? "早场 " : "晚场 ") + (script == "maa_plan_card.py" ? "计划卡" : "日常"))
+                                        Spacer(minLength: 20)
+                                        Text(cronText(job)).font(.system(size: 12, design: .monospaced))
+                                            .foregroundStyle(job.inSync ? WM.f2 : WM.game)
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                Text(schedule.jobsPath).font(.system(size: 11)).foregroundStyle(WM.f3).textSelection(.enabled)
+                if let depotEnabled = schedule.depotEnabled {
+                    HStack {
+                        Text("仓库对表 04:30")
+                        Spacer(minLength: 20)
+                        Text(depotEnabled ? "运行中" : "已暂停")
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(WM.f2)
+                    }
+                }
+                if !schedule.displayPath.isEmpty {
+                    Text(schedule.displayPath).font(.system(size: 11)).foregroundStyle(WM.f3).textSelection(.enabled)
+                }
             } else {
                 Text(store.scheduleError ?? "读不到场次").foregroundStyle(WM.danger)
             }

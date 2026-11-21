@@ -1,192 +1,204 @@
 #!/usr/bin/env python3
-"""早晚场时间和 Hermes cron 的同步（K6）。
+"""早晚场时间、仓库对表开关与内置调度器同步（Phase 1 S1-5，替代 `hermes cron`）。
 
-`config.session_schedule` 是场次时间的唯一来源；cron 只是它的执行者。这里只做三件事：
-
-- 从 `$HERMES_HOME/cron/jobs.json` **只读**地认出四个场次任务（按脚本名 + 工作目录名
-  `am` / `pm` 认，不写死任务 id——线上和开发副本的 id 一样，但重建任务后就不一样了）；
-- 按 Hermes 的时区把「北京时间 HH:MM」换成 cron 表达式（计划卡提前 `PLAN_CARD_LEAD_MINUTES`）；
-- 用 `hermes cron edit / pause / resume` 改任务。jobs.json 由 Hermes 自己加锁维护，这里**从不直接写它**。
-
-`hermes` 认 `HERMES_HOME`（2026-11-06 核实：空目录下 `cron list` 为空，开发副本下列的是副本），
-所以开发期带 `HERMES_HOME=<devhome>` 改的只是副本。
+职责：
+1. `config.session_schedule` 是早晚场时间与开关的唯一真值，全程使用 `Asia/Shanghai` 北京时间；
+2. `daemon/daemon.json` 的 `depot_enabled`（默认 `false`）控制 04:30 仓库对表；
+3. 读取 `daemon/scheduler.json` 组合 `schedule_report()`，供 Mac GUI / iOS App / CLI 消费；
+4. 配置变更时通过 `SIGHUP` + `daemon/reload.flag` 通知 `wados-maa-daemon` 立即热重载，
+   不再调用 `hermes cron` CLI。
 """
 
 from __future__ import annotations
 
 import os
-import re
+import signal
 import subprocess
-from datetime import datetime, timedelta, tzinfo
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import maa_daemon
 from maa_common import (
     BEIJING,
-    HERMES_HOME,
-    PHASE_NAMES,
+    DAEMON_DIR,
     PLAN_CARD_LEAD_MINUTES,
     PLAN_PHASES,
+    atomic_write_json,
+    atomic_write_text,
+    ensure_private_dir,
     load_json,
     now_beijing,
     session_schedule,
+    state_lock,
 )
 
 # 场次任务：脚本名 → 相对开跑时间的偏移（分钟）。
 SESSION_SCRIPTS = {"maa_plan_card.py": -PLAN_CARD_LEAD_MINUTES, "maa_daily.py": 0}
 SCRIPT_NAMES = {"maa_plan_card.py": "计划卡", "maa_daily.py": "日常"}
-HERMES_TIMEOUT = 20
-_TIMEZONE_LINE_RE = re.compile(r"^timezone:\s*['\"]?([A-Za-z0-9_+\-/]+)['\"]?\s*$", re.M)
 
 
-def jobs_path() -> Path:
-    return HERMES_HOME / "cron" / "jobs.json"
+def scheduler_state_path() -> Path:
+    return DAEMON_DIR / "scheduler.json"
 
 
-def hermes_timezone(home: Path | None = None) -> tzinfo:
-    """Hermes 解释 cron 表达式用的时区，解析顺序照抄 `hermes_time`：
-
-    `HERMES_TIMEZONE` → `$HERMES_HOME/config.yaml` 的 `timezone` → 本机时区。
-    config.yaml 只用正则读顶层 `timezone:` 一行（stdlib 没有 yaml）。
-    """
-    names = [os.environ.get("HERMES_TIMEZONE", "").strip()]
-    try:
-        text = ((home or HERMES_HOME) / "config.yaml").read_text(encoding="utf-8")
-    except OSError:
-        text = ""
-    match = _TIMEZONE_LINE_RE.search(text)
-    names.append(match.group(1) if match else "")
-    for name in names:
-        if not name:
-            continue
-        try:
-            return ZoneInfo(name)
-        except (ZoneInfoNotFoundError, ValueError):
-            continue
-    local = datetime.now().astimezone().tzinfo
-    return local if local is not None else BEIJING
+def daemon_config_path() -> Path:
+    return DAEMON_DIR / "daemon.json"
 
 
-def cron_expr(hhmm: str, offset_minutes: int, zone: tzinfo, at: datetime | None = None) -> str:
-    """北京时间 `HH:MM` + 偏移 → Hermes 时区下的 `M H * * *`。"""
+def daemon_pid_path() -> Path:
+    return DAEMON_DIR / "daemon.pid"
+
+
+def reload_flag_path() -> Path:
+    return DAEMON_DIR / "reload.flag"
+
+
+def _shift_hhmm(hhmm: str, offset_minutes: int, at: datetime | None = None) -> str:
     hour, minute = (int(part) for part in hhmm.split(":"))
     day = (at or now_beijing()).astimezone(BEIJING)
-    moment = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    local = (moment + timedelta(minutes=offset_minutes)).astimezone(zone)
-    return f"{local.minute} {local.hour} * * *"
+    shifted = day.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(
+        minutes=offset_minutes
+    )
+    return f"{shifted.hour:02d}:{shifted.minute:02d}"
 
 
-def session_jobs(path: Path | None = None) -> dict[tuple[str, str], dict[str, Any]]:
-    """`{(场次, 脚本名): 任务}`。同一格认出两个任务就抛——宁可停下来也不改错任务。"""
-    raw = load_json(path or jobs_path(), {})
-    jobs = raw.get("jobs") if isinstance(raw, dict) else raw
-    result: dict[tuple[str, str], dict[str, Any]] = {}
-    if not isinstance(jobs, list):
-        return result
-    for job in jobs:
-        if not isinstance(job, dict):
-            continue
-        script = Path(str(job.get("script") or "")).name
-        phase = Path(str(job.get("workdir") or "")).name
-        if script not in SESSION_SCRIPTS or phase not in PLAN_PHASES:
-            continue
-        if job.get("state") == "completed":
-            continue
-        key = (phase, script)
-        if key in result:
-            raise RuntimeError(
-                f"cron 里有两个{PHASE_NAMES[phase]}{SCRIPT_NAMES[script]}任务"
-                f"（{result[key].get('id')} / {job.get('id')}），不知道该改哪个"
-            )
-        result[key] = job
-    return result
+def _is_daemon_pid(pid: int) -> bool:
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    return any(Path(part).name == "maa_daemon.py" for part in result.stdout.strip().split())
 
 
-def job_enabled(job: Mapping[str, Any]) -> bool:
-    return bool(job.get("enabled", True)) and job.get("state") != "paused"
+def notify_daemon_reload() -> bool:
+    """触发内置调度器热重载：落 `reload.flag` 并向已核对的 `maa_daemon.py` 发 `SIGHUP`。
+
+    守护进程未运行时不报错，下次启动自然读取最新配置。返回是否成功发送了信号。
+    """
+    ensure_private_dir(DAEMON_DIR)
+    atomic_write_text(reload_flag_path(), now_beijing().isoformat() + "\n", mode=0o600)
+    pid_file = daemon_pid_path()
+    if not pid_file.is_file():
+        return False
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    if pid <= 1 or not _is_daemon_pid(pid):
+        return False
+    try:
+        os.kill(pid, signal.SIGHUP)
+        return True
+    except OSError:
+        return False
 
 
-def job_expr(job: Mapping[str, Any]) -> str:
-    schedule = job.get("schedule")
-    return str(schedule.get("expr") or "") if isinstance(schedule, dict) else ""
+def set_depot_enabled(enabled: bool) -> dict[str, Any]:
+    """写 `daemon/daemon.json` 的 `depot_enabled` 并通知内置调度器热重载。"""
+    path = daemon_config_path()
+    with state_lock():
+        cfg = maa_daemon.load_daemon_config(path)
+        cfg["depot_enabled"] = bool(enabled)
+        atomic_write_json(path, cfg)
+    notify_daemon_reload()
+    return cfg
 
 
 def schedule_report(config: Mapping[str, Any], at: datetime | None = None) -> dict[str, Any]:
-    """`schedule show` 的数据：每场的配置时间、开关，和对应 cron 任务的现状 / 期望。"""
-    zone = hermes_timezone()
-    jobs = session_jobs()
-    sessions: dict[str, Any] = {}
-    for phase, slot in session_schedule(config).items():
-        tasks: dict[str, Any] = {}
-        for script, offset in SESSION_SCRIPTS.items():
-            job = jobs.get((phase, script))
-            expected = cron_expr(str(slot["time"]), offset, zone, at)
-            tasks[script] = {
-                "id": str(job.get("id") or "") if job else "",
-                "expr": job_expr(job) if job else "",
-                "expected_expr": expected,
-                "enabled": job_enabled(job) if job else False,
-                "in_sync": bool(job)
-                and job_expr(job) == expected
-                and job_enabled(job) == bool(slot["enabled"]),
-            }
-        sessions[phase] = {"time": slot["time"], "enabled": slot["enabled"], "cron": tasks}
-    return {"timezone": str(zone), "jobs_path": str(jobs_path()), "sessions": sessions}
+    """`schedule show` 的新返回结构（供 Mac GUI / iOS App 消费，不再依赖 Hermes cron）。"""
+    moment = (at or now_beijing()).astimezone(BEIJING)
+    daemon_cfg = maa_daemon.load_daemon_config(daemon_config_path())
+    raw_state = load_json(scheduler_state_path(), {})
+    state_jobs = raw_state.get("jobs") if isinstance(raw_state, dict) else {}
+    if not isinstance(state_jobs, dict):
+        state_jobs = {}
 
+    depot_enabled = bool(daemon_cfg.get("depot_enabled", False))
+    sched_path = str(scheduler_state_path())
 
-def hermes_env() -> dict[str, str]:
-    env = dict(os.environ)
-    env["HERMES_HOME"] = str(HERMES_HOME)
-    return env
-
-
-def run_hermes(hermes: str, args: list[str]) -> None:
-    result = subprocess.run(
-        [hermes, "cron", *args],
-        capture_output=True,
-        text=True,
-        timeout=HERMES_TIMEOUT,
-        check=False,
-        env=hermes_env(),
-        stdin=subprocess.DEVNULL,
-    )
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip().splitlines()
-        raise RuntimeError(
-            f"hermes cron {' '.join(args)} 失败：{detail[-1][:200] if detail else result.returncode}"
+    jobs_summary: dict[str, dict[str, Any]] = {}
+    for key in maa_daemon.JOB_ORDER:
+        raw_recorded = state_jobs.get(key)
+        recorded: dict[str, Any] = raw_recorded if isinstance(raw_recorded, dict) else {}
+        enabled, _cur = maa_daemon.today_slot_for(key, config, daemon_cfg, moment)
+        nxt = maa_daemon.next_run_for(
+            key, config, daemon_cfg, moment, str(recorded.get("last_slot") or "")
         )
+        jobs_summary[key] = {
+            "id": key,
+            "enabled": enabled,
+            "next_run_at": nxt.isoformat() if nxt is not None else None,
+            "last_run_at": recorded.get("last_run_at"),
+            "last_status": recorded.get("last_status"),
+            "last_detail": recorded.get("last_detail"),
+        }
+
+    sessions: dict[str, Any] = {}
+    for phase in PLAN_PHASES:
+        slot = session_schedule(config)[phase]
+        hhmm = str(slot["time"])
+        enabled = bool(slot["enabled"])
+        plan_time = _shift_hhmm(hhmm, -PLAN_CARD_LEAD_MINUTES, moment)
+        tasks: dict[str, Any] = {}
+        for script, job_key, expected_time in (
+            ("maa_plan_card.py", f"plan_card_{phase}", plan_time),
+            ("maa_daily.py", f"daily_{phase}", hhmm),
+        ):
+            job_info = jobs_summary[job_key]
+            tasks[script] = {
+                "id": job_key,
+                "expr": expected_time,
+                "expected_expr": expected_time,
+                "enabled": enabled,
+                "in_sync": True,
+                "next_run_at": job_info["next_run_at"],
+                "last_status": job_info["last_status"],
+            }
+        sessions[phase] = {
+            "time": hhmm,
+            "enabled": enabled,
+            "plan_card_time": plan_time,
+            "daily_time": hhmm,
+            "cron": tasks,
+        }
+
+    return {
+        "backend": "daemon",
+        "timezone": "Asia/Shanghai",
+        "depot_enabled": depot_enabled,
+        "scheduler_path": sched_path,
+        "jobs_path": sched_path,
+        "sessions": sessions,
+        "jobs": jobs_summary,
+    }
 
 
 def sync_phase(
     config: Mapping[str, Any],
     phase: str,
-    hermes: str,
+    hermes: str = "",
     *,
     toggle: bool = False,
     at: datetime | None = None,
 ) -> list[str]:
-    """把一场的两个任务对齐到配置：时间不对就 `edit --schedule`；`toggle` 时再按开关
-    `pause` / `resume`。
+    """通知内置调度器按最新 `config.session_schedule` 热重载。
 
-    只有用户在 GUI 里**拨了开关**才动暂停状态：开发期 cron 是用户手动全停的，
-    改个时间不能顺手把它们恢复。返回给人看的变更说明。
+    保留 `hermes` / `toggle` 参数以兼容既有调用签名；不再调 `hermes cron` CLI。
     """
+    del hermes, toggle
     slot = session_schedule(config)[phase]
-    zone = hermes_timezone()
-    jobs = session_jobs()
-    notes: list[str] = []
-    for script, offset in SESSION_SCRIPTS.items():
-        name = f"{PHASE_NAMES[phase]}{SCRIPT_NAMES[script]}"
-        job = jobs.get((phase, script))
-        if job is None:
-            raise RuntimeError(f"cron 里找不到{name}任务（{jobs_path()}）")
-        job_id = str(job.get("id") or "")
-        expected = cron_expr(str(slot["time"]), offset, zone, at)
-        if job_expr(job) != expected:
-            run_hermes(hermes, ["edit", job_id, "--schedule", expected])
-            notes.append(f"{name} → {expected}（{zone}）")
-        if toggle and job_enabled(job) != bool(slot["enabled"]):
-            run_hermes(hermes, ["resume" if slot["enabled"] else "pause", job_id])
-            notes.append(f"{name}已{'恢复' if slot['enabled'] else '暂停'}")
-    return notes
+    hhmm = str(slot["time"])
+    plan_time = _shift_hhmm(hhmm, -PLAN_CARD_LEAD_MINUTES, at)
+    reloaded = notify_daemon_reload()
+    state_text = "开" if slot["enabled"] else "关"
+    suffix = "（已通知守护进程重载）" if reloaded else "（守护进程未运行，启动后生效）"
+    return [f"{phase} 计划卡 {plan_time} / 日常 {hhmm}（{state_text}）{suffix}"]

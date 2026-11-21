@@ -574,6 +574,67 @@ class DeployPromptPatchTests(unittest.TestCase):
             self.assertIn(key, repo)
 
 
+class StandaloneDeployTests(unittest.TestCase):
+    """S1-5：`deploy.py --standalone` 独立模式部署到临时目录并 `--check` 通过，零触碰 Hermes。"""
+
+    def test_standalone_deploy_and_check_without_touching_hermes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="wados-standalone-") as raw:
+            root = Path(raw)
+            target_home = root / "wados-home"
+            hermes_home = root / "untouched-hermes"
+            maa_cfg = root / "maa-cli"
+
+            def fake_swift(name: str, _consequence: str) -> None:
+                p = deploy.HERMES_HOME / "scripts" / name
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"fake-bin")
+
+            def fake_launcher(home: Path | None = None) -> None:
+                p = (home or deploy.HERMES_HOME) / "scripts" / deploy.LAUNCHER_NAME
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(b"fake-launcher")
+
+            with patch.object(deploy, "USER_HOME", root), \
+                    patch.object(deploy, "HERMES_HOME", hermes_home), \
+                    patch.object(deploy, "MAA_CONFIG_HOME", maa_cfg), \
+                    patch.object(deploy, "changed", []), \
+                    patch.object(deploy, "_compile_swift", side_effect=fake_swift), \
+                    patch.object(deploy, "deploy_launcher", side_effect=fake_launcher):
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    code = deploy.main(["--standalone", "--target-home", str(target_home)])
+                self.assertEqual(code, 0, out.getvalue())
+                result = json.loads(out.getvalue())
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["mode"], "standalone")
+
+                # 零触碰 Hermes 文件（adapter / config.yaml / .env / SKILL.md 均不存在）
+                self.assertFalse(hermes_home.exists())
+                self.assertFalse((target_home / "skills").exists())
+                self.assertFalse((target_home / ".env").exists())
+                self.assertFalse((target_home / "config.yaml").exists())
+
+                # 独立模式产物齐全
+                daemon_cfg = json.loads((target_home / "daemon" / "daemon.json").read_text(encoding="utf-8"))
+                self.assertFalse(daemon_cfg["depot_enabled"])
+                self.assertTrue((target_home / "daemon" / "io.github.ffkiyo7.wados-maa.daemon.plist").is_file())
+
+                check_out = io.StringIO()
+                with contextlib.redirect_stdout(check_out):
+                    check_code = deploy.main(["--standalone", "--target-home", str(target_home), "--check"])
+                self.assertEqual(check_code, 0, check_out.getvalue())
+                report = json.loads(check_out.getvalue())
+                self.assertTrue(report["ok"], report)
+                self.assertEqual(report["missing"], [])
+                self.assertEqual(report["mismatched"], [])
+
+    def test_wados_maa_home_without_hermes_home_auto_enables_standalone(self) -> None:
+        with patch.dict(os.environ, {"WADOS_MAA_HOME": "/tmp/x", "HERMES_HOME": ""}, clear=False):
+            self.assertTrue(deploy.is_standalone_mode(False))
+        with patch.dict(os.environ, {"WADOS_MAA_HOME": "/tmp/x", "HERMES_HOME": "/tmp/y"}, clear=False):
+            self.assertFalse(deploy.is_standalone_mode(False))
+            self.assertTrue(deploy.is_standalone_mode(True))
+
 
 if __name__ == "__main__":
     unittest.main()

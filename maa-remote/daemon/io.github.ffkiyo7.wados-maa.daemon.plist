@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.github.ffkiyo7.wados-maa.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SCRIPTS_DIR__/wados-maa-launcher</string>
+        <string>__PYTHON_BIN__</string>
+        <string>__SCRIPTS_DIR__/maa_daemon.py</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>AbandonProcessGroup</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>__WADOS_MAA_HOME__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>WADOS_MAA_HOME</key>
+        <string>__WADOS_MAA_HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>PYTHONIOENCODING</key>
+        <string>utf-8</string>
+        <key>HTTP_PROXY</key>
+        <string>__UPSTREAM_PROXY__</string>
+        <key>HTTPS_PROXY</key>
+        <string>__UPSTREAM_PROXY__</string>
+        <key>http_proxy</key>
+        <string>__UPSTREAM_PROXY__</string>
+        <key>https_proxy</key>
+        <string>__UPSTREAM_PROXY__</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__LOGS_DIR__/daemon.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOGS_DIR__/daemon.log</string>
+</dict>
+</plist>

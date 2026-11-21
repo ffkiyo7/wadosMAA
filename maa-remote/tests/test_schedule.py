@@ -14,7 +14,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
-from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -31,7 +30,6 @@ from _helpers import BEIJING  # noqa: E402
 
 _DEVICE_GUARDS: list = []
 _MODULE_PATCHES: list = []
-UTC = ZoneInfo("Etc/UTC")
 
 
 def setUpModule() -> None:
@@ -53,26 +51,6 @@ def schedule(am: str = "08:00", pm: str = "22:00", *, am_on: bool = True, pm_on:
             "pm": {"time": pm, "enabled": pm_on},
         }
     }
-
-
-def job(job_id: str, script: str, phase: str, expr: str, *, paused: bool = False) -> dict:
-    return {
-        "id": job_id,
-        "script": script,
-        "workdir": f"/somewhere/state/maa/{phase}",
-        "schedule": {"kind": "cron", "expr": expr},
-        "enabled": not paused,
-        "state": "paused" if paused else "scheduled",
-    }
-
-
-LIVE_JOBS = [
-    job("card-am", "maa_plan_card.py", "am", "50 23 * * *"),
-    job("card-pm", "maa_plan_card.py", "pm", "50 13 * * *"),
-    job("daily-am", "maa_daily.py", "am", "0 0 * * *"),
-    job("daily-pm", "maa_daily.py", "pm", "0 14 * * *"),
-    job("depot", "maa_depot.py", "", "30 20 * * *"),
-]
 
 
 class SessionScheduleTests(unittest.TestCase):
@@ -165,90 +143,55 @@ class ConfiguredGateTests(unittest.TestCase):
                 self.assertNotIn('"晚场 22:00"', source)
 
 
-class CronExpressionTests(unittest.TestCase):
-    def test_beijing_times_become_hermes_timezone_cron(self) -> None:
-        at = datetime(2026, 11, 6, 12, 0, tzinfo=BEIJING)
-        self.assertEqual(maa_schedule.cron_expr("08:00", -10, UTC, at), "50 23 * * *")
-        self.assertEqual(maa_schedule.cron_expr("22:00", 0, UTC, at), "0 14 * * *")
-        self.assertEqual(maa_schedule.cron_expr("08:05", 0, BEIJING, at), "5 8 * * *")
+class BuiltinSchedulerReportTests(unittest.TestCase):
+    """S1-5：`maa_schedule.py` 对接内置调度器（不再调 `hermes cron`）。"""
 
-    def test_timezone_resolution_matches_hermes(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            home = Path(raw)
-            (home / "config.yaml").write_text("model: x\ntimezone: Etc/UTC\n", encoding="utf-8")
-            with patch.dict("os.environ", {"HERMES_TIMEZONE": ""}):
-                self.assertEqual(str(maa_schedule.hermes_timezone(home)), "Etc/UTC")
-            with patch.dict("os.environ", {"HERMES_TIMEZONE": "Asia/Tokyo"}):
-                self.assertEqual(str(maa_schedule.hermes_timezone(home)), "Asia/Tokyo")
-
-
-class CronSyncTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
-        self.jobs_path = Path(self._tmp.name) / "jobs.json"
-        self.write_jobs(LIVE_JOBS)
-        self.calls: list[list[str]] = []
+        self.daemon_dir = Path(self._tmp.name) / "daemon"
+        self.daemon_dir.mkdir()
         for item in (
-            patch.object(maa_schedule, "jobs_path", lambda: self.jobs_path),
-            patch.object(maa_schedule, "hermes_timezone", lambda home=None: UTC),
-            patch.object(maa_schedule, "run_hermes", lambda hermes, args: self.calls.append(args)),
+            patch.object(maa_schedule, "DAEMON_DIR", self.daemon_dir),
+            patch.object(maa_schedule, "state_lock", return_value=contextlib.nullcontext()),
         ):
             item.start()
             self.addCleanup(item.stop)
 
-    def write_jobs(self, jobs: list[dict]) -> None:
-        self.jobs_path.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+    def test_schedule_report_uses_beijing_time_and_defaults_depot_disabled(self) -> None:
+        at = datetime(2026, 11, 21, 7, 30, tzinfo=BEIJING)
+        report = maa_schedule.schedule_report(schedule("08:00", "22:00"), at)
+        self.assertEqual(report["backend"], "daemon")
+        self.assertEqual(report["timezone"], "Asia/Shanghai")
+        self.assertFalse(report["depot_enabled"])
+        self.assertEqual(report["sessions"]["am"]["plan_card_time"], "07:50")
+        self.assertEqual(report["sessions"]["am"]["daily_time"], "08:00")
+        self.assertEqual(report["sessions"]["pm"]["plan_card_time"], "21:50")
+        self.assertEqual(report["sessions"]["pm"]["daily_time"], "22:00")
+        self.assertEqual(
+            set(report["jobs"]),
+            {"plan_card_am", "daily_am", "plan_card_pm", "daily_pm", "depot", "activity_watch"},
+        )
+        self.assertFalse(report["jobs"]["depot"]["enabled"])
+        self.assertIsNone(report["jobs"]["depot"]["next_run_at"])
 
-    def test_jobs_are_found_by_script_and_workdir(self) -> None:
-        found = maa_schedule.session_jobs()
-        self.assertEqual({key: value["id"] for key, value in found.items()}, {
-            ("am", "maa_plan_card.py"): "card-am",
-            ("pm", "maa_plan_card.py"): "card-pm",
-            ("am", "maa_daily.py"): "daily-am",
-            ("pm", "maa_daily.py"): "daily-pm",
-        })
+    def test_notify_reload_writes_flag_and_signals_verified_daemon_pid(self) -> None:
+        (self.daemon_dir / "daemon.pid").write_text("43210\n", encoding="utf-8")
+        with patch.object(maa_schedule, "_is_daemon_pid", return_value=True), \
+                patch.object(maa_schedule.os, "kill") as kill:
+            reloaded = maa_schedule.notify_daemon_reload()
+        self.assertTrue(reloaded)
+        self.assertTrue((self.daemon_dir / "reload.flag").is_file())
+        kill.assert_called_once_with(43210, maa_schedule.signal.SIGHUP)
 
-    def test_two_candidates_for_one_slot_refuse_instead_of_guessing(self) -> None:
-        self.write_jobs([*LIVE_JOBS, job("dup", "maa_daily.py", "am", "0 1 * * *")])
-        with self.assertRaisesRegex(RuntimeError, "不知道该改哪个"):
-            maa_schedule.session_jobs()
-        # 跑完的一次性任务不算候选。
-        done = job("old", "maa_daily.py", "am", "0 1 * * *")
-        done["state"] = "completed"
-        self.write_jobs([*LIVE_JOBS, done])
-        self.assertEqual(maa_schedule.session_jobs()[("am", "maa_daily.py")]["id"], "daily-am")
-
-    def test_a_time_change_edits_both_jobs_and_never_unpauses(self) -> None:
-        paused = [dict(item, enabled=False, state="paused") for item in LIVE_JOBS]
-        self.write_jobs(paused)
-        notes = maa_schedule.sync_phase(schedule(pm="21:30"), "pm", "hermes")
-        self.assertEqual(self.calls, [
-            ["edit", "card-pm", "--schedule", "20 13 * * *"],
-            ["edit", "daily-pm", "--schedule", "30 13 * * *"],
-        ])
-        self.assertEqual(len(notes), 2)
-
-    def test_toggling_pauses_or_resumes_only_that_session(self) -> None:
-        maa_schedule.sync_phase(schedule(am_on=False), "am", "hermes", toggle=True)
-        self.assertEqual(self.calls, [["pause", "card-am"], ["pause", "daily-am"]])
-        self.calls.clear()
-        self.write_jobs([dict(item, enabled=False, state="paused") for item in LIVE_JOBS])
-        maa_schedule.sync_phase(schedule(), "am", "hermes", toggle=True)
-        self.assertEqual(self.calls, [["resume", "card-am"], ["resume", "daily-am"]])
-
-    def test_already_in_sync_is_a_no_op(self) -> None:
-        self.assertEqual(maa_schedule.sync_phase(schedule(), "am", "hermes", toggle=True), [])
-        self.assertEqual(self.calls, [])
-        report = maa_schedule.schedule_report(schedule())
-        self.assertTrue(all(
-            task["in_sync"] for item in report["sessions"].values() for task in item["cron"].values()
-        ))
-
-    def test_a_missing_job_is_an_error_not_a_silent_skip(self) -> None:
-        self.write_jobs([item for item in LIVE_JOBS if item["id"] != "daily-pm"])
-        with self.assertRaisesRegex(RuntimeError, "找不到晚场日常"):
-            maa_schedule.sync_phase(schedule(pm="21:00"), "pm", "hermes")
+    def test_set_depot_enabled_updates_daemon_json_and_reloads(self) -> None:
+        maa_schedule.set_depot_enabled(True)
+        saved = json.loads((self.daemon_dir / "daemon.json").read_text(encoding="utf-8"))
+        self.assertTrue(saved["depot_enabled"])
+        self.assertTrue((self.daemon_dir / "reload.flag").is_file())
+        report = maa_schedule.schedule_report(schedule(), datetime(2026, 11, 21, 4, 0, tzinfo=BEIJING))
+        self.assertTrue(report["depot_enabled"])
+        self.assertTrue(report["jobs"]["depot"]["enabled"])
 
 
 class ScheduleCommandTests(unittest.TestCase):
@@ -257,18 +200,15 @@ class ScheduleCommandTests(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
         root = Path(self._tmp.name)
         self.config_path = root / "config.json"
-        self.jobs_path = root / "jobs.json"
+        self.daemon_dir = root / "daemon"
+        self.daemon_dir.mkdir()
         maa_common.atomic_write_json(self.config_path, {"schema_version": 1, "channel_id": "1"})
-        self.jobs_path.write_text(json.dumps({"jobs": LIVE_JOBS}), encoding="utf-8")
-        self.calls: list[list[str]] = []
         for item in (
             patch.object(maa_common, "CONFIG_PATH", self.config_path),
             patch.object(maa_common, "state_lock", return_value=contextlib.nullcontext()),
             patch.object(maa_action, "load_config", maa_common.load_config),
-            patch.object(maa_action, "_hermes_bin", lambda config: "hermes"),
-            patch.object(maa_schedule, "jobs_path", lambda: self.jobs_path),
-            patch.object(maa_schedule, "hermes_timezone", lambda home=None: UTC),
-            patch.object(maa_schedule, "run_hermes", lambda hermes, args: self.calls.append(args)),
+            patch.object(maa_schedule, "DAEMON_DIR", self.daemon_dir),
+            patch.object(maa_schedule, "state_lock", return_value=contextlib.nullcontext()),
         ):
             item.start()
             self.addCleanup(item.stop)
@@ -279,26 +219,31 @@ class ScheduleCommandTests(unittest.TestCase):
             maa_action.main(["maa_action.py", *argv])
         return json.loads(out.getvalue())
 
-    def test_set_writes_config_with_who_and_when_then_syncs_cron(self) -> None:
+    def test_set_writes_config_with_who_and_when_then_reloads_daemon(self) -> None:
         receipt = self.run_main("schedule", "set", "pm", "21:30")
         self.assertTrue(receipt["ok"], receipt)
         config = json.loads(self.config_path.read_text(encoding="utf-8"))
         self.assertEqual(config["session_schedule"]["pm"], {"time": "21:30", "enabled": True})
         self.assertEqual(config["config_meta"]["session_schedule"]["source"], "gui")
-        self.assertEqual(self.calls[0], ["edit", "card-pm", "--schedule", "20 13 * * *"])
+        self.assertTrue((self.daemon_dir / "reload.flag").is_file())
         self.assertEqual(receipt["data"]["sessions"]["pm"]["time"], "21:30")
+        self.assertEqual(receipt["data"]["backend"], "daemon")
+
+    def test_depot_toggle_via_action_command(self) -> None:
+        receipt = self.run_main("schedule", "depot", "on", source="ios")
+        self.assertTrue(receipt["ok"], receipt)
+        self.assertTrue(receipt["data"]["depot_enabled"])
+        off = self.run_main("schedule", "disable", "depot", source="ios")
+        self.assertTrue(off["ok"], off)
+        self.assertFalse(off["data"]["depot_enabled"])
 
     def test_bad_time_writes_nothing(self) -> None:
         receipt = self.run_main("schedule", "set", "am", "03:00")
         self.assertFalse(receipt["ok"])
         self.assertNotIn("session_schedule", json.loads(self.config_path.read_text(encoding="utf-8")))
-        self.assertEqual(self.calls, [])
 
-    def test_cron_failure_is_reported_after_the_config_is_saved(self) -> None:
-        def boom(hermes: str, args: list[str]) -> None:
-            raise RuntimeError("hermes cron edit 失败：x")
-
-        with patch.object(maa_schedule, "run_hermes", boom):
+    def test_sync_failure_is_reported_after_the_config_is_saved(self) -> None:
+        with patch.object(maa_schedule, "sync_phase", side_effect=RuntimeError("reload boom")):
             receipt = self.run_main("schedule", "disable", "am")
         self.assertFalse(receipt["ok"])
         self.assertIn("稍后再改一次", receipt["message"])
