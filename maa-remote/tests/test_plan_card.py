@@ -1065,9 +1065,25 @@ class PlanCardNoDiscordTests(unittest.TestCase):
                 [{"stage": "SR-5", "mode": "normal", "candidate": {"id": 1}}],
                 {},
                 title="🤖 已排程：SR-5",
+                scheduled_at="2026-11-21T19:06:03.359390+08:00",
             )
         self.assertEqual(mid, "")
         notify.assert_called_once()
+        self.assertEqual(notify.call_args.kwargs["level"], "passive")
+        self.assertNotIn("T19:06:03", notify.call_args.args[1])
+        self.assertIn("19:06", notify.call_args.args[1])
+
+        with patch.object(maa_action.maa_notify, "notify", return_value=True) as notify_off, \
+                patch.object(maa_action, "discord_request", side_effect=AssertionError("no discord")):
+            mid_quiet = maa_action.publish_round(
+                "b" * 12,
+                [{"stage": "SR-5", "mode": "normal", "candidate": {"id": 1}}],
+                {},
+                title="🤖 已排程：SR-5",
+                notify=False,
+            )
+        self.assertEqual(mid_quiet, "")
+        notify_off.assert_not_called()
 
 
 if __name__ == "__main__":

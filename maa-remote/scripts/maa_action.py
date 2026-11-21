@@ -836,10 +836,15 @@ def run_local(stage: str, raw_switches: str, *flags: str) -> tuple[bool, str, di
         skipped.append("剿灭")
     tail = f"，跳过{'、'.join(skipped)}" if skipped else ""
     forced = "（日常就要开始了，已确认仍然开始）" if state["forced"] else ""
+    has_discord = str(config.get("channel_id") or "").strip().isdigit()
+    notify_tail = (
+        f"进度稍后发到 Discord{'；Discord 上那张旧的选关卡没收起来，不用管它' if warning else ''}。"
+        if has_discord
+        else "完成后会推送战报。"
+    )
     return done(
         "run_started",
-        f"▶️ 手动日常开始了，刷 {plan_stage_label(state)}{tail}{forced}；"
-        f"进度稍后发到 Discord{'；Discord 上那张旧的选关卡没收起来，不用管它' if warning else ''}。",
+        f"▶️ 手动日常开始了，刷 {plan_stage_label(state)}{tail}{forced}；{notify_tail}",
         {"token": token, "stage": stage, "tasks": tasks, "annihilation": switches["annihilation"]},
         detail=f"收起旧选关卡失败：{warning}" if warning else "",
     )
@@ -1064,6 +1069,23 @@ def dispatch_blocker(
     return ""
 
 
+def _format_scheduled_time(raw: str) -> str:
+    """把排程 ISO 时间格式化成人类可读的北京时间（同日 `HH:MM`，跨日 `MM-DD HH:MM`）。"""
+    text = raw.strip()
+    if not text:
+        return ""
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return text
+    now = now_beijing()
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(now.tzinfo)
+    if dt.date() == now.date():
+        return dt.strftime("%H:%M")
+    return dt.strftime("%m-%d %H:%M")
+
+
 def publish_round(
     token: str,
     entries: list[dict[str, Any]],
@@ -1073,23 +1095,25 @@ def publish_round(
     scheduled_at: str = "",
     note: str = "",
     pause_button: bool = False,
+    notify: bool = True,
 ) -> str:
     """发一张「已排程」卡（有 Discord 配置时）并走 `maa_notify` 发出排程通知，返回 message_id。
 
     无 Discord 配置时跳过发排程卡与写 `BUTTONS_PATH`，返回 `""`，绝不抛异常。
     """
-    body_parts = [f"共 {len(entries)} 项"]
-    if scheduled_at:
-        body_parts.append(f"预计 {scheduled_at}")
-    if note:
-        body_parts.append(note[:300])
-    maa_notify.notify(
-        title,
-        "\n".join(body_parts),
-        level="active",
-        notification_id=f"copilot-round-{token}",
-        url="wadosmaa://copilot",
-    )
+    if notify:
+        body_parts = [f"共 {len(entries)} 项"]
+        if scheduled_at:
+            body_parts.append(f"预计 {_format_scheduled_time(scheduled_at)}")
+        if note:
+            body_parts.append(note[:300])
+        maa_notify.notify(
+            title,
+            "\n".join(body_parts),
+            level="passive",
+            notification_id=f"copilot-round-{token}",
+            url="wadosmaa://copilot",
+        )
 
     channel_id = str(config.get("channel_id") or "").strip()
     if not channel_id.isdigit():
@@ -1797,6 +1821,7 @@ def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]
     message_id = publish_round(
         search, entries, config, title=f"🤖 已排程：{code}",
         note=f"Wado's MAA 预览后确认开打：作业 {candidate['id']}「{candidate.get('title', '')}」。",
+        notify=False,
     )
     state = {
         "token": search,
