@@ -31,6 +31,7 @@ import _isolation  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 SWIFT_ROOT = REPO / "gui" / "MeoAsstMac" / "Remote"
+SHARED_SWIFT_ROOT = REPO / "shared" / "Sources"
 ACTION = REPO / "maa-remote" / "scripts" / "maa_action.py"
 DAILY = REPO / "maa-remote" / "scripts" / "maa_daily.py"
 SETTINGS = REPO / "maa-remote" / "scripts" / "maa_settings.py"
@@ -134,8 +135,10 @@ def banned_in(text: str) -> list[str]:
 
 def scan_swift() -> list[str]:
     problems: list[str] = []
-    for path in sorted(SWIFT_ROOT.rglob("*.swift")):
-        rel = path.relative_to(SWIFT_ROOT).as_posix()
+    # `shared/` 里的文案（场次状态、失败原因）同样直接上界面。
+    shared_paths = sorted(SHARED_SWIFT_ROOT.rglob("*.swift")) if SHARED_SWIFT_ROOT.is_dir() else []
+    for path in [*sorted(SWIFT_ROOT.rglob("*.swift")), *shared_paths]:
+        rel = path.relative_to(REPO).as_posix() if path.is_relative_to(SHARED_SWIFT_ROOT) else path.relative_to(SWIFT_ROOT).as_posix()
         skipping: str | None = None
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             guard = GUARD.search(line)

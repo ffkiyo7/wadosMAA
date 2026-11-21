@@ -8,6 +8,7 @@
 
 import AppKit
 import SwiftUI
+import WadosMAAShared
 
 /// 步骤条：计划里要做的事一格一格排开，放不下就换行。
 struct RunStepsView: View {

@@ -9,6 +9,7 @@
 import AppKit
 import Foundation
 import Observation
+import WadosMAAShared
 
 @MainActor @Observable final class AppLog {
     static let shared = AppLog()

@@ -1,23 +1,27 @@
 //
 //  RunStageParser.swift
-//  Wado's MAA
+//  WadosMAAShared
 //
-//  过渡期用：maa-remote 没给 `last_run.progress`（旧版、抄作业）时才用它，见 RunProgress.swift。
-//  maa-cli 日志 → 阶段。只认整行的 `<Task> Start|Completed|Error|Stopped` 和 `AllTasksCompleted`，
-//  其余行（理智、掉落、公招 tag……）一律不看。只依赖 Foundation，方便单独拿出来测。
+//  maa-cli 日志 → 阶段；没有 progress.json 的旧场次才用。只依赖 Foundation。
 //
 
 import Foundation
 
 /// 一个阶段：`key` 对上计划里要做的事（`StartUp` / `Annihilation` / `Fight` …），
 /// `label` 给状态条用（「刷理智」），`doing` 给日志用（「正在刷理智」）。
-struct RunStage: Equatable, Sendable {
-    let key: String
-    let label: String
-    let doing: String
+public struct RunStage: Equatable, Sendable {
+    public let key: String
+    public let label: String
+    public let doing: String
+
+    public init(key: String, label: String, doing: String) {
+        self.key = key
+        self.label = label
+        self.doing = doing
+    }
 }
 
-enum RunStageEvent: Equatable, Sendable {
+public enum RunStageEvent: Equatable, Sendable {
     case started(RunStage)
     /// `<Task> Completed`（只认刚 Start 的那一个）。
     case completed(RunStage)
@@ -31,27 +35,27 @@ enum RunStageEvent: Equatable, Sendable {
     case allDone
 }
 
-struct RunStageParser: Sendable {
+public struct RunStageParser: Sendable {
     /// 抄作业：`Fight` 是导航到关卡，`Custom` 是界面检查 / 战后收尾，不是刷理智、回主界面。
-    let copilot: Bool
+    public let copilot: Bool
     /// 日常本场要打剿灭（`last_run.plan.annihilation == true`）：剿灭也是 `Fight`，排在刷理智前面，
     /// 日志里分不出来，只能按「第一个 Fight 是剿灭」算（maa-remote 的任务顺序，DEV_GUIDE §5）。
-    let annihilationPlanned: Bool
+    public let annihilationPlanned: Bool
 
-    static let wrapUp = RunStage(key: "WrapUp", label: "收尾", doing: "正在收尾")
+    public static let wrapUp = RunStage(key: "WrapUp", label: "收尾", doing: "正在收尾")
 
     private var fightStarts = 0
     /// 最近一次 Start 的任务名和阶段，给 Error / Stopped 认名字用。
     private var running: (task: String, stage: RunStage)?
     private var pending = Data()
 
-    init(copilot: Bool, annihilationPlanned: Bool) {
+    public init(copilot: Bool, annihilationPlanned: Bool) {
         self.copilot = copilot
         self.annihilationPlanned = annihilationPlanned
     }
 
     /// 喂一段新读到的字节；不完整的最后一行留到下次。
-    mutating func feed(_ data: Data) -> [RunStageEvent] {
+    public mutating func feed(_ data: Data) -> [RunStageEvent] {
         pending.append(data)
         var events: [RunStageEvent] = []
         while let newline = pending.firstIndex(of: 0x0A) {
@@ -74,7 +78,7 @@ struct RunStageParser: Sendable {
         return (1..<match.numberOfRanges).compactMap { Range(match.range(at: $0), in: line).flatMap { Int(line[$0]) } }
     }
 
-    mutating func parse(line raw: String) -> RunStageEvent? {
+    public mutating func parse(line raw: String) -> RunStageEvent? {
         let stripped = Self.ansi.stringByReplacingMatches(
             in: raw, range: NSRange(raw.startIndex..., in: raw), withTemplate: "")
         let line = stripped.trimmingCharacters(in: .whitespacesAndNewlines)

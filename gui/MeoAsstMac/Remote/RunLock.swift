@@ -8,38 +8,7 @@
 
 import Darwin
 import Foundation
-
-struct LockHolder: Decodable, Sendable, Equatable {
-    let holder: String
-    let detail: String?
-    let pid: Int?
-    let since: String?
-
-    /// 给人看的名字：「早场日常」「抄作业 SR-8」「更新游戏资源」。
-    /// `daily` 的 detail 是 `maa_daily.PHASE_LABELS`（早 / 晚 / 手动）。
-    var name: String {
-        let detail = String((detail ?? "").prefix(30))
-        switch holder {
-        case "daily":
-            switch detail {
-            case "早": return "早场日常"
-            case "晚": return "晚场日常"
-            case "手动": return "手动日常"
-            default: return "日常"
-            }
-        case "copilot": return detail.isEmpty ? "抄作业" : "抄作业 \(detail)"
-        case "depot": return "清点仓库"
-        case "update": return "更新游戏资源"
-        default: return "另一个任务"
-        }
-    }
-
-    /// 「早场日常（08:00 开始）」。
-    var text: String {
-        guard let since, let date = RunLock.parseISO(since) else { return name }
-        return "\(name)（\(RunLock.beijingClock(date)) 开始）"
-    }
-}
+import WadosMAAShared
 
 enum RunLock {
     /// 现在谁占着；锁空着返回 nil。
@@ -63,20 +32,9 @@ enum RunLock {
 
     // MARK: - 时间格式
 
-    static let beijing = TimeZone(identifier: "Asia/Shanghai")!
+    static var beijing: TimeZone { BeijingTime.zone }
 
-    static func parseISO(_ text: String) -> Date? {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: text) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: text)
-    }
+    static func parseISO(_ text: String) -> Date? { BeijingTime.parseISO(text) }
 
-    static func beijingClock(_ date: Date) -> String {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = beijing
-        let parts = calendar.dateComponents([.hour, .minute], from: date)
-        return String(format: "%02d:%02d", parts.hour ?? 0, parts.minute ?? 0)
-    }
+    static func beijingClock(_ date: Date) -> String { BeijingTime.clock(date) }
 }

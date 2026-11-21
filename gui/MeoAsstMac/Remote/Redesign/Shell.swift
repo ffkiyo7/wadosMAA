@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import WadosMAAShared
 
 enum WMPage: String, CaseIterable, Identifiable, Hashable {
     case today, daily, copilot, settings

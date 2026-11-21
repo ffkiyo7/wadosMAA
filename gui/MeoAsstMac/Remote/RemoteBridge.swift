@@ -9,29 +9,15 @@
 
 import AppKit
 import Foundation
+import WadosMAAShared
 
-struct RemoteReceipt: Sendable {
-    let ok: Bool
-    /// 稳定的短码（`session_soon`、`busy`…），按它分支，不比对 `message` 的措辞。旧版后端没有，按 ok 补成 `ok` / `failed`。
-    let code: String
-    /// 给玩家看的一句话。
-    let message: String
-    /// 技术细节（异常、路径）；只记进诊断信息。
-    let detail: String?
-    /// `data` 字段的原始 JSON；没有就是 nil。
-    let data: Data?
-
-    /// `snakeCase` 会把**字典的键**也一起改写（`recruit_times` → `recruitTimes`），
-    /// 所以含「键是配置名 / 文件名」的字典的形状要传 false，自己写 CodingKeys。
+extension RemoteReceipt {
     /// 读不懂时抛 `RemoteBridgeError.badReceipt`：界面上只说一句人话，细节进诊断信息。
     func decode<T: Decodable>(_ type: T.Type, snakeCase: Bool = true) throws -> T {
-        guard let data else { throw RemoteBridgeError.recorded(.badReceipt("no data: \(message)")) }
-        let decoder = JSONDecoder()
-        if snakeCase { decoder.keyDecodingStrategy = .convertFromSnakeCase }
         do {
-            return try decoder.decode(T.self, from: data)
-        } catch {
-            throw RemoteBridgeError.recorded(.badReceipt("\(T.self): \(error)"))
+            return try decoded(type, snakeCase: snakeCase)
+        } catch let error as RemoteReceiptDecodeError {
+            throw RemoteBridgeError.recorded(.badReceipt(error.detail))
         }
     }
 
@@ -43,14 +29,6 @@ struct RemoteReceipt: Sendable {
         return line
     }
     // copy-guard: end
-
-    /// `data` 当成字典读（配置页这种键不固定的场合）。
-    var dictionary: [String: Any] {
-        guard let data, let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return [:]
-        }
-        return object
-    }
 }
 
 enum RemoteBridgeError: LocalizedError {

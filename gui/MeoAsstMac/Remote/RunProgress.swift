@@ -13,6 +13,7 @@
 
 import Foundation
 import Observation
+import WadosMAAShared
 
 @MainActor @Observable final class RunProgress {
     struct Entry: Identifiable, Equatable {
@@ -27,21 +28,9 @@ import Observation
     }
 
     /// 步骤条上的一格：计划里要做的一件事。
-    struct Step: Identifiable, Equatable {
-        enum State: String { case pending, running, done, failed, skipped }
-
-        let key: String
-        let label: String
-        var state: State = .pending
-        var id: String { key }
-    }
-
+    typealias Step = RunProgressStep
     /// maa-remote 记下的恢复动作（重试、重启、摆窗、补跑……），给玩家看的原话。
-    struct Note: Identifiable, Equatable {
-        let id: Int
-        let date: Date?
-        let text: String
-    }
+    typealias Note = RunProgressNote
 
     /// 最近一场的阶段行（开始、各阶段、出错、结果）。新一场开跑时清空。
     private(set) var entries: [Entry] = []
@@ -345,88 +334,59 @@ import Observation
 
     // MARK: progress.json（新版 maa-remote）
 
-    /// 进度文件的步骤 key → 界面里一直用的 key（和 `planSteps`、状态条的 `"Fight"` 判断一致）。
-    static let fileKeys: [String: String] = [
-        "startup": "StartUp", "annihilation": "Annihilation", "fight": "Fight", "infrast": "Infrast",
-        "recruit": "Recruit", "mall": "Mall", "award": "Award",
-    ]
+    static let fileKeys = RunProgressFile.fileKeys
 
-    static func doing(_ key: String, _ label: String) -> String {
-        switch key {
-        case "StartUp": "正在启动游戏"
-        case "Annihilation": "正在打剿灭"
-        case "Fight": "正在刷理智"
-        case "Infrast": "正在基建换班"
-        case "Recruit": "正在公开招募"
-        case "Mall": "正在逛信用商店"
-        case "Award": "正在领取奖励"
-        default: "正在\(label)"
-        }
-    }
+    static func doing(_ key: String, _ label: String) -> String { RunProgressFile.doing(key, label) }
 
     /// 读一遍进度文件，整份照抄过来；只给日志区补「新开始的一步」「没完成」和新的说明。
     private func readProgressFile() {
         guard let progressURL, let data = try? Data(contentsOf: progressURL),
-            case let .object(file)? = try? JSONDecoder().decode(JSONValue.self, from: data)
+            let file = RunProgressFile(data: data)
         else { return }
         // 同名旧场（今天第二次手动场）的文件：开始时刻对不上就当还没有。
-        if let startedAt, let fileStart = file["started_at"]?.string.flatMap(RunLock.parseISO),
-            abs(fileStart.timeIntervalSince(startedAt)) > 2
-        {
+        if let startedAt, let fileStart = file.startedAt, abs(fileStart.timeIntervalSince(startedAt)) > 2 {
             return
         }
         let now = Date()
         var fresh: [Step] = []
-        var board: [Step] = []
-        for item in file["steps"]?.array ?? [] {
-            guard let object = item.object, let raw = object["key"]?.string else { continue }
-            let key = Self.fileKeys[raw] ?? raw
-            let label = object["label"]?.string ?? key
-            let state = Step.State(rawValue: object["state"]?.string ?? "") ?? .pending
-            board.append(Step(key: key, label: label, state: state))
+        for item in file.steps {
+            let key = item.key
+            let label = item.label
+            let state = item.state
             if !plannedKeys.isEmpty, !plannedKeys.contains(key) { continue }
             let old = steps.first { $0.key == key }?.state
             if state != old {
-                let at = object["started_at"]?.string.flatMap(RunLock.parseISO)
                 if state == .running {
+                    let at = item.startedAt
                     entries.append(Entry(date: at ?? now, exact: at != nil, text: Self.doing(key, label), tone: .stage))
                 } else if state == .failed {
-                    let end = object["finished_at"]?.string.flatMap(RunLock.parseISO)
+                    let end = item.finishedAt
                     entries.append(Entry(date: end ?? now, exact: end != nil, text: "\(label)未完成", tone: .error))
                 }
             }
             fresh.append(Step(key: key, label: label, state: state))
         }
+        let board = file.steps.map { Step(key: $0.key, label: $0.label, state: $0.state) }
         if !fresh.isEmpty { steps = fresh }
         if board != allSteps { allSteps = board }
 
-        if let raw = file["current"]?.string, let step = steps.first(where: { $0.key == (Self.fileKeys[raw] ?? raw) }) {
+        if let raw = file.currentKey, let step = steps.first(where: { $0.key == raw }) {
             current = RunStage(key: step.key, label: step.label, doing: Self.doing(step.key, step.label))
         } else {
             current = nil
         }
 
-        let fight = file["fight"]?.object ?? [:]
-        fights = Int(fight["done"]?.number ?? 0)
-        fightTotal = fight["estimate"]?.number.map { Int($0) }
+        fights = file.fightsDone
+        fightTotal = file.fightEstimate
         fightTotalExact = steps.first { $0.key == "Fight" }?.state == .done
-        let sanityObject = fight["sanity"]?.object
-        if let current = sanityObject?["current"]?.number, let max = sanityObject?["max"]?.number, max > 0 {
-            sanity = (Int(current), Int(max))
-        } else {
-            sanity = nil
-        }
-        let newDrops = RunFightResult.drops(fight)
-        if newDrops != drops { drops = newDrops }
+        sanity = file.sanity.map { ($0.current, $0.max) }
+        if file.drops != drops { drops = file.drops }
 
-        let all = (file["notes"]?.array ?? []).enumerated().compactMap { index, item -> Note? in
-            guard let object = item.object, let text = object["text"]?.string, !text.isEmpty else { return nil }
-            return Note(id: index, date: object["at"]?.string.flatMap(RunLock.parseISO), text: text)
-        }
+        let all = file.notes
         for note in all.dropFirst(notes.count) {
             entries.append(Entry(date: note.date ?? now, exact: note.date != nil, text: note.text, tone: .note))
         }
         if all.count != notes.count { notes = all }
-        eta = file["eta"]?.string.flatMap(RunLock.parseISO)
+        eta = file.eta
     }
 }

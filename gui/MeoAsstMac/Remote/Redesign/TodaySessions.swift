@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import WadosMAAShared
 
 /// 某一天某一场的结果。正在跑的看 `last_run.json`；跑完的看 `runs/index.jsonl`，
 /// 早场、晚场各有一行，晚场开跑不会把早场的结果盖掉。

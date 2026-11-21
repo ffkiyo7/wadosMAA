@@ -10,50 +10,7 @@
 //
 
 import Foundation
-
-struct UpstreamStatus: Decodable, Sendable {
-    struct Versions: Decodable, Sendable {
-        let maaCli: String?
-        let maaCore: String?
-        let maaCoreRecorded: String?
-        let resourceLastUpdated: String?
-        let maaResourceHead: String?
-        let betaCoreLatest: String?
-        let betaCoreCheckedAt: String?
-    }
-
-    struct Check: Decodable, Sendable {
-        let ok: Bool
-        let problems: [String]?
-        let reason: String?
-    }
-
-    struct Lock: Decodable, Sendable {
-        let held: Bool
-        let text: String?
-    }
-
-    struct Online: Decodable, Sendable {
-        let maaCliLatest: String?
-        let maaResourceRemoteHead: String?
-        let maaCliOutdated: Bool?
-        let maaResourceOutdated: Bool?
-        let errors: [String]?
-    }
-
-    let verdict: String
-    let blockReason: String?
-    let running: Bool
-    let fresh: Bool
-    let lastSuccessAt: String?
-    let gameDayStart: String?
-    let updateBlocked: String?
-    let versions: Versions
-    let pinned: Check
-    let consistent: Check
-    let lock: Lock
-    let online: Online?
-}
+import WadosMAAShared
 
 enum RemoteGateError: LocalizedError {
     case refused(String)

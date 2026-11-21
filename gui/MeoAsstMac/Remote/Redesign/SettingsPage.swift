@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import WadosMAAShared
 
 struct SettingsPage: View {
     @AppStorage(WM.accentKey) private var accent = AccentChoice.gold

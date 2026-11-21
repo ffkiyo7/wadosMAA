@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import WadosMAAShared
 
 struct TodayPending: View {
     let go: (WMPage) -> Void

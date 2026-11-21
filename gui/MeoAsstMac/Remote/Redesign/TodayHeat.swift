@@ -9,6 +9,7 @@
 //
 
 import SwiftUI
+import WadosMAAShared
 
 struct HeatStrip: View {
     let now: Date

@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import WadosMAAShared
 
 struct DailyPage: View {
     @Environment(RemoteStore.self) private var store

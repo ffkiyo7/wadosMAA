@@ -8,6 +8,7 @@
 //
 
 import SwiftUI
+import WadosMAAShared
 
 struct ManualRunRow: View {
     @Environment(RemoteStore.self) private var store

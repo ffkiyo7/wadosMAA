@@ -12,6 +12,7 @@
 		833786D328F188D900D39D6F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 833786D228F188D900D39D6F /* Assets.xcassets */; };
 		833786D628F188D900D39D6F /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 833786D528F188D900D39D6F /* Preview Assets.xcassets */; };
 		AEA8E3A02E77003F00355D84 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = AEA8E39F2E77003F00355D84 /* AppIcon.icon */; };
+		F0AE00000000000000000001 /* WadosMAAShared in Frameworks */ = {isa = PBXBuildFile; productRef = F0AE00000000000000000003 /* WadosMAAShared */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -37,6 +38,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F0AE00000000000000000001 /* WadosMAAShared in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -130,6 +132,9 @@
 				F0AD00000000000000000001 /* Remote */,
 			);
 			name = MAA;
+			packageProductDependencies = (
+				F0AE00000000000000000003 /* WadosMAAShared */,
+			);
 			productName = MeoAsstMac;
 			productReference = 833786CB28F188D800D39D6F /* MAA.app */;
 			productType = "com.apple.product-type.application";
@@ -159,6 +164,9 @@
 				ko,
 			);
 			mainGroup = 833786C228F188D800D39D6F;
+			packageReferences = (
+				F0AE00000000000000000002 /* XCLocalSwiftPackageReference "../shared" */,
+			);
 			productRefGroup = 833786CC28F188D800D39D6F /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -410,6 +418,20 @@
 		};
 /* End XCConfigurationList section */
 
+
+/* Begin XCLocalSwiftPackageReference section */
+		F0AE00000000000000000002 /* XCLocalSwiftPackageReference "../shared" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../shared;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		F0AE00000000000000000003 /* WadosMAAShared */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = WadosMAAShared;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 833786C328F188D800D39D6F /* Project object */;
 }

@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import WadosMAAShared
 
 /// 按键名找字段画一行；`config get` 里没有这个键（旧版后端）就什么都不画。
 /// `sub`：由当前值算出来的一行灰字，直接说这个值的效果。
