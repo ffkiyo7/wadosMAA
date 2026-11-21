@@ -125,6 +125,10 @@ def _sse_fingerprint(event: str, payload: Any) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
 
+def _raise_missing_config(errors: Mapping[str, str]) -> Any:
+    raise RuntimeError(f"config.json 不可用：{errors.get('config', '读取失败')}")
+
+
 def _default_resign_handler(if_due: bool) -> tuple[int, dict[str, Any]]:
     return HTTPStatus.NOT_IMPLEMENTED, {
         "ok": False,
@@ -648,36 +652,79 @@ class APIContext:
         return raw if isinstance(raw, dict) and raw else None
 
     def build_snapshot(self) -> dict[str, Any]:
-        """`GET /api/v1/snapshot` 首屏聚合快照（SPEC §5.1）。"""
-        config = maa_common.load_config()
-        lock = self._read_lock()
-        last_run = self._read_last_run()
-        progress = self._read_active_progress(lock, last_run)
+        """`GET /api/v1/snapshot` 首屏聚合快照（SPEC §5.1）。
+
+        逐字段容错隔离：即使 `config.json` 损坏或某个旁路子系统报错，仍必须尽量返回
+        `lock`（含 `run_id`）、`last_run`、`progress`，确保 `/rescue` 可执行紧急停止；
+        失败字段置 `None` 并在 `errors` 中标出原因。
+        """
+        errors: dict[str, str] = {}
+
+        def safe(name: str, fn: Callable[[], Any]) -> Any:
+            try:
+                return fn()
+            except Exception as exc:  # noqa: BLE001 — (c) 快照逐字段降级隔离，单源失败绝不拖垮紧急停止
+                errors[name] = f"{type(exc).__name__}: {exc}"
+                return None
+
+        lock = safe("lock", self._read_lock)
+        last_run = safe("last_run", self._read_last_run)
+        progress = safe("progress", lambda: self._read_active_progress(lock, last_run))
+
+        config: Any = None
+        try:
+            config = maa_common.load_config()
+        except Exception as exc:  # noqa: BLE001 — (c) config.json 损坏时仅标记对应字段失败，不返回 500
+            errors["config"] = f"{type(exc).__name__}: {exc}"
+
+        today_plan = safe("today_plan", self._read_today_plan)
+        schedule = safe(
+            "schedule",
+            lambda: maa_schedule.schedule_report(config) if config is not None else (_raise_missing_config(errors)),
+        )
+        upstream = safe(
+            "upstream",
+            lambda: maa_upstream.status(config, online=False) if config is not None else (_raise_missing_config(errors)),
+        )
+        copilot_auto_paused = safe("copilot_auto_paused", lambda: bool(maa_copilot.auto_pause_state()))
+        activity = safe("activity", self._read_activity)
+        scheduler = safe("scheduler", self._read_scheduler)
+        resign = safe("resign", self._read_resign)
+
         return {
             "lock": lock,
             "last_run": last_run,
             "progress": progress,
-            "today_plan": self._read_today_plan(),
-            "schedule": maa_schedule.schedule_report(config),
-            "upstream": maa_upstream.status(config, online=False),
-            "copilot_auto_paused": bool(maa_copilot.auto_pause_state()),
-            "activity": self._read_activity(),
-            "scheduler": self._read_scheduler(),
-            "resign": self._read_resign(),
+            "today_plan": today_plan,
+            "schedule": schedule,
+            "upstream": upstream,
+            "copilot_auto_paused": copilot_auto_paused,
+            "activity": activity,
+            "scheduler": scheduler,
+            "resign": resign,
+            "errors": errors,
         }
 
     def build_sse_state(self) -> dict[str, Any]:
-        """SSE 监听的 6 类事件状态快照。"""
-        lock = self._read_lock()
-        last_run = self._read_last_run()
-        return {
-            "lock": lock,
-            "last_run": last_run,
-            "progress": self._read_active_progress(lock, last_run),
-            "today_plan": self._read_today_plan(),
-            "upstream": self._read_upstream(),
-            "resign": self._read_resign(),
-        }
+        """SSE 监听的 6 类事件状态快照（逐源隔离，单源异常不阻塞 lock/progress 等事件推送）。"""
+        out: dict[str, Any] = {}
+
+        def capture(name: str, fn: Callable[[], Any]) -> Any:
+            try:
+                val = fn()
+                out[name] = val
+                return val
+            except Exception as exc:  # noqa: BLE001 — (c) SSE 单源异常隔离，确保 lock/last_run/progress 照常推送
+                print(f"SSE source {name} failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                return None
+
+        lock = capture("lock", self._read_lock)
+        last_run = capture("last_run", self._read_last_run)
+        capture("progress", lambda: self._read_active_progress(lock, last_run))
+        capture("today_plan", self._read_today_plan)
+        capture("upstream", self._read_upstream)
+        capture("resign", self._read_resign)
+        return out
 
     def read_history(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
         clamped_limit = max(1, min(200, limit))

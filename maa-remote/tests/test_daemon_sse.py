@@ -155,6 +155,37 @@ class DaemonSSETests(unittest.TestCase):
         self.assertEqual(hub.poll_once(), [])
         self.assertEqual(hub.poll_once(), [])
 
+    def test_build_sse_state_isolates_failing_source_without_blocking_lock_events(self) -> None:
+        """评审【2】回归：today_plan/upstream 任一抛异常时，build_sse_state 与 SSEHub 仍正常推送 lock 事件。"""
+        from unittest.mock import patch
+
+        ctx = maa_api.APIContext(
+            home_dir=self.home,
+            scripts_dir=ROOT / "scripts",
+            state_dir=self.state_dir,
+            runs_dir=self.runs_dir,
+            daemon_dir=self.daemon_dir,
+            secrets_path=self.secrets_path,
+            rescue_html_path=ROOT / "daemon" / "rescue.html",
+        )
+        lock_state: dict[str, Any] = {"val": None}
+
+        with patch.object(ctx, "_read_lock", side_effect=lambda: lock_state["val"]), \
+                patch.object(ctx, "_read_today_plan", side_effect=RuntimeError("corrupt plan")), \
+                patch.object(ctx, "_read_upstream", side_effect=ValueError("corrupt config")):
+            hub = maa_api.SSEHub(ctx.build_sse_state)
+            hub._seed_initial()
+            sub = hub.subscribe()
+            lock_state["val"] = {"holder": "daily", "run_id": "2026-11-21-now-202500"}
+            emitted = hub.poll_once()
+
+        self.assertIn("lock", emitted)
+        item = sub.get_nowait()
+        self.assertIsNotNone(item)
+        assert item is not None
+        self.assertEqual(item[0], "lock")
+        self.assertEqual(item[1]["run_id"], "2026-11-21-now-202500")
+
 
 if __name__ == "__main__":
     unittest.main()

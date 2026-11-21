@@ -209,8 +209,10 @@ class DaemonAPITests(unittest.TestCase):
                     "activity",
                     "scheduler",
                     "resign",
+                    "errors",
                 },
             )
+            self.assertEqual(snap["errors"], {})
             self.assertEqual(snap["progress"]["run_id"], run_id)
             self.assertTrue(snap["copilot_auto_paused"])
             self.assertEqual(snap["resign"]["status"], "ok")
@@ -401,6 +403,49 @@ class DaemonAPITests(unittest.TestCase):
         self.assertEqual(st2, 200)
         self.assertEqual(del2["code"], "preview_deleted")
         self.assertFalse(preview_file.exists())
+
+    def test_snapshot_isolates_corrupted_config_and_still_returns_lock_last_run_progress(self) -> None:
+        """评审【2】回归：config.json 损坏时 /api/v1/snapshot 仍返回 200 及 lock/last_run/progress，并标注 errors。"""
+        run_id = "2026-11-21-now-202000"
+        maa_common.atomic_write_json(
+            self.state_dir / "last_run.json",
+            {
+                "schema_version": 1,
+                "run_id": run_id,
+                "phase": "now",
+                "status": "running",
+                "started_at": "2026-11-21T20:20:00+08:00",
+                "progress": str(self.runs_dir / f"{run_id}.progress.json"),
+            },
+        )
+        maa_common.atomic_write_json(
+            self.runs_dir / f"{run_id}.progress.json",
+            {
+                "schema_version": 1,
+                "kind": "daily",
+                "run_id": run_id,
+                "started_at": "2026-11-21T20:20:00+08:00",
+                "status": "running",
+                "current": "fight",
+            },
+        )
+        broken_cfg = self.state_dir / "config.json"
+        broken_cfg.write_text("{corrupted-json", encoding="utf-8")
+
+        with patch.object(maa_common, "CONFIG_PATH", broken_cfg), \
+                patch.object(maa_common, "run_lock_holder", return_value={"holder": "daily", "detail": "手动", "pid": 999, "run_id": run_id}), \
+                patch.object(maa_copilot, "auto_pause_state", return_value=None):
+            st, snap = self._json("GET", "/api/v1/snapshot")
+
+        self.assertEqual(st, 200)
+        self.assertEqual(snap["lock"]["run_id"], run_id)
+        self.assertEqual(snap["last_run"]["run_id"], run_id)
+        self.assertEqual(snap["progress"]["run_id"], run_id)
+        self.assertIsNone(snap["today_plan"])
+        self.assertIsNone(snap["schedule"])
+        self.assertIsNone(snap["upstream"])
+        for failed_key in ("config", "today_plan", "schedule", "upstream"):
+            self.assertIn(failed_key, snap["errors"])
 
 
 if __name__ == "__main__":
