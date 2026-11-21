@@ -32,8 +32,9 @@ import maa_action
 import maa_clearing
 import maa_copilot
 import maa_gamedata
+import maa_notify
 import maa_playcover
-from maa_daily import HOME_TASK_NAMES
+from maa_daily import HOME_TASK_NAMES, PROGRESS_SCHEMA_VERSION
 from maa_common import (
     BUTTONS_PATH,
     RUNS_DIR,
@@ -50,6 +51,7 @@ from maa_common import (
     load_config,
     load_json,
     maa_subprocess_env,
+    make_run_id,
     merge_last_run,
     now_beijing,
     require_executable,
@@ -818,16 +820,17 @@ def _set_status(
 
 def _retire_round_controls(token: str, config: Config, message_id: Any) -> None:
     """收掉「取消本轮」按钮：开始碰设备之后取消已经没有意义。"""
-    with state_lock():
-        registry = load_json(BUTTONS_PATH, {})
-        if not isinstance(registry, dict):
-            raise RuntimeError("共享按钮登记表格式错误")
-        maa_copilot.prune_search_buttons(token, registry)
-        atomic_write_json(BUTTONS_PATH, registry)
-    try:
-        retire_discord_components(config, message_id)
-    except Exception as exc:  # noqa: BLE001 — (c) 收按钮尽力而为，只打日志
-        print(f"round card retire failed: {type(exc).__name__}: {exc}", flush=True)
+    if BUTTONS_PATH.is_file():
+        with state_lock():
+            registry = load_json(BUTTONS_PATH, {})
+            if isinstance(registry, dict):
+                maa_copilot.prune_search_buttons(token, registry)
+                atomic_write_json(BUTTONS_PATH, registry)
+    if message_id and str(config.get("channel_id") or "").strip().isdigit():
+        try:
+            retire_discord_components(config, message_id)
+        except Exception as exc:  # noqa: BLE001 — (c) 收按钮尽力而为，只打日志
+            print(f"round card retire failed: {type(exc).__name__}: {exc}", flush=True)
 
 
 def cmd_run_batch(token: str) -> int:
@@ -840,7 +843,11 @@ def cmd_run_batch(token: str) -> int:
     if not isinstance(entries, list) or not entries:
         return 2
 
-    with run_lock(blocking=False, holder="copilot", detail=str(state.get("stage") or "")) as acquired:
+    at = now_beijing()
+    run_id = make_run_id(f"copilot-{token}", at)
+    with run_lock(
+        blocking=False, holder="copilot", detail=str(state.get("stage") or ""), run_id=run_id
+    ) as acquired:
         if not acquired:
             busy = lock_holder_text(run_lock_holder()) or "另一场 MAA"
             message = f"{busy}正在运行，本轮未启动；到点会自动重试。"
@@ -868,7 +875,7 @@ def cmd_run_batch(token: str) -> int:
                 _set_status(token, {"queued"}, "scheduled", last_prepare_error=message)
                 _notice(config, "⏸️ 自动作业本轮未启动", message, 0x99AAB5)
                 return 1
-        return _batch_run_locked(state)
+        return _batch_run_locked(state, at=at, run_id=run_id)
 
 
 def _entry_result_lines(results: list[dict[str, Any]]) -> str:
@@ -902,12 +909,154 @@ def copilot_failure(
     return "stage_failed"
 
 
+class CopilotProgressFile:
+    """抄作业进度文件 `runs/<run_id>.progress.json`（与日常 `RunProgressFile` 同构，DEV_GUIDE §12.3）。
+
+    所有方法永不抛（不变量 #65）：写不进去只打一行 stderr，不影响抄作业主流程。
+    """
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        run_id: str,
+        phase: str,
+        entries: list[dict[str, Any]],
+        started: datetime,
+    ) -> None:
+        self.path = path
+        self.run_id = run_id
+        self.phase = phase
+        self.started = started
+        self.status = "running"
+        self.final = False
+        self.notes: list[dict[str, str]] = []
+        self._warned = False
+        self.steps: list[dict[str, Any]] = []
+        for idx, entry in enumerate(entries):
+            stage = str(entry.get("stage") or "")
+            mode = str(entry.get("mode") or "normal")
+            label = maa_clearing.entry_label(maa_clearing.make_entry(stage, mode))
+            self.steps.append(
+                {
+                    "key": f"stage:{idx}",
+                    "label": label,
+                    "stage": stage,
+                    "mode": mode,
+                    "state": "pending",
+                    "started_at": None,
+                    "finished_at": None,
+                }
+            )
+        self.write()
+
+    def _warn(self, exc: BaseException) -> None:
+        if not self._warned:
+            self._warned = True
+            print(f"抄作业进度文件没写成：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+
+    def _step_index(self, stage: str, mode: str) -> int | None:
+        for idx, step in enumerate(self.steps):
+            if step["stage"] == stage and step["mode"] == mode and step["state"] in ("pending", "running"):
+                return idx
+        for idx, step in enumerate(self.steps):
+            if step["stage"] == stage and step["mode"] == mode:
+                return idx
+        return None
+
+    def start_stage(self, stage: str, mode: str) -> None:
+        if self.final:
+            return
+        idx = self._step_index(stage, mode)
+        if idx is not None:
+            stamp = now_beijing().isoformat()
+            self.steps[idx]["state"] = "running"
+            self.steps[idx]["started_at"] = self.steps[idx]["started_at"] or stamp
+            self.steps[idx]["finished_at"] = None
+        self.write()
+
+    def finish_stage(self, stage: str, mode: str, outcome: str) -> None:
+        if self.final:
+            return
+        idx = self._step_index(stage, mode)
+        if idx is not None:
+            stamp = now_beijing().isoformat()
+            mapped = "done" if outcome == "won" else "skipped" if outcome == "skipped" else "failed"
+            self.steps[idx]["state"] = mapped
+            if mapped != "skipped":
+                self.steps[idx]["started_at"] = self.steps[idx]["started_at"] or stamp
+                self.steps[idx]["finished_at"] = stamp
+        self.write()
+
+    def note(self, text: str) -> None:
+        if text:
+            self.notes.append({"at": now_beijing().isoformat(), "text": text[:300]})
+        self.write()
+
+    def finish(self, status: str) -> None:
+        if self.final:
+            return
+        stamp = now_beijing().isoformat()
+        self.status = status
+        for step in self.steps:
+            if step["state"] == "running":
+                step["state"] = "done" if status == "success" else "failed"
+                step["finished_at"] = stamp
+            elif step["state"] == "pending":
+                step["state"] = "skipped"
+        self.final = True
+        self.write()
+
+    def payload(self) -> dict[str, Any]:
+        now = now_beijing()
+        current_step = next((step for step in self.steps if step["state"] == "running"), None)
+        done_count = sum(1 for step in self.steps if step["state"] in ("done", "failed", "skipped"))
+        return {
+            "schema_version": PROGRESS_SCHEMA_VERSION,
+            "kind": "copilot",
+            "run_id": self.run_id,
+            "phase": self.phase,
+            "started_at": self.started.isoformat(),
+            "updated_at": now.isoformat(),
+            "status": self.status,
+            "current": None if self.final or current_step is None else current_step["key"],
+            "steps": [
+                {
+                    "key": step["key"],
+                    "label": step["label"],
+                    "state": step["state"],
+                    "started_at": step["started_at"],
+                    "finished_at": step["finished_at"],
+                }
+                for step in self.steps
+            ],
+            "copilot": {
+                "done": done_count,
+                "total": len(self.steps),
+                "current_stage": None if current_step is None else current_step["stage"],
+                "current_mode": None if current_step is None else current_step["mode"],
+                "elapsed_seconds": max(0, int((now - self.started).total_seconds())),
+            },
+            "notes": list(self.notes),
+            "eta": None,
+        }
+
+    def write(self) -> None:
+        try:
+            atomic_write_json(self.path, self.payload())
+        except Exception as exc:  # noqa: BLE001 — (c) 进度文件写失败不能影响抄作业（#65）
+            self._warn(exc)
+
+
 def record_copilot_run(
     *,
     token: str,
     at: datetime,
     status: str,
     stage: str,
+    run_id: str = "",
+    report_path: Path | None = None,
+    progress_path: Path | None = None,
     log_path: Path | None = None,
     snapshot: Path | None = None,
     failure: str | None = None,
@@ -922,7 +1071,7 @@ def record_copilot_run(
     try:
         finished = now_beijing()
         row: dict[str, Any] = {
-            "id": f"{at.date().isoformat()}-copilot-{token}-{at:%H%M%S}",
+            "id": run_id or make_run_id(f"copilot-{token}", at),
             "kind": "copilot",
             "phase": f"copilot-{token}",
             "stage": stage,
@@ -938,8 +1087,8 @@ def record_copilot_run(
             "rescue": None,
             "won": won,
             "total": total,
-            "report": None,
-            "progress": None,
+            "report": str(report_path) if report_path is not None else None,
+            "progress": str(progress_path) if progress_path is not None else None,
             "log": str(log_path) if log_path is not None else None,
             "snapshot": str(snapshot) if snapshot is not None else None,
         }
@@ -949,7 +1098,18 @@ def record_copilot_run(
     append_run_index(RUNS_DIR, row)
 
 
-def _batch_run_locked(state: dict[str, Any]) -> int:
+def _write_copilot_report(path: Path, payload: dict[str, Any]) -> str:
+    try:
+        atomic_write_json(path, payload)
+    except Exception as exc:  # noqa: BLE001 — (c) 战报文件写失败只记日志，不阻塞收尾
+        print(f"抄作业战报文件写入失败：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        return f"{type(exc).__name__}: {exc}"
+    return ""
+
+
+def _batch_run_locked(
+    state: dict[str, Any], *, at: datetime | None = None, run_id: str = ""
+) -> int:
     """锁内连抄。两条路：
 
     - 当期活动关（`activity_key` 非空）：锚点导航停在地图 → 剧情关 / 区域入口 →
@@ -961,10 +1121,15 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
     config = load_config()
     token = str(state.get("token") or "")
     entries = [entry for entry in state.get("entries") or [] if isinstance(entry, dict)]
-    at = now_beijing()
-    stem = f"{at.date().isoformat()}-copilot-{token}"
+    at = at or now_beijing()
+    phase = f"copilot-{token}"
+    run_id = run_id or make_run_id(phase, at)
+    stem = run_id
+    snapshot_path = RUNS_DIR / f"{stem}.json"
     log_path = RUNS_DIR / f"{stem}.log"
     png_path = RUNS_DIR / f"{stem}.png"
+    report_path = RUNS_DIR / f"{stem}-report.json"
+    progress_path = RUNS_DIR / f"{stem}.progress.json"
     started = time.monotonic()
     game_touched = False
     results: list[dict[str, Any]] = []
@@ -973,7 +1138,7 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
     cleanup_errors: list[str] = []
 
     # D18：抢到锁之后、碰设备之前先探一次。在线就把这一轮放回排程，什么都不做——
-    # 任何失败路径都会 `close_game()` 退掉 BlueStacks，等于把人踢出游戏。
+    # 任何失败路径都会 `close_game()` 退掉游戏，等于把人踢出游戏。
     online, probe_detail = maa_playcover.game_is_online(config)
     if online:
         _set_status(token, {"queued"}, "scheduled", last_prepare_error=GAME_BUSY_NOTICE)
@@ -983,14 +1148,22 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
             f"{GAME_BUSY_NOTICE}\n探测：{probe_detail}",
             0x99AAB5,
         )
+        maa_notify.notify(
+            "抄作业已跳过",
+            "检测到明日方舟正在运行，本轮未启动。",
+            level="passive",
+            notification_id=f"run-skip-{run_id}",
+            url="wadosmaa://copilot",
+        )
         record_copilot_run(
-            token=token, at=at, status="skipped", skip_reason="game_busy",
+            token=token, at=at, run_id=run_id, status="skipped", skip_reason="game_busy",
             stage=str(entries[0].get("stage") or "") if entries else "",
         )
         merge_last_run(
             {
+                "run_id": run_id,
                 "status": "skipped",
-                "phase": f"copilot-{token}",
+                "phase": phase,
                 "skip_reason": "game_busy",
                 "summary": GAME_BUSY_NOTICE,
                 "game_probe": probe_detail,
@@ -1019,7 +1192,7 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
     auto_round = str(state.get("source") or "") == "activity-watch"
     prefight_error = ""
     start_components: list[dict[str, Any]] | None = None
-    if auto_round:
+    if auto_round and str(config.get("channel_id") or "").strip().isdigit():
         try:
             maa_copilot.register_auto_buttons()
             start_components = [maa_copilot.pause_button_row()]
@@ -1027,14 +1200,20 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
             print(f"pause button register failed: {type(exc).__name__}: {exc}", flush=True)
     # 不变量 #62：开游戏之前关台前调度，finally 里关完游戏再还原。永不抛。
     stage_manager_paused = maa_playcover.pause_stage_manager(config)
+    progress = CopilotProgressFile(
+        progress_path, run_id=run_id, phase=phase, entries=entries, started=at
+    )
+    if stage_manager_paused:
+        progress.note("已临时关掉台前调度，跑完再打开")
     try:
         require_executable(config, "maa_bin", "/opt/homebrew/bin/maa", "maa-cli")
         maa_playcover.verify_game_installed(config)
         atomic_write_json(
-            RUNS_DIR / f"{stem}.json",
+            snapshot_path,
             {
+                "run_id": run_id,
                 "date": at.date().isoformat(),
-                "phase": f"copilot-{token}",
+                "phase": phase,
                 "entries": [
                     {"stage": entry.get("stage"), "mode": entry.get("mode")}
                     for entry in entries
@@ -1043,15 +1222,30 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
                 "status": "running",
             },
         )
+        first_stage = str(entries[0].get("stage") or "") if entries else ""
         merge_last_run(
             {
+                "run_id": run_id,
                 "status": "running",
-                "phase": f"copilot-{token}",
-                "stage": str(entries[0].get("stage") or ""),
+                "phase": phase,
+                "stage": first_stage,
                 "started_at": at.isoformat(),
+                "snapshot": str(snapshot_path),
                 "log": str(log_path),
+                "progress": str(progress_path),
+                "report": None,
             },
             new_run=True,
+        )
+        maa_notify.notify(
+            f"抄作业开跑 · {first_stage or f'共 {len(entries)} 项'}",
+            f"共 {len(entries)} 项：" + "、".join(
+                maa_clearing.entry_label(maa_clearing.make_entry(str(e.get("stage") or ""), str(e.get("mode") or "normal")))
+                for e in entries[:5]
+            ),
+            level="passive",
+            notification_id=f"run-{run_id}",
+            url=f"wadosmaa://run/{run_id}",
         )
         _notice(
             config,
@@ -1074,7 +1268,7 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
             # 当期活动关：一次锚点导航 + 分段多作业（`_run_activity_round()`）。
             stop_reason = _run_activity_round(
                 config, state, entries, env, log_path, ledger, ledger_file,
-                results, auto_round,
+                results, auto_round, progress=progress,
             )
         else:
             raid_on = maa_clearing.raid_enabled(config)
@@ -1088,6 +1282,7 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
                         {"stage": stage, "mode": mode, "outcome": "skipped",
                          "detail": RAID_DISABLED_NOTICE}
                     )
+                    progress.finish_stage(stage, mode, "skipped")
                     continue
                 if stage in failed_stages:
                     # 普通没过就别去撞突袭：突袭是同一关再打一遍，普通没通它根本没解锁。
@@ -1095,6 +1290,7 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
                         {"stage": stage, "mode": mode, "outcome": "skipped",
                          "detail": "同一关的普通模式未通过"}
                     )
+                    progress.finish_stage(stage, mode, "skipped")
                     continue
                 if auto_round and maa_copilot.auto_pause_state():
                     stop_reason = "自动作业已暂停"
@@ -1107,6 +1303,7 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
                 if not ok:
                     stop_reason = detail
                     break
+                progress.start_stage(stage, mode)
                 outcome, detail = _fight_one(config, entry, env, log_path)
                 if outcome != "nav":
                     # 进过战斗就要正常收尾：跳过首通剧情、回主界面，再往下走（或退游戏）。
@@ -1131,6 +1328,7 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
                 results.append(
                     {"stage": stage, "mode": mode, "outcome": verdict, "detail": detail}
                 )
+                progress.finish_stage(stage, mode, verdict)
                 if verdict == "won":
                     continue
                 # 突袭没过 → 这一关不算通关（D7），下一轮只排它剩下的模式。
@@ -1143,13 +1341,17 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
         # `run cancel`（#64）：停在哪一关就到哪一关，下面照常截图、关游戏、发战报。
         cancelled = True
         stop_reason = CANCELLED_NOTE
+        progress.note("已按你的要求停下")
     except maa_copilot.StaleActivityError as exc:
         stop_reason = str(exc)
+        progress.note(stop_reason)
     except PrefightError as exc:
         stop_reason = str(exc)
         prefight_error = stop_reason
+        progress.note(stop_reason)
     except Exception as exc:  # noqa: BLE001 — (a) 整轮兜底：异常写进战报 / prefight_error，finally 照常收尾
         stop_reason = f"{type(exc).__name__}: {exc}"
+        progress.note(stop_reason)
         print(f"copilot run-batch EXCEPTION: {stop_reason}", flush=True)
         if not any(r["outcome"] in ("won", "failed", "unknown") for r in results):
             # 一关都没进就炸（开游戏、MaaTools、游戏没装）：同样是环境故障，
@@ -1173,6 +1375,15 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
         r["outcome"] in ("won", "skipped") for r in results
     )
     duration = time.monotonic() - started
+    final_status = "cancelled" if cancelled else "success" if ok else "failed"
+    failure_kind = (
+        copilot_failure(
+            prefight_error=prefight_error, stop_reason=stop_reason, cleanup_errors=cleanup_errors
+        )
+        if final_status == "failed"
+        else None
+    )
+    has_shot = bool(game_touched and png_path.is_file() and png_path.stat().st_size > 0)
     embed: dict[str, Any] = {
         "title": (
             f"⏹️ 抄作业已停止：{len(won)}/{len(entries)} 通过"
@@ -1193,31 +1404,70 @@ def _batch_run_locked(state: dict[str, Any]) -> int:
         embed["fields"].append(
             {"name": "清理异常", "value": "; ".join(cleanup_errors)[:1024], "inline": False}
         )
+    report_doc: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "copilot",
+        "run_id": run_id,
+        "phase": phase,
+        "status": final_status,
+        "ok": ok,
+        "won": len(won),
+        "total": len(entries),
+        "duration_seconds": int(duration),
+        "results": results,
+        "failure": failure_kind,
+        "stop_reason": stop_reason or None,
+        "cleanup_errors": cleanup_errors,
+        "screenshot": str(png_path) if has_shot else None,
+        "embeds": [embed],
+    }
+    report_error = _write_copilot_report(report_path, report_doc)
     _post_report(config, embed, png_path if game_touched else None)
 
-    final_status = "cancelled" if cancelled else "success" if ok else "failed"
-    snapshot_path = RUNS_DIR / f"{stem}.json"
+    summary_text = f"抄作业：{len(won)}/{len(entries)} 通过" + (
+        f"；停在 {stop_reason}" if stop_reason else ""
+    )
+    maa_notify.notify(
+        (
+            f"⏹️ 抄作业已停止（{len(won)}/{len(entries)}）"
+            if cancelled
+            else f"✅ 抄作业完成（{len(won)}/{len(entries)}）"
+            if ok
+            else f"⚠️ 抄作业未全通（{len(won)}/{len(entries)}）"
+        ),
+        summary_text[:400],
+        level="passive" if cancelled else "active" if ok else "timeSensitive",
+        notification_id=f"run-{run_id}",
+        url=f"wadosmaa://run/{run_id}",
+    )
+
+    progress.finish(final_status)
     record_copilot_run(
         token=token,
         at=at,
+        run_id=run_id,
         status=final_status,
         stage=str(entries[0].get("stage") or "") if entries else "",
+        report_path=None if report_error else report_path,
+        progress_path=progress_path,
         log_path=log_path,
         snapshot=snapshot_path,
-        failure=copilot_failure(
-            prefight_error=prefight_error, stop_reason=stop_reason, cleanup_errors=cleanup_errors
-        ),
+        failure=failure_kind,
         won=len(won),
         total=len(entries),
     )
     merge_last_run(
         {
+            "run_id": run_id,
             "status": final_status,
             "finished_at": now_beijing().isoformat(),
-            "summary": f"抄作业：{len(won)}/{len(entries)} 通过"
-            + (f"；停在 {stop_reason}" if stop_reason else ""),
+            "duration_seconds": int(duration),
+            "summary": summary_text,
             "ok": ok,
             "cleanup_errors": cleanup_errors,
+            "screenshot": str(png_path) if has_shot else None,
+            "report": None if report_error else str(report_path),
+            "progress": str(progress_path),
         }
     )
     # 运行快照收到终态：以前一直停在 `running`，排查时分不清是还在跑还是早挂了。
@@ -1608,6 +1858,8 @@ def _run_activity_round(
     ledger_file: Path,
     results: list[dict[str, Any]],
     auto_round: bool,
+    *,
+    progress: CopilotProgressFile | None = None,
 ) -> str:
     """当期活动的一轮：分段执行，返回停下的原因（空串 = 全部打完）。"""
     prefix = maa_copilot._activity_prefix(str(state.get("activity_key") or ""))
@@ -1619,6 +1871,8 @@ def _run_activity_round(
     def skip(entry: dict[str, Any], detail: str) -> None:
         results.append({"stage": entry.get("stage"), "mode": entry.get("mode"),
                         "outcome": "skipped", "detail": detail})
+        if progress is not None:
+            progress.finish_stage(str(entry.get("stage") or ""), str(entry.get("mode") or "normal"), "skipped")
 
     def record(entry: dict[str, Any], verdict: str, detail: str) -> None:
         maa_copilot.record_copilot_attempt(
@@ -1629,6 +1883,8 @@ def _run_activity_round(
         maa_copilot.save_ledger(ledger, ledger_file)
         results.append({"stage": entry.get("stage"), "mode": entry.get("mode"),
                         "outcome": verdict, "detail": detail})
+        if progress is not None:
+            progress.finish_stage(str(entry.get("stage") or ""), str(entry.get("mode") or "normal"), verdict)
 
     raid_on = maa_clearing.raid_enabled(config)
     runnable = []
@@ -1698,6 +1954,9 @@ def _run_activity_round(
                     skip(entry, detail)
                 stop_reason = detail
             else:
+                if progress is not None and items:
+                    first = items[0][0]
+                    progress.start_stage(str(first.get("stage") or ""), str(first.get("mode") or "normal"))
                 outcomes = _run_copilot_list(config, env, log_path, items)
                 navigator.zone = None
                 settled, settle_note = settle_after_battle(

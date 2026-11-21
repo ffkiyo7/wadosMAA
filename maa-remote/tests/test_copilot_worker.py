@@ -486,12 +486,24 @@ class CopilotBatchExecutionTests(unittest.TestCase):
             snapshots = [
                 json.loads(path.read_text("utf-8"))
                 for path in Path(raw).glob("*-copilot-*.json")
+                if not path.name.endswith((".progress.json", "-report.json"))
+            ]
+            progress_files = [
+                json.loads(path.read_text("utf-8"))
+                for path in Path(raw).glob("*-copilot-*.progress.json")
+            ]
+            report_files = [
+                json.loads(path.read_text("utf-8"))
+                for path in Path(raw).glob("*-copilot-*-report.json")
             ]
             index = maa_common.read_run_index(Path(raw))
         return SimpleNamespace(
             code=code, ledger=ledger, report=reports[0], state=final,
             results=reports[0]["fields"][0]["value"], settled=settled,
-            snapshot=snapshots[0] if snapshots else None, merge=merge, index=index,
+            snapshot=snapshots[0] if snapshots else None,
+            progress_file=progress_files[0] if progress_files else None,
+            report_file=report_files[0] if report_files else None,
+            merge=merge, index=index,
         )
 
     def _run_with_stage_manager(self, fight, paused=True):
@@ -578,7 +590,7 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         self.assertIn("finished_at", result.snapshot)
 
     def test_a_finished_round_appends_one_index_row(self) -> None:
-        """不变量 #66：一轮一行；抄作业拿不到的重开 / 重启 / 摆窗次数写 None，不硬造。"""
+        """不变量 #66 + S1-4：一轮一行，含 run_id、progress.json 与 report.json 路径。"""
         result = self._run([self._entry("SR-5"), self._entry("SR-6")], lambda *a: ("won", ""))
         self.assertEqual(len(result.index), 1)
         row = result.index[0]
@@ -588,6 +600,30 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         self.assertEqual((row["retries"], row["restarts"], row["window_fixes"]), (None, None, None))
         self.assertTrue(row["log"].endswith(".log"))
         self.assertTrue(row["snapshot"].endswith(".json"))
+        self.assertTrue(row["progress"].endswith(".progress.json"))
+        self.assertTrue(row["report"].endswith("-report.json"))
+
+        # 验证 progress.json 符合 DEV_GUIDE §12.3 扩展契约
+        prog = result.progress_file
+        self.assertIsNotNone(prog)
+        self.assertEqual(prog["schema_version"], 1)
+        self.assertEqual(prog["kind"], "copilot")
+        self.assertEqual(prog["run_id"], row["id"])
+        self.assertEqual(prog["status"], "success")
+        self.assertIsNone(prog["current"])
+        self.assertEqual([s["label"] for s in prog["steps"]], ["SR-5", "SR-6"])
+        self.assertEqual([s["state"] for s in prog["steps"]], ["done", "done"])
+        self.assertEqual(prog["copilot"]["done"], 2)
+        self.assertEqual(prog["copilot"]["total"], 2)
+
+        # 验证结构化 report.json 落盘
+        rep = result.report_file
+        self.assertIsNotNone(rep)
+        self.assertEqual(rep["kind"], "copilot")
+        self.assertEqual(rep["run_id"], row["id"])
+        self.assertTrue(rep["ok"])
+        self.assertEqual((rep["won"], rep["total"]), (2, 2))
+        self.assertEqual(len(rep["results"]), 2)
 
     def test_a_lost_stage_is_indexed_as_failed(self) -> None:
         result = self._run([self._entry("SR-5")], lambda *a: ("failed", "没打过"))
