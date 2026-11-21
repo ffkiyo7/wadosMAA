@@ -534,20 +534,20 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 |---|---|---|---|
 | 5d | `skip` 只挡设它的那一场；`phase == "now"` 永远照跑 | `execute()` 的 `and phase != "now"` + `SessionDailyTests` | — |
 | 39 | 计划覆盖按场次：`plan.json` 是 `{date, sessions: {am, pm}, updated_at}`，`effective_plan(at, phase)` 只叠 `sessions[phase]`；`now` 永远叠不到；旧的按天格式读成空、不迁移、不抛 | `plan_sessions()` / `effective_plan()` / `_today_override()` + `PlanTests` / `SessionDailyTests` | — |
-| 40 | 晚场计划卡不跟随上游更新；计划卡恰好两行控件（`stage-select` + 跳过/恢复），登记表不许出现 `explain` / `log` / `farming-select` / 抄作业下拉的键 | `maa_plan_card.main()` / `build_components()` + `PlanCardPhaseTests` / `DiscordCardTests` | — |
-| 54 | 手动场只由选关卡派发：「现在跑」只发卡；`run start` 只由登记表触发且 token 匹配、`pending`、未过期；`maa_daily.py now <token>` 再核一次。手动关不进 `plan.json`、不带 drops 和后备关；前缀 `hermes:btn:maa-now:`；距开着的场次不足 `manual_run_blackout_minutes` 不发卡不派发；推荐只在脱离会话子进程里算 | `run_now()` / `run_start()` / `run_expire()` / `run_recommend()` / `manual_run_blackout_reason()` + `manual_run_stage()` + `ManualRunCardTests` | — |
+| 40 | **保留核心**：晚场准备任务不跟随上游更新；无 Discord 时早/晚准备步骤（上游更新/活动探测/自动定关/清理/#56 体检）照常完成。**切线后退役**：计划卡两行 Discord 控件与登记表键 | `maa_plan_card.main()` / `build_components()` + `PlanCardPhaseTests` / `PlanCardNoDiscordTests` | — |
+| 54 | **保留核心**：手动关不进 `plan.json`、不带 drops 和后备关；距开着的场次不足 `manual_run_blackout_minutes` 不发卡不派发（除非显式 `--force`）；`maa_daily.py now <token>` 核验 `manual_run.json`。**切线后退役**：`hermes:btn:maa-now:` 选关卡按钮链路 | `run_now()` / `run_local()` / `run_start()` / `manual_run_blackout_reason()` + `manual_run_stage()` + `ManualRunCardTests` | — |
 
-### 8.3 Discord 与按钮
+### 8.3 Discord 与按钮（及解耦后通知出口）
 | # | 不变量 | 落点 | 来由 |
 |---|---|---|---|
 | 6 | 按钮脚本必须 < 20s 返回 | `run_now()` / `copilot_*` 用 `Popen`；活动关探测 0.7s | — |
-| 7 | `buttons.json` 只能 merge，计划卡只碰 `hermes:btn:maa:` 前缀 | `maa_plan_card.main()` | — |
-| 8 | 下拉值必须经 `select_args` 查表，不能直通 argv；场次也写死在登记表 argv 里 | adapter 补丁 + `_stage_select()` + `_copilot_card_components()` + `test_every_control_carries_its_own_phase` | — |
-| 14 | 抄作业按钮前缀 `hermes:btn:maa-copilot:`（连字符），计划卡清扫碰不到；过期由 `prune_expired_searches()` 清 | `maa_copilot.BUTTON_PREFIX` | — |
-| 14b | 抄作业卡前缀 `hermes:btn:maa-copilot:card:`，`card.json` 必须在 `copilot/` 而不是 `searches/`；发新卡顺序固定「PATCH 旧卡 → 删旧登记 → 写新登记 → 发卡 → 记 message_id」 | `CARD_BUTTON_PREFIX` / `CARD_PATH` + `copilot_card()` + `CopilotCardTests` | — |
-| 41 | 「已排程」卡只有 ❌ 取消本轮（watcher 的轮另加固定 id 的「⏸️ 暂停自动作业」）；不许再出现 `:raid-` / `:again` / `:confirm` 键；只在 `scheduled` / `queued` 可取消 | `build_scheduled_card()` / `CANCELABLE_STATUSES` + `ButtonRegistryTests` | — |
-| 63 | Discord 只是通知出口，不是执行的前提：没有频道 / token、网络错误、HTTP 错误、建子区失败都只记一行日志，一场照常跑完、写 `last_run.json` 终态和 `runs/<场>-report.json`；没有子区就跳过进度和子区发帖（`thread_id` 为 `null`）。抄作业 `_notice()` / `_post_report()` 同样永不抛。共用的 `report_game_busy()` / `report_lock_conflict()` 只在状态写不进去时抛 | `discord_outlet()` / `notify()` / `open_thread()` / `write_report_file()` + 抄作业 `_post_report()` + `DiscordOptionalTests` / `CopilotReportOutletTests` | REVIEW_2026-11-09 §1.1 |
-| 67 | 回执三段：`maa_action.py` 每行回执都带 `ok` / `code` / `message`，`detail` 可选。GUI 会调到的命令每个 `return` 都用 `done()` / `refuse()` 写明 `code`（小写短码，改名就是改接口），或转给另一条这样的命令；`message` 只写给玩家看的一句话（过 `test_ui_copy` 禁用词），异常文本、路径、对齐细节放 `detail`。GUI 不显示 `detail`、只记进诊断信息；非 GUI 调用时 `emit()` 把 `detail` 接回 `message`，整行仍 ≤ 7900 字节。`ok` 和 `message` 的含义不变（Discord 只读这两个） | `Reply` / `done()` / `refuse()` / `emit()` / `main()` + `tests/test_receipts.py` / `test_gui_receipts_have_no_implementation_words` | REVIEW_2026-11-09 §3.5 |
+| 7 | **切线后退役（编号不复用）**：独立模式不再写 `buttons.json`；过渡期 `buttons.json` 只能 merge，计划卡只碰 `hermes:btn:maa:` 前缀 | `maa_plan_card.main()` | — |
+| 8 | **切线后退役（改由结构化白名单替代，编号不复用）**：过渡期下拉值经 `select_args` 查表，不直通 argv；场次写死在登记表 argv 里 | adapter 补丁 + `_stage_select()` + `_copilot_card_components()` + `test_every_control_carries_its_own_phase` | — |
+| 14 | **切线后退役（编号不复用）**：过渡期抄作业按钮前缀 `hermes:btn:maa-copilot:`，过期由 `prune_expired_searches()` 清 | `maa_copilot.BUTTON_PREFIX` | — |
+| 14b | **切线后退役（编号不复用）**：过渡期抄作业卡前缀 `hermes:btn:maa-copilot:card:`，`card.json` 必须在 `copilot/` 而不是 `searches/`；保留 `PREVIEWS_DIR` 与 `SEARCHES_DIR` 隔离约束 | `CARD_BUTTON_PREFIX` / `CARD_PATH` + `copilot_card()` + `CopilotCardTests` | — |
+| 41 | **保留核心**：抄作业轮只在 `scheduled` / `queued` 状态可取消。**切线后退役**：已排程卡的 Discord 按钮键约束 | `build_scheduled_card()` / `CANCELABLE_STATUSES` + `ButtonRegistryTests` | — |
+| 63 | **扩展保留（覆盖 Bark + `maa_notify.py`）**：通知出口（Discord / Bark / `barkcrypt`）永远不是执行的前提：缺配置 / token / 密钥、加密失败、网络或 HTTP 错误、建子区失败都只记一行日志、永不抛给业务主流程；日常与抄作业照常跑完并落盘 `last_run.json` 与 `runs/<run_id>-report.json`。共用的 `report_game_busy()` / `report_lock_conflict()` 只在状态写不进去时抛 | `maa_notify.notify()` / `discord_outlet()` / `notify()` / `open_thread()` / `write_report_file()` + `test_notify.py` / `DiscordOptionalTests` / `CopilotReportOutletTests` | REVIEW_2026-11-09 §1.1 |
+| 67 | **扩展保留（`ios` 与 `gui` 同等）**：回执三段：`maa_action.py` 每行回执都带 `ok` / `code` / `message`，`detail` 可选。GUI / iOS 会调到的命令每个 `return` 都用 `done()` / `refuse()` 写明 `code`（小写短码），`message` 只写给玩家看的一句话（过 `test_ui_copy`），异常文本与路径放 `detail`。`is_app_source()`（`gui` / `ios`）不把 `detail` 拼进 `message`；非 App 调用时 `emit()` 把 `detail` 接回 `message`，整行仍 ≤ 7900 字节 | `is_app_source()` / `Reply` / `done()` / `refuse()` / `emit()` / `main()` + `tests/test_receipts.py` / `test_gui_receipts_have_no_implementation_words` | REVIEW_2026-11-09 §3.5 |
 
 ### 8.4 锁、闸门与设备
 | # | 不变量 | 落点 | 来由 |
@@ -558,7 +558,7 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | 36 | 每开新一关前查距下一场是否够 `auto_copilot_min_lead_minutes`；三条时间闸门（blackout / Depot 窗口 / 时间预算）只有一份，在 `maa_action.py` | `min_lead_reason()` / `_copilot_blackout_reason()` / `depot_window_reason()` + `CopilotTimeBudgetTests` | — |
 | 60 | 上游更新只有一份（`maa_upstream.run_update()`），全库只有它调 `maa update` / `hot-update` / `brew upgrade`，期间持 `run.lock`。开跑前 `hard_block()` 只在钉住项被改、或上次更新不自洽时拒跑；开发副本只检查不更新 | `run_update()` / `hard_block()` / `update_gate()` + `tests/test_upstream.py` | [2026-08-26](./incidents/2026-08-26-maaresource-out-of-sync.md)、[2026-09-07](./incidents/2026-09-07-hot-update-libgit2-proxy.md) |
 | 62 | 动游戏的流程（日常 `execute()`、抄作业 `_batch_run_locked()`）在拿到 `run.lock` 之后、`launch_game()` 之前 `pause_stage_manager()`，在 `finally` 里**关完游戏之后** `restore_stage_manager()`；成功、失败、`KeyboardInterrupt` 都要还原。关之前必须先把原状态落盘（`state/maa/stage_manager.json`），落盘失败就不关；原本关着就不动也不还原；遗留文件以它为准、不得被覆盖。两个函数永不抛。单测不许真的读写 `com.apple.WindowManager`（`_isolation` 审计钩子拦 `subprocess.Popen`，`guard_devices()` 默认把两个函数桩成空操作） | `pause_stage_manager()` / `restore_stage_manager()` + `StageManagerTests` / `StageManagerExecuteTests` / `test_stage_manager_is_paused_before_launch_and_restored` | [2026-11-08](./incidents/2026-11-08-am-window-shelved.md) |
-| 64 | `run cancel` 只给核对过的进程发 SIGINT：持有者必须是 `daily` / `copilot`，pid 的命令行必须真有 `maa_daily.py` / `maa_copilot_worker.py run-batch`（按文件名比，不按子串），否则 `ok=false` 什么都不发。被停的一方只让第一次 SIGINT 打断（`interrupt_once()`），不补跑、不截主页，照常关游戏、还原台前调度（#62）、发战报，终态 `last_run.status = cancelled`（抄作业的轮记 `canceled`、不记开打前失败），返回 130；放锁随进程收尾 | `run_cancel()` / `_is_run_process()` + `maa_common.interrupt_once()` / `CANCEL_EXIT_CODE` + `execute()` / `_batch_run_locked()` + `RunCancelTests` / `CancelledRunTests` / `test_a_cancelled_round_ends_as_cancelled_and_reports` | REVIEW_2026-11-09 §2.2 |
+| 64 | **扩展保留（补充 `--run-id` 校验）**：`run cancel [--run-id <run_id>]` 只给核对过的进程发 SIGINT：持有者必须是 `daily` / `copilot`，传入 `--run-id` 时必须严格匹配 `run.lock.run_id`（不一致返回 `run_changed` 拒绝），pid 的命令行必须真有 `maa_daily.py` / `maa_copilot_worker.py run-batch`（按文件名比，不按子串），否则 `ok=false` 什么都不发。被停的一方只让第一次 SIGINT 打断（`interrupt_once()`），不补跑、不截主页，照常关游戏、还原台前调度（#62）、发战报，终态 `last_run.status = cancelled`（抄作业的轮记 `canceled`、不记开打前失败），返回 130；放锁随进程收尾 | `run_cancel()` / `_is_run_process()` + `maa_common.interrupt_once()` / `CANCEL_EXIT_CODE` + `execute()` / `_batch_run_locked()` + `RunCancelTests` / `CancelledRunTests` / `test_run_cancel_checks_expected_run_id` | REVIEW_2026-11-09 §2.2 |
 
 ### 8.5 部署与状态文件
 | # | 不变量 | 落点 | 来由 |
@@ -566,8 +566,8 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | 19 | 只有「查询成功且确实无活动」才清空活动关，格式不可辨认一律抛；闸门与解析器共用 `is_side_story_heading()`；`deploy.py` 不得用种子覆盖线上 `activity_stages` | `activity_snapshot()` + `test_snapshot_gate_and_parser_agree_on_what_a_heading_is`；`PRESERVED_RUNTIME_CACHE_KEYS` | [2026-09-02](./incidents/2026-09-02-deploy-overwrote-activity-stages.md) |
 | 25 | 由线上进程写回的运行时缓存键必须列入 `PRESERVED_RUNTIME_CACHE_KEYS`（线上有值一律保留，种子只首次兜底）；新增此类键必须同步加 | `deploy_state()` + `test_every_known_runtime_cache_key_is_preserved_on_deploy` | [2026-09-02](./incidents/2026-09-02-deploy-overwrote-activity-stages.md) |
 | 58 | 状态文件读时校验、写时带 `schema_version`（§6.1）；`config` / `plan` / `manual_run` 遇未知更高版本拒跑，`last_run` 告警宽读；所有读取都过 `check_schema()`；`schema_version` 不进 `PRESERVED_RUNTIME_CACHE_KEYS` | `check_schema()` / `*_SCHEMA_VERSION` + `migrate_live_config()` + `tests/test_state_schema.py` | — |
-| 65 | 本场进度文件 `runs/<场>.progress.json`：字段只增不改语义（改语义就升 `schema_version`）；写失败（含解析异常）只打一行 stderr，绝不影响跑场；`RunProgressFile` 的方法永不抛；GUI 只读不写。`notes` 文本只来自 `PROGRESS_NOTES`、步骤名只来自 `PROGRESS_STEPS`，两者都在 `test_ui_copy` 的禁用词扫描里；只在恢复点加 note，不改控制流 | `RunProgressFile` / `run_maa()` / `run_maa_resilient()` / `_execute()` + `ProgressFileTests` / `test_progress_notes_have_no_implementation_words` | REVIEW_2026-11-09 §1.3 |
-| 66 | 场次索引 `runs/index.jsonl` 只追加：日常（含手动场）和抄作业每场结束写一行——成功、失败、停下、计划跳过 / 「你在玩」跳过、上游拒跑都写，锁冲突、手动场请求对不上不算一场、不写；进程被杀写不了就没有。一行一次 `O_APPEND` 写入、持 `runs/index.lock`；超过 `RUN_INDEX_TRIM_AT` 行才在同一把锁里裁到最近 `RUN_INDEX_KEEP` 行；`cleanup_run_files()` 不碰这两个文件。`append_run_index()` 永不抛，写不进去只打一行 stderr；日常一场只写一行（收尾时被打断也不补第二行）。字段只增不改语义（改语义就升 `schema_version`），读的一方跳过坏行和更高版本的行；GUI 只读不写。全库只有 `maa_daily.py` / `maa_copilot_worker.py` 调它 | `append_run_index()` / `read_run_index()` / `record_daily_run()` / `daily_failure()` / `record_copilot_run()` + `tests/test_run_index.py` / `DiscordOptionalTests` / `CancelledRunTests` / `GameProbeTests` / `SessionDailyTests` / `CopilotBatchExecutionTests` | REVIEW_2026-11-09 §1.2 |
+| 65 | **扩展保留（覆盖日常 + 抄作业与 `run_id` 命名）**：本场进度文件 `runs/<run_id>.progress.json`（日常 `kind="daily"`、抄作业 `kind="copilot"`，均含 `run_id`）：字段只增不改语义（改语义就升 `schema_version`）；写失败（含解析异常）只打一行 stderr，绝不影响跑场；`RunProgressFile` / `CopilotProgressFile` 的方法永不抛；GUI 只读不写。日常 `notes` 文本只来自 `PROGRESS_NOTES`、步骤名只来自 `PROGRESS_STEPS`，两者都在 `test_ui_copy` 的禁用词扫描里；只在恢复点加 note，不改控制流 | `RunProgressFile` / `CopilotProgressFile` / `run_maa()` / `_execute()` / `_batch_run_locked()` + `ProgressFileTests` / `CopilotBatchExecutionTests` | REVIEW_2026-11-09 §1.3 |
+| 66 | **扩展保留（覆盖抄作业 `report`/`progress` 与 `run_id` 五类文件）**：场次索引 `runs/index.jsonl` 只追加：日常（含手动场）和抄作业每场结束写一行（`id == run_id`，带 `report`/`progress`/`log` 路径；五类产物均以 `run_id` 命名、互不覆盖，读取层兼容旧 `<日期>-<场次>` 命名）。一行一次 `O_APPEND` 写入、持 `runs/index.lock`；超过 `RUN_INDEX_TRIM_AT` 行才在同一把锁里裁到最近 `RUN_INDEX_KEEP` 行；`cleanup_run_files()` 不碰这两个文件。`append_run_index()` 永不抛，写不进去只打一行 stderr；日常一场只写一行。字段只增不改语义，读的一方跳过坏行和更高版本的行；GUI 只读不写。全库只有 `maa_daily.py` / `maa_copilot_worker.py` 调它 | `append_run_index()` / `read_run_index()` / `record_daily_run()` / `record_copilot_run()` / `resolve_run_artifact()` + `tests/test_run_index.py` / `DiscordOptionalTests` / `CopilotBatchExecutionTests` | REVIEW_2026-11-09 §1.2 |
 
 ### 8.6 材料推荐与自动定关
 | # | 不变量 | 落点 | 来由 |
@@ -604,8 +604,8 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | 35 | 一关失败继续下一关，只有 `nav` 失败停整轮；战报逐关列结果；普通没过就跳过同关突袭 | `_batch_run_locked()` + `CopilotBatchExecutionTests` | — |
 | 37 | 非当期活动的关只跑上游 `tasks/Stages/<前缀>.json` 有顶层键的；当期活动关只要这期有一个普通关键（锚点）且游戏数据有这关即可（导航见 #57）。都不读不建用户目录，读失败一律视为无键；导航不过去的关只在一览标 ⛔ | `copilot_nav_checker()` / `nav_checker()` / `read_nav_keys()` / `pick_anchor()` / `collect_targets()` + `CopilotTargetSetTests` / `CopilotListPrepTests` | — |
 | 52 | 空 `activity_key` 永不动活动账本，非活动关记 `ledger-standalone.json`；`ledger_path()` 与 `ensure_ledger()` 用同一个 key | `ledger_path()` / `ensure_ledger()` / `_batch_run_locked()` + `LedgerTests` / `CopilotBatchExecutionTests` | [2026-09-09](./incidents/2026-09-09-standalone-ledger.md) |
-| 55 | 森空岛读不到不自动排轮；开打前环境故障写 `prefight_error`，按北京日计数达 `auto_copilot_max_prefight_failures_per_day` 当天停排只发一条（理智不够不计）；暂停开关 `copilot/auto_pause.json` 只管 watcher 的轮、不中断正在打的那关；`copilot auto on` 清掉当天停排；按钮 id 固定 `hermes:btn:maa-copilot:auto:off\|on` | `run_once()` / `_count_prefight_failure()` / `_prefight_blocked()` + `PrefightError` + `copilot_auto()` + `ActivityWatchTickTests` / `CopilotAutoPauseCommandTests` | [2026-10-11](./incidents/2026-10-11-yw4-prefight-loop.md) |
-| 56 | 森空岛每日体检挂在计划卡后：每北京日探一次，失败一天最多一条、恢复前天天发；发送失败不记「已查」；体检异常不许拖垮计划卡；`refresh_roster()` 成功就清 `last_error` | `daily_health_check()` / `_skland_health_notice()` + `SklandDailyHealthTests` | — |
+| 55 | **保留核心**：森空岛读不到不自动排轮；开打前环境故障写 `prefight_error`，按北京日计数达 `auto_copilot_max_prefight_failures_per_day` 当天停排只发一条（理智不够不计）；暂停开关 `copilot/auto_pause.json` 只管 watcher 的轮、不中断正在打的那关；`copilot auto on` 清掉当天停排。**切线后退役**：固定 Discord 按钮 id | `run_once()` / `_count_prefight_failure()` / `_prefight_blocked()` + `PrefightError` + `copilot_auto()` + `ActivityWatchTickTests` / `CopilotAutoPauseCommandTests` | [2026-10-11](./incidents/2026-10-11-yw4-prefight-loop.md) |
+| 56 | **完整保留**：森空岛每日体检挂在计划卡后（含无 Discord 独立模式）：每北京日探一次，失败一天最多一条、恢复前天天发，经 `maa_notify.py` 推送；发送失败不记「已查」；体检异常不许拖垮计划卡；`refresh_roster()` 成功就清 `last_error` | `daily_health_check()` / `_skland_health_notice()` + `SklandDailyHealthTests` / `PlanCardNoDiscordTests` | — |
 | 57 | 当期活动关的导航只有三小步自写、都只写进 `_isolated_config()` 临时目录：借锚点进活动停在地图上；剧情关挡路点开跳过；EX / S 按 `zoneNameSecond` 找入口（相似度严格高于同活动其它区域名才点）。每步后要认出目标区域关卡代号（`CopilotZoneReady`）才算到位；够不着的关整轮截断（`plan_segments()` / `trim_unreachable()`） | `ActivityNavigator` / `_run_activity_round()` / `plan_segments()` / `zone_button()` + `CopilotListPlanTests` / `CopilotZoneEntryTests` / `CopilotListRoundTests` / `CopilotReachableTargetTests` | — |
 
 `46–50`：原肉鸽的五条，2026-11-06 移除（K16），编号不复用。
@@ -745,8 +745,8 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 
   GUI 现在按码分支的：`run local` 的 `session_soon`（早晚场就要开始，可 `--force`）。其余常见码：`busy`（游戏正被占用）、`blocked`（抄作业闸门）、`update_blocked`、`not_installed`、`not_ready`、`bad_stage` / `bad_phase` / `bad_value` / `bad_args`、`preview_expired`、`roster_failed`、`cannot_reach`、`not_running` / `not_cancelable` / `already_finished`；成功码按命令（`stage_set`、`run_started`、`copilot_started`、`config_saved`、`schedule_saved`…），以 `maa_action.py` 里 `done()` / `refuse()` 的第一个参数为准。旧的 `data.blocked`（`locked` / `blackout`）照旧保留。
 - **环境变量**：
-  - `HERMES_HOME`：开发期指向副本；
-  - `MAA_ACTION_SOURCE=gui`：改动会被记成「由 Wado's MAA 改的」，不传就记成 `discord`；
+  - `WADOS_MAA_HOME`（优先）→ `HERMES_HOME` → `~/.wados-maa`：运行数据根目录（开发期指向 `devhome` 副本）；
+  - `MAA_ACTION_SOURCE=gui|ios`：原生 App 来源，改动记为 `gui` / `ios` 且 `emit()` 不把 `detail` 拼进 `message`；不传记为 `discord`；
   - PATH 至少要有 `/opt/homebrew/bin`（脚本也会自己补）。
 - **GUI 专用命令**（`maa_action.dispatch_gui()`）**不进 Discord 的登记表，也不写进技能**。从 Discord 那条路（`dispatch()`）调它们一律返回失败。
 
@@ -755,7 +755,7 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 | `config get` | 可改的配置项和当前值。`label` / `group` / `help` 原样上界面，按 REVIEW §3.5 词表写（`test_ui_copy` 扫）；`label` 末尾的括号是单位。分组：早晚场 / 日常 / 自动定关 / 抄作业 / 森空岛 / 运行，GUI「高级」按分组名排，改名两边一起改 | `fields`（`key` / `group` / `label` / `kind` / `default` / 范围）、`groups`、`values`、`meta` |
 | `config set <键> <JSON>` / `config patch <JSON 对象>` | 改配置。按 `maa_settings.FIELDS` 白名单校验；`patch` 要么全改、要么全不改 | 同 `config get` |
 | `defaults show` / `defaults set stage <关>` / `defaults set task <名> on\|off` | 持久默认值 | `defaults.json` 的内容 |
-| `schedule show` / `set <am\|pm> <HH:MM>` / `enable <场>` / `disable <场>` / `sync` | 早晚场时间和 cron（§3、K6）。只有拨开关才会 pause / resume | `maa_schedule.schedule_report()` |
+| `schedule show` / `set <am\|pm> <HH:MM>` / `enable <am\|pm\|depot>` / `disable <am\|pm\|depot>` / `depot on\|off` / `sync` | 早晚场时间、仓库对表开关与内置调度器热重载（不再调 `hermes cron`） | `maa_schedule.schedule_report()` |
 | `run choices` | 一键长草页的选项：关卡（和选关卡同源 `_stage_choices()`）、环节开关、锁 / 定时场优先的现状 | `choices`、`switches`、`task_names`、`busy`、`blackout`；`activity`：此刻开放的活动（`maa_plan_card.current_activity()`，和抄作业认同一期，读 MaaCore 活动缓存）`{name, start_at, end_at, stages}`，时间是北京时间 ISO，`stages` 是缓存里排前三的活动关（首页前置用），没有活动是 `null` |
 | `copilot stages` | 自动抄作业的关卡列表（和抄作业卡同源 `copilot_card_stages()`），只读本地。「已通」和 watcher 同一把尺子：记账，或森空岛区域进度按游戏数据的区域链精确到关（`maa_gamedata.skland_cleared()`，只算普通，森空岛不分突袭） | `stages`（每行 `stage` / `code` / `nav` / `reason` / `status` / `status_text` / `ledger_cleared`：本地记账里有通关记录，可撤销）、`in_activity` |
 | `run local <关> <开关 JSON> [--force]` | 本机手动场：`--force` 只解除「定时场优先」，不解锁 | `token` 等 |
@@ -777,7 +777,7 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 
 ### 12.2 锁
 - **路径**：`$HERMES_HOME/state/maa/run.lock`，用 `flock(LOCK_EX | LOCK_NB)`。GUI 只读它看谁在用游戏，自己不抢（2026-11-09 起 GUI 是纯前端，动游戏都走 maa-remote 的命令）。
-- **持有者标记**（K15）：拿到锁后，把锁文件内容整个换成一行 JSON：`{"holder": 种类, "detail": 补充, "pid": 进程号, "since": ISO 时间}`。放锁前清空。
+- **持有者标记**（K15）：拿到锁后，把锁文件内容整个换成一行 JSON：`{"holder": 种类, "detail": 补充, "pid": 进程号, "since": ISO 时间, "run_id": 唯一场次ID}`。放锁前清空。
   - 种类：`daily` / `copilot` / `depot` / `update`。`gui` 是旧版 GUI 在进程内跑上游功能时写的，现在没有来源；`LOCK_HOLDER_LABELS` 里留着只为兼容。
   - 标记只在锁**确实被占着**时可信（`maa_common.run_lock_holder()`）。
 - 日常发现持有者是 `update` 时会等它跑完（K17）。是别的持有者就按锁冲突上报（#23），消息里写明是谁。
