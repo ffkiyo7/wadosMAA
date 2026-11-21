@@ -103,8 +103,8 @@ Gate 1 ──┬──► S2-1 (TLS 防挂死 + 分域 Token + 证书/二维码�
   - 仅支持输入 `full` Bearer Token（存于页面内存或可选 `sessionStorage`，不拼进 URL query）；
   - 严格限定 3 个救命功能：① 刷新并展示当前 `lock` / `last_run` / `progress` 状态；② 携带当前 `run_id` 触发 `POST /api/v1/run/cancel`（带二次确认）；③ 触发 `POST /api/v1/ios/resign`。
 - **验收清单**：
-  - [ ] 无外网静态资源依赖，Safari 移动端排版清晰可用（已完成零外部 URL / `<script src>` / `<link href>` 静态校验与本地 DOM 回归测试；待 iPhone Safari 真机排版实测）
-  - [x] 错误 Token 提示鉴权失败；紧急停止必须携带 `run_id`（已补 Node DOM 回归测试，确认停止回执不被随后的状态刷新覆盖）
+  - [x] 无外网静态资源依赖，Safari 移动端排版清晰可用（已完成零外部 URL / `<script src>` / `<link href>` 静态校验、本地 DOM 回归测试，以及 iPhone Safari Wi-Fi 与 5G 真机竖屏排版实测无横向滚动）
+  - [x] 错误 Token 提示鉴权失败；紧急停止必须携带 `run_id`（已补 Node DOM 回归测试并真机实测确认停止回执不被随后的状态刷新覆盖）
 
 ---
 
@@ -113,13 +113,13 @@ Gate 1 ──┬──► S2-1 (TLS 防挂死 + 分域 Token + 证书/二维码�
 - **前置依赖**：S2-2, S2-3, S2-4
 - **并行性**：🔴 严格串行（Phase 2 收口门禁）
 - **实测项目（在 `devhome` 执行，动游戏项须避开线上窗口且核对线上锁空闲）**：
-  1. [ ] 手机在**家里 Wi-Fi** 与 **外网 5G** 分别拉取 `/api/v1/snapshot`、订阅 `/api/v1/events` SSE（已完成 Mac 本机经 LAN `https://192.168.50.2:18170` 与公网 `https://maa.luxraykit.com` 实测；**待手机真机 Wi-Fi 与 5G 实测**）；
+  1. [x] 手机在**家里 Wi-Fi** 与 **外网 5G** 分别拉取 `/api/v1/snapshot`、订阅 `/api/v1/events` SSE（已于 2026-11-21/22 完成 iPhone 真机 Wi-Fi `https://192.168.50.2:18170` 与外网 5G `https://maa.luxraykit.com` 实测：`/rescue` 刷新快照正常、a-Shell SSE 收到 `event: today_plan` 与 25s `: keepalive`）；
   2. [x] 发起 `copilot/preview` 并在搜索途中发 `DELETE /api/v1/copilot/preview/<request_id>` 确认子进程被中止（已在 `devhome` 实测返回 `preview_canceled` 且无残留进程）；
-  3. [ ] 发起手动场并通过 `/rescue` 与 API 带 `run_id` 取消，验证旧 `run_id` 被 `run_changed` 拒绝（已完成 API 经公网隧道触发 `run_changed` 与真 `run_id` 取消收尾；**待在 `/rescue` 页面上点停止真机实测**）；
-  4. [ ] 调用 `POST /api/v1/notify/test` 收到真机解密 Bark 推送（已测得 API 返回 `200 notify_sent`；**待手机端确认 Bark 密文解密展示**）；
+  3. [x] 发起手动场并通过 `/rescue` 与 API 带 `run_id` 取消，验证旧 `run_id` 被 `run_changed` 拒绝（已完成 API 经公网隧道触发 `run_changed` 验证，并在 iPhone 5G Safari `/rescue` 页面真机停止手动场 `2026-11-22-now-011948`，确认回执保留、游戏进程清理、锁释放且落盘 `status=cancelled`）；
+  4. [x] 调用 `POST /api/v1/notify/test` 收到真机解密 Bark 推送（已于 5G 实测返回 `200` 且 iPhone 真机收到解密后的可读中文「Wado's MAA 测试推送」；实测顺带发现并修复 `cloudflared` 空体 POST 转 `Transfer-Encoding: chunked` 兼容问题）；
   5. [x] 实测慢速半开 TLS 连接不阻塞并发正常请求（已在 `devhome` 实测 3 条半开连接下并发 `/healthz` 11ms 返回，3/3 超时自动断连）；
   6. [x] 实测 `resign_only` Token 访问 `/api/v1/snapshot`、`/api/v1/run/cancel` 返回 `403`（已在 `devhome` 经公网隧道实测返回 `403 forbidden`）。
-- **Gate 2 验收清单（⏳ 待真机补齐 S2-5 未勾选项后放行）**：
-  - [ ] 上述 6 项双轨实测全部通过（剩余待真机确认：手机 Wi-Fi/5G 访问与 SSE、在 `/rescue` 页面点停止、手机 Bark 解密确认）
-  - [x] `unittest`（895 项，Python 3.12 + 干净 `HOME` + 系统 Python 3.9）/ `ruff` / `pyright` 全部 0 报错
+- **Gate 2 验收清单（✅ 已通过）**：
+  - [x] 上述 6 项双轨实测全部通过（2026-11-22 真机补齐并已停服与轮换作废实测 Token）
+  - [x] `unittest`（Python 3.12 + 系统 Python 3.9）/ `ruff` / `pyright` 全部 0 报错
   - [x] 线上 `~/.hermes` 与 Discord 全程零改动
