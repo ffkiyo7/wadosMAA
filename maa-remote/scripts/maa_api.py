@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -411,6 +412,7 @@ class APIContext:
     resign_handler: ResignHandler | None = None
     on_schedule_reload: Callable[[], None] | None = None
     preview_spawner: Callable[[list[str], dict[str, str]], subprocess.Popen[Any]] | None = None
+    clock: Callable[[], datetime] = maa_common.now_beijing
     previews: PreviewRegistry = dataclasses.field(default_factory=PreviewRegistry)
 
     def __post_init__(self) -> None:
@@ -640,19 +642,34 @@ class APIContext:
         _ok, _msg, data = maa_action.plan_today()
         return data
 
-    def _read_upstream(self) -> dict[str, Any]:
-        # 缓存 upstream.json + run.lock 状态签名，文件未变时避免每 0.5s 重复探测子进程。
-        upstream_file = self.state_dir / "upstream.json"
+    def _file_sig(self, path: Path) -> tuple[int, int]:
         try:
-            st = upstream_file.stat()
-            sig: tuple[Any, ...] = (st.st_mtime_ns, st.st_size, maa_common.run_lock_holder())
+            st = path.stat()
+            return (st.st_mtime_ns, st.st_size)
         except OSError:
-            sig = (0, 0, maa_common.run_lock_holder())
+            return (0, 0)
+
+    def _read_upstream(self) -> dict[str, Any]:
+        # 缓存签名包含：upstream.json、config.json、run.lock、国服游戏日（04:00 换日）以及实时 update_gate，
+        # 确保跨 04:00 从 ok 切 stale 或进出早晚场保护窗导致 update_blocked 变化时立刻刷新，
+        # 同时空闲 0.5s SSE 轮询不重复拉起 maa version 子进程。
+        now = self.clock()
+        config = maa_common.load_config()
+        holder = maa_common.run_lock_holder()
+        game_day = maa_upstream.game_day_start(now).isoformat()
+        gate = maa_upstream.update_gate(config, now)
+        sig: tuple[Any, ...] = (
+            self._file_sig(self.state_dir / "upstream.json"),
+            self._file_sig(self.state_dir / "config.json"),
+            holder,
+            game_day,
+            gate,
+        )
         cached_sig = getattr(self, "_upstream_cache_sig", None)
         cached_val = getattr(self, "_upstream_cache_val", None)
         if cached_val is not None and cached_sig == sig:
             return cached_val
-        val = maa_upstream.status(maa_common.load_config(), online=False)
+        val = maa_upstream.status(config, online=False, at=now)
         self._upstream_cache_sig = sig
         self._upstream_cache_val = val
         return val

@@ -186,6 +186,93 @@ class DaemonSSETests(unittest.TestCase):
         self.assertEqual(item[0], "lock")
         self.assertEqual(item[1]["run_id"], "2026-11-21-now-202500")
 
+    def test_upstream_cache_invalidates_across_game_day_0400_and_update_blocked_window(self) -> None:
+        """评审【6】回归：跨北京 04:00 游戏日或进入早晚场保护窗时，_read_upstream 缓存必须失效并推新事件。"""
+        from datetime import datetime
+        from unittest.mock import patch
+
+        import maa_common
+        import maa_upstream
+        from _helpers import BEIJING
+
+        cfg_path = self.state_dir / "config.json"
+        up_path = self.state_dir / "upstream.json"
+        cfg_data = {
+            "schema_version": 1,
+            "session_schedule": {
+                "am": {"time": "08:00", "enabled": True},
+                "pm": {"time": "22:00", "enabled": True},
+            },
+            "manual_run_blackout_minutes": 30,
+        }
+        maa_common.atomic_write_json(cfg_path, cfg_data)
+        maa_common.atomic_write_json(
+            up_path,
+            {
+                "schema_version": 1,
+                "state": "done",
+                "ok": True,
+                "last_success_at": "2026-11-20T08:00:00+08:00",
+            },
+        )
+
+        # 初始时刻：2026-11-21 03:59:50（仍属 2026-11-20 游戏日，且远离早场保护窗 → verdict=ok, update_blocked=""）
+        current_now = [datetime(2026, 11, 21, 3, 59, 50, tzinfo=BEIJING)]
+        ctx = maa_api.APIContext(
+            home_dir=self.home,
+            scripts_dir=ROOT / "scripts",
+            state_dir=self.state_dir,
+            runs_dir=self.runs_dir,
+            daemon_dir=self.daemon_dir,
+            secrets_path=self.secrets_path,
+            rescue_html_path=ROOT / "daemon" / "rescue.html",
+            clock=lambda: current_now[0],
+        )
+
+        status_calls = 0
+
+        def wrapped_status(config: Any, *, online: bool = False, at: datetime | None = None) -> dict[str, Any]:
+            nonlocal status_calls
+            status_calls += 1
+            return orig_status(config, online=online, at=at)
+
+        orig_status = maa_upstream.status
+        with patch.object(maa_common, "CONFIG_PATH", cfg_path), \
+                patch.object(maa_upstream, "UPSTREAM_PATH", up_path), \
+                patch.object(maa_upstream, "is_live_home", return_value=True), \
+                patch.object(maa_upstream, "pinned_problems", return_value=[]), \
+                patch.object(maa_upstream, "read_maa_versions", return_value=("v0.7.8", "v6.23.0")), \
+                patch.object(maa_upstream, "resource_head", return_value="abc1234"), \
+                patch.object(maa_common, "run_lock_holder", return_value=None), \
+                patch.object(maa_upstream, "status", side_effect=wrapped_status):
+
+            hub = maa_api.SSEHub(lambda: {"upstream": ctx._read_upstream()})
+            hub._seed_initial()
+            self.assertEqual(status_calls, 1)
+
+            # 同一秒再轮询：命中缓存，不重复调 status()，不推送事件
+            self.assertEqual(hub.poll_once(), [])
+            self.assertEqual(status_calls, 1)
+
+            # 1. 跨过北京 04:00（文件和锁均未动）→ 缓存失效，verdict 由 ok 变为 stale 并触发 SSE 推送
+            current_now[0] = datetime(2026, 11, 21, 4, 0, 5, tzinfo=BEIJING)
+            sub = hub.subscribe()
+            emitted = hub.poll_once()
+            self.assertEqual(emitted, ["upstream"])
+            self.assertEqual(status_calls, 2)
+            ev_name, ev_payload = sub.get_nowait()  # type: ignore[misc]
+            self.assertEqual(ev_name, "upstream")
+            self.assertEqual(ev_payload["verdict"], "stale")
+            self.assertEqual(ev_payload["update_blocked"], "")
+
+            # 2. 进入 08:00 早场前 30 分钟保护窗（07:45）→ 缓存因 update_gate 变化而失效，update_blocked 非空并推送
+            current_now[0] = datetime(2026, 11, 21, 7, 45, 0, tzinfo=BEIJING)
+            emitted2 = hub.poll_once()
+            self.assertEqual(emitted2, ["upstream"])
+            self.assertEqual(status_calls, 3)
+            _ev2, payload2 = sub.get_nowait()  # type: ignore[misc]
+            self.assertIn("早场", payload2["update_blocked"])
+
 
 if __name__ == "__main__":
     unittest.main()
