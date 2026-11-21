@@ -13,6 +13,7 @@ from typing import Any
 
 import maa_copilot
 import maa_farming
+import maa_notify
 import maa_upstream
 from maa_upstream import format_update_summary
 from maa_common import (
@@ -455,31 +456,55 @@ def refresh_activity_stages(config: Config) -> tuple[bool, str]:
     return True, "、".join(stages) if stages else "当前无开放活动关"
 
 
+def _discord_outlet(config: Config) -> tuple[str, str]:
+    """可选的 Discord 出口：未配置频道或读不到 token 时返回空串，绝不阻断准备步骤。"""
+    channel_id = str(config.get("channel_id", "")).strip()
+    if not channel_id.isdigit():
+        return "", ""
+    try:
+        token = discord_token()
+    except Exception as exc:  # noqa: BLE001 — (c) 通知出口缺席不阻断计划卡准备步骤
+        print(f"计划卡跳过 Discord 发卡（{exc}）", file=sys.stderr, flush=True)
+        return "", ""
+    return token, channel_id
+
+
 def check_and_update_upstream(
     token: str,
     channel_id: str,
     config: Config,
 ) -> dict[str, Any]:
-    """早场卡跟一次上游（#40）。更新本身在 `maa_upstream`（持 `run.lock`），这里只管发红卡。"""
+    """早场卡跟一次上游（#40）。更新本身在 `maa_upstream`（持 `run.lock`），失败发告警。"""
     result = maa_upstream.run_update(config, "plan_card")
     if result.get("status") == "failed":
         detail = str(result.get("detail") or "上游更新失败")
-        discord_request(
-            token,
-            "POST",
-            f"/channels/{channel_id}/messages",
-            {
-                "embeds": [
-                    {
-                        "title": "❌ MAA 上游更新失败",
-                        "description": f"```text\n{detail[-1500:]}\n```",
-                        "color": 0xED4245,
-                        "timestamp": now_beijing().isoformat(),
-                    }
-                ],
-                "allowed_mentions": {"parse": []},
-            },
+        maa_notify.notify(
+            "❌ 上游更新失败",
+            detail[-500:],
+            level="timeSensitive",
+            notification_id="upstream-update",
+            url="wadosmaa://today",
         )
+        if token and channel_id:
+            try:
+                discord_request(
+                    token,
+                    "POST",
+                    f"/channels/{channel_id}/messages",
+                    {
+                        "embeds": [
+                            {
+                                "title": "❌ MAA 上游更新失败",
+                                "description": f"```text\n{detail[-1500:]}\n```",
+                                "color": 0xED4245,
+                                "timestamp": now_beijing().isoformat(),
+                            }
+                        ],
+                        "allowed_mentions": {"parse": []},
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 — (c) 通知出口异常不阻断主流程（#63）
+                print(f"上游更新失败 Discord 告警发送失败：{type(exc).__name__}: {exc}", file=sys.stderr)
     return result
 
 
@@ -1172,10 +1197,8 @@ def retire_old_plan_cards(token: str, channel_id: str) -> dict[str, int]:
 def main(argv: list[str] | None = None) -> int:
     phase = select_phase(list(argv or []))
     config = load_config()
-    channel_id = str(config.get("channel_id", "")).strip()
-    if not channel_id.isdigit():
-        raise RuntimeError("config.json 中尚未配置 Discord channel_id")
-    token = discord_token()
+    token, channel_id = _discord_outlet(config)
+    has_discord = bool(token and channel_id)
     # D1：只有早场卡跟随上游更新。晚场卡跑 brew / `maa update` 既没有意义
     # （早上刚跟过），又会在 21:50 引入一次几分钟的网络等待。
     update = (
@@ -1185,22 +1208,33 @@ def main(argv: list[str] | None = None) -> int:
     # MaaCore package update, so probe it for every plan card.
     activity_ok, activity_detail = refresh_activity_stages(config)
     if not activity_ok:
-        discord_request(
-            token,
-            "POST",
-            f"/channels/{channel_id}/messages",
-            {
-                "embeds": [
-                    {
-                        "title": "❌ MAA 活动关探测失败",
-                        "description": activity_detail[:1500],
-                        "color": 0xED4245,
-                        "timestamp": now_beijing().isoformat(),
-                    }
-                ],
-                "allowed_mentions": {"parse": []},
-            },
+        maa_notify.notify(
+            "❌ 活动关探测失败",
+            activity_detail[:500],
+            level="timeSensitive",
+            notification_id="activity-probe",
+            url="wadosmaa://today",
         )
+        if has_discord:
+            try:
+                discord_request(
+                    token,
+                    "POST",
+                    f"/channels/{channel_id}/messages",
+                    {
+                        "embeds": [
+                            {
+                                "title": "❌ MAA 活动关探测失败",
+                                "description": activity_detail[:1500],
+                                "color": 0xED4245,
+                                "timestamp": now_beijing().isoformat(),
+                            }
+                        ],
+                        "allowed_mentions": {"parse": []},
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 — (c) 通知发送失败不覆盖探测错误
+                print(f"活动关探测失败 Discord 告警发送失败：{type(exc).__name__}: {exc}", file=sys.stderr)
         raise RuntimeError(activity_detail)
     # A successful refresh rewrites config.json and mutates this copy; reload
     # so the card is always derived from the just-persisted source of truth.
@@ -1210,46 +1244,52 @@ def main(argv: list[str] | None = None) -> int:
     farming = current_farming_result(effective_plan(phase=phase), config)
     apply_auto_stage(farming, phase)
     plan = effective_plan(phase=phase)
-    components, entries = build_components(plan, config, phase)
-
-    # Registry writes are a merge under agent-book's exact same lock.
-    with state_lock():
-        registry = load_json(BUTTONS_PATH, {})
-        if not isinstance(registry, dict):
-            raise RuntimeError("共享按钮登记表格式错误")
-        # Invalidates removed controls on old cards, including run-now and all
-        # medication buttons, while preserving other features' registry keys.
-        for custom_id in list(registry):
-            if custom_id.startswith(BUTTON_PREFIX):
-                registry.pop(custom_id)
-        # Expire stale copilot candidate buttons (kept under their own
-        # hermes:btn:maa-copilot: prefix, untouched by the sweep above).
-        # Mutates this same registry so the write below can't resurrect them.
-        maa_copilot.prune_expired_searches(registry)
-        registry.update(entries)
-        atomic_write_json(BUTTONS_PATH, registry)
-
-    cleanup_result = cleanup_old_threads(token)
     cleanup_run_files(int(config.get("retention_days", 14)))
-    retired = retire_old_plan_cards(token, channel_id)
-    embed = build_embed(
-        plan, config, phase, update, farming, today_stage_source(phase)
-    )
-    if cleanup_result["failed"]:
-        embed["footer"]["text"] += f" · {cleanup_result['failed']} 个旧子区删除失败"
-    if retired["failed"]:
-        embed["footer"]["text"] += f" · {retired['failed']} 张旧卡片收起失败"
-    posted = discord_request(
-        token,
-        "POST",
-        f"/channels/{channel_id}/messages",
-        {
-            "embeds": [embed],
-            "components": components,
-            "allowed_mentions": {"parse": []},
-        },
-    )
-    record_card(phase, posted, update)
+
+    if has_discord:
+        components, entries = build_components(plan, config, phase)
+        # Registry writes are a merge under the shared lock.
+        with state_lock():
+            registry = load_json(BUTTONS_PATH, {})
+            if not isinstance(registry, dict):
+                raise RuntimeError("共享按钮登记表格式错误")
+            # Invalidates removed controls on old cards, including run-now and all
+            # medication buttons, while preserving other features' registry keys.
+            for custom_id in list(registry):
+                if custom_id.startswith(BUTTON_PREFIX):
+                    registry.pop(custom_id)
+            # Expire stale copilot candidate buttons (kept under their own
+            # hermes:btn:maa-copilot: prefix, untouched by the sweep above).
+            # Mutates this same registry so the write below can't resurrect them.
+            maa_copilot.prune_expired_searches(registry)
+            registry.update(entries)
+            atomic_write_json(BUTTONS_PATH, registry)
+
+        cleanup_result = cleanup_old_threads(token)
+        retired = retire_old_plan_cards(token, channel_id)
+        embed = build_embed(
+            plan, config, phase, update, farming, today_stage_source(phase)
+        )
+        if cleanup_result["failed"]:
+            embed["footer"]["text"] += f" · {cleanup_result['failed']} 个旧子区删除失败"
+        if retired["failed"]:
+            embed["footer"]["text"] += f" · {retired['failed']} 张旧卡片收起失败"
+        posted = discord_request(
+            token,
+            "POST",
+            f"/channels/{channel_id}/messages",
+            {
+                "embeds": [embed],
+                "components": components,
+                "allowed_mentions": {"parse": []},
+            },
+        )
+        record_card(phase, posted, update)
+    else:
+        with state_lock():
+            maa_copilot.prune_expired_searches(None)
+
+    # 不变量 #56：森空岛每日体检必须无条件执行，不受 Discord 是否配置影响。
     _skland_health_notice(token, channel_id)
     if update is not None and not update.get("ok"):
         raise RuntimeError("maa 上游更新失败；已发送红色告警")
@@ -1293,10 +1333,9 @@ def refresh_card(phase: PlanPhase, at: datetime | None = None) -> str:
     if not message_id.isdigit():
         return "没记下计划卡的消息 id"
     config = load_config()
-    channel_id = str(config.get("channel_id", "")).strip()
-    if not channel_id.isdigit():
-        raise RuntimeError("config.json 中尚未配置 Discord channel_id")
-    token = discord_token()
+    token, channel_id = _discord_outlet(config)
+    if not token or not channel_id:
+        return "未配置 Discord，无需刷新计划卡"
     plan = effective_plan(phase=phase)
     components, entries = build_components(plan, config, phase)
     with state_lock():
@@ -1334,22 +1373,30 @@ def _skland_health_notice(token: str, channel_id: str) -> None:
     """
 
     def notify(title: str, body: str) -> None:
-        discord_request(
-            token,
-            "POST",
-            f"/channels/{channel_id}/messages",
-            {
-                "embeds": [
-                    {
-                        "title": title[:256],
-                        "description": body[:1500],
-                        "color": 0xED4245,
-                        "timestamp": now_beijing().isoformat(),
-                    }
-                ],
-                "allowed_mentions": {"parse": []},
-            },
+        maa_notify.notify(
+            title[:256],
+            body[:600],
+            level="timeSensitive",
+            notification_id="skland-health",
+            url="wadosmaa://settings",
         )
+        if token and channel_id:
+            discord_request(
+                token,
+                "POST",
+                f"/channels/{channel_id}/messages",
+                {
+                    "embeds": [
+                        {
+                            "title": title[:256],
+                            "description": body[:1500],
+                            "color": 0xED4245,
+                            "timestamp": now_beijing().isoformat(),
+                        }
+                    ],
+                    "allowed_mentions": {"parse": []},
+                },
+            )
 
     try:
         import maa_skland

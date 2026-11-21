@@ -1021,5 +1021,54 @@ class CurrentActivityKeyTests(unittest.TestCase):
         self.assertEqual(activity["stages"], ["AT-8", "AT-7"])
 
 
+class PlanCardNoDiscordTests(unittest.TestCase):
+    """S1-3：无 Discord 配置时，计划卡准备步骤（含上游更新、活动探测、自动定关、清理、#56 体检）完整执行。"""
+
+    def test_am_and_pm_run_without_discord_config_and_keep_skland_health(self) -> None:
+        import maa_copilot
+
+        for phase in ("am", "pm"):
+            with self.subTest(phase=phase), tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                called: list[str] = []
+                with contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.object(maa_plan_card, "load_config", return_value={"retention_days": 14}))
+                    stack.enter_context(patch.object(maa_plan_card, "discord_token", side_effect=RuntimeError("no token")))
+                    stack.enter_context(patch.object(maa_plan_card, "discord_request", side_effect=AssertionError("should not call discord")))
+                    stack.enter_context(patch.object(maa_plan_card, "check_and_update_upstream", side_effect=lambda *_a: called.append("upstream") or {"ok": True, "status": "ok"}))
+                    stack.enter_context(patch.object(maa_plan_card, "refresh_activity_stages", side_effect=lambda _c: called.append("activity") or (True, "ok")))
+                    stack.enter_context(patch.object(maa_plan_card, "effective_plan", return_value=maa_common.normalize_plan({"stage": "1-7"})))
+                    stack.enter_context(patch.object(maa_plan_card, "current_farming_result", return_value={"degraded": []}))
+                    stack.enter_context(patch.object(maa_plan_card, "apply_auto_stage", side_effect=lambda *_a: called.append("auto_stage")))
+                    stack.enter_context(patch.object(maa_plan_card, "cleanup_run_files", side_effect=lambda *_a: called.append("cleanup")))
+                    stack.enter_context(patch.object(maa_plan_card, "state_lock", return_value=contextlib.nullcontext()))
+                    stack.enter_context(patch.object(maa_copilot, "prune_expired_searches", side_effect=lambda *_a: called.append("prune")))
+                    stack.enter_context(patch.object(maa_plan_card, "_skland_health_notice", side_effect=lambda *_a: called.append("skland")))
+                    stack.enter_context(patch.object(maa_plan_card, "BUTTONS_PATH", root / "buttons.json"))
+                    code = maa_plan_card.main([phase])
+                self.assertEqual(code, 0)
+                if phase == "am":
+                    self.assertIn("upstream", called)
+                else:
+                    self.assertNotIn("upstream", called)
+                for step in ("activity", "auto_stage", "cleanup", "prune", "skland"):
+                    self.assertIn(step, called)
+                self.assertFalse((root / "buttons.json").exists())
+
+    def test_publish_round_without_discord_notifies_and_returns_empty_message_id(self) -> None:
+        import maa_action
+
+        with patch.object(maa_action.maa_notify, "notify", return_value=True) as notify, \
+                patch.object(maa_action, "discord_request", side_effect=AssertionError("no discord")):
+            mid = maa_action.publish_round(
+                "a" * 12,
+                [{"stage": "SR-5", "mode": "normal", "candidate": {"id": 1}}],
+                {},
+                title="🤖 已排程：SR-5",
+            )
+        self.assertEqual(mid, "")
+        notify.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

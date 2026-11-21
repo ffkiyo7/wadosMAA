@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
 import maa_common
 import maa_copilot
+import maa_notify
 import maa_playcover
 import maa_schedule
 import maa_settings
@@ -1073,18 +1074,40 @@ def publish_round(
     note: str = "",
     pause_button: bool = False,
 ) -> str:
-    """发一张「已排程」卡并登记它的按钮（「取消本轮」，自动轮另有「暂停自动作业」），返回 message_id。
+    """发一张「已排程」卡（有 Discord 配置时）并走 `maa_notify` 发出排程通知，返回 message_id。
 
-    顺序与抄作业卡一致（不变量 #14b）：先删这一 token 的旧登记，再 merge 写新登记。
+    无 Discord 配置时跳过发排程卡与写 `BUTTONS_PATH`，返回 `""`，绝不抛异常。
     """
+    body_parts = [f"共 {len(entries)} 项"]
+    if scheduled_at:
+        body_parts.append(f"预计 {scheduled_at}")
+    if note:
+        body_parts.append(note[:300])
+    maa_notify.notify(
+        title,
+        "\n".join(body_parts),
+        level="active",
+        notification_id=f"copilot-round-{token}",
+        url="wadosmaa://copilot",
+    )
+
+    channel_id = str(config.get("channel_id") or "").strip()
+    if not channel_id.isdigit():
+        return ""
+    try:
+        bot_token = discord_token()
+    except Exception as exc:  # noqa: BLE001 — (c) 缺 Discord token 时降级跳过发卡（#63）
+        print(f"publish_round 跳过 Discord 发卡：{exc}", file=sys.stderr, flush=True)
+        return ""
+
     embed, components, registry = maa_copilot.build_scheduled_card(
         token, entries, title=title, scheduled_at=scheduled_at, note=note,
         pause_button=pause_button,
     )
     message = discord_request(
-        discord_token(),
+        bot_token,
         "POST",
-        f"/channels/{config.get('channel_id', '')}/messages",
+        f"/channels/{channel_id}/messages",
         {"embeds": [embed], "components": components,
          "allowed_mentions": {"parse": []}},
     )

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, TextIO, cast
 
 import maa_depot
+import maa_notify
 import maa_playcover
 from maa_upstream import hard_block as upstream_hard_block
 from maa_common import (
@@ -1631,10 +1632,17 @@ def report_game_busy(
         channel_id=channel_id,
         new_run=True,
     )
+    maa_notify.notify(
+        f"⏭️ {PHASE_LABELS[phase]}场已跳过",
+        "检测到你在玩明日方舟，本场未启动。",
+        level="passive",
+        notification_id=f"run-skip-{phase}-{attempted_at:%Y%m%d%H%M%S}",
+        url="wadosmaa://today",
+    )
 
 
 def report_upstream_block(
-    token: str, channel_id: str, phase: Phase, reason: str, at: datetime
+    token: str, channel_id: str, phase: Phase, reason: str, at: datetime, *, run_id: str = ""
 ) -> None:
     """上游状态不对，本场不开游戏。失败要说出来（护栏 4）。"""
     merge_last_run({
@@ -1644,6 +1652,13 @@ def report_upstream_block(
         "summary": f"上游状态不对，本场没开跑：{reason}",
         "finished_at": at.isoformat(),
     })
+    maa_notify.notify(
+        f"⛔ {PHASE_LABELS[phase]}场未开跑",
+        f"上游状态不对：{reason[:300]}",
+        level="timeSensitive",
+        notification_id=f"run-{run_id}" if run_id else f"run-upstream-{phase}-{at:%Y%m%d%H%M%S}",
+        url=f"wadosmaa://run/{run_id}" if run_id else "wadosmaa://today",
+    )
     notify(
         token,
         "POST",
@@ -2409,6 +2424,13 @@ def report_lock_conflict(
     except Exception as exc:  # noqa: BLE001 — (a) 汇报路径：状态写入失败汇总后抛给调用方
         errors.append(f"冲突状态写入失败：{type(exc).__name__}: {exc}")
     # 告警发不出去只记日志（不变量 #63）；状态写不进去才抛。
+    maa_notify.notify(
+        f"❌ {PHASE_LABELS[phase]}场未启动",
+        reason[:300],
+        level="timeSensitive",
+        notification_id=f"run-lock-{phase}-{attempted_at:%Y%m%d%H%M%S}",
+        url="wadosmaa://today",
+    )
     notify(
         token,
         "POST",
@@ -2743,6 +2765,13 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
                 },
                 what="跳过通知",
             )
+            maa_notify.notify(
+                f"⏭️ {PHASE_LABELS[phase]}场已跳过",
+                "本场已设为跳过，未启动游戏。",
+                level="passive",
+                notification_id=f"run-skip-{run_id}",
+                url="wadosmaa://today",
+            )
             record("skipped", skip_reason="plan", retries=0, restarts=0)
             merge_last_run({"status": "skipped", "finished_at": now_beijing().isoformat()})
             progress.finish("skipped")
@@ -2753,7 +2782,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
         blocked = upstream_hard_block(config)
         if blocked:
             record("failed", failure="upstream", retries=0, restarts=0)
-            report_upstream_block(token, channel_id, phase, blocked, now_beijing())
+            report_upstream_block(token, channel_id, phase, blocked, now_beijing(), run_id=run_id)
             progress.finish("failed")
             return 1
 
@@ -2803,6 +2832,13 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
             maa_playcover.wait_for_game(config)
             # 到这里才算「开始干活」：之后的异常进战报，之前的异常走启动失败直报。
             session_open = True
+            maa_notify.notify(
+                f"{PHASE_LABELS[phase]}场开跑 · {plan_stage_label(plan)}",
+                "游戏已就绪，开始执行日常任务。",
+                level="passive",
+                notification_id=f"run-{run_id}",
+                url=f"wadosmaa://run/{run_id}",
+            )
             # 开跑消息、子区、进度占位都是尽力而为：Discord 连不上就空着，本场照跑（#63）。
             thread_id, progress_message_id = open_thread(
                 token, channel_id, phase, plan, started
@@ -3028,6 +3064,26 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
                 send_report(token, channel_id, payload, screenshot_path, config)
             except Exception as exc:  # noqa: BLE001 — (c) 战报发不出去只记日志，终态照写
                 print(f"战报发送失败：{type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+        # 统一通知矩阵（S1-3 / S0-5 实证：同 id=run-<run_id> 原地覆盖，失败升权 timeSensitive 正常亮屏）。
+        notify_title = (
+            f"⏹️ {PHASE_LABELS[phase]}场已停止 · {plan_stage_label(plan)}"
+            if cancelled
+            else f"✅ {PHASE_LABELS[phase]}场完成 · {plan_stage_label(plan)}"
+            if ok
+            else f"❌ {PHASE_LABELS[phase]}场异常 · {plan_stage_label(plan)}"
+        )
+        notify_body = (
+            startup_error[:300]
+            if (not ok and not cancelled and startup_error)
+            else summary[:400] or f"总耗时 {_format_duration(duration)}"
+        )
+        maa_notify.notify(
+            notify_title,
+            notify_body,
+            level="passive" if cancelled else "active" if ok else "timeSensitive",
+            notification_id=f"run-{run_id}",
+            url=f"wadosmaa://run/{run_id}",
+        )
         finished: LastRun = {
             "status": "cancelled" if cancelled else "success" if ok else "failed",
             "finished_at": now_beijing().isoformat(),

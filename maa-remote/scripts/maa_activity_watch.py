@@ -26,6 +26,7 @@ import maa_clearing
 import maa_copilot
 import maa_farming
 import maa_gamedata
+import maa_notify
 import maa_plan_card
 from maa_common import (
     LAST_RUN_PATH,
@@ -58,41 +59,59 @@ def _search_path(token: str) -> Path:
 
 
 def _notify(config: Config, title: str, description: str, color: int) -> None:
-    channel_id = str(config.get("channel_id") or "")
-    if not channel_id.isdigit():
-        raise RuntimeError("config.json 中尚未配置 Discord channel_id")
-    discord_request(
-        discord_token(),
-        "POST",
-        f"/channels/{channel_id}/messages",
-        {
-            "embeds": [
-                {
-                    "title": title[:256],
-                    "description": description[:1500],
-                    "color": color,
-                    "timestamp": now_beijing().isoformat(),
-                }
-            ],
-            "allowed_mentions": {"parse": []},
-        },
+    level = (
+        "timeSensitive"
+        if color == 0xED4245
+        else "passive"
+        if color == 0x99AAB5
+        else "active"
     )
+    maa_notify.notify(
+        title[:256],
+        description[:600],
+        level=level,
+        url="wadosmaa://copilot",
+    )
+    channel_id = str(config.get("channel_id") or "").strip()
+    if not channel_id.isdigit():
+        return
+    try:
+        token = discord_token()
+        discord_request(
+            token,
+            "POST",
+            f"/channels/{channel_id}/messages",
+            {
+                "embeds": [
+                    {
+                        "title": title[:256],
+                        "description": description[:1500],
+                        "color": color,
+                        "timestamp": now_beijing().isoformat(),
+                    }
+                ],
+                "allowed_mentions": {"parse": []},
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — (c) 通知发送失败不阻断监控（#63）
+        print(f"活动监控 Discord 通知失败：{type(exc).__name__}: {exc}", file=sys.stderr)
 
 
 def _supersede_round(token: str, config: Config) -> bool:
-    """作废一轮还没开打的条目并收掉它的按钮。"""
+    """作废一轮还没开打的条目；如有 Discord 卡片消息则顺手收掉它的按钮。"""
     if not token:
         return False
     changed, message_id = maa_copilot.supersede_search(token)
     if not changed:
         return False
-    try:
-        retire_discord_components(config, message_id)
-    except Exception as exc:  # noqa: BLE001 — (c) 旧轮按钮已失效，收不掉只打日志
-        print(
-            f"旧活动卡按钮收起失败但已经失效：{type(exc).__name__}: {exc}",
-            file=sys.stderr,
-        )
+    if message_id and str(config.get("channel_id") or "").strip().isdigit():
+        try:
+            retire_discord_components(config, message_id)
+        except Exception as exc:  # noqa: BLE001 — (c) 旧轮按钮已失效，收不掉只打日志
+            print(
+                f"旧活动卡按钮收起失败但已经失效：{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
     return True
 
 

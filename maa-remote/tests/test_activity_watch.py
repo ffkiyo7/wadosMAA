@@ -459,6 +459,17 @@ class ActivityWatchTickTests(unittest.TestCase):
         self.assertEqual(second.state["activity_key"], "")
         self.assertTrue(any("活动已结束" in title for title in notices))
 
+    def test_notify_without_discord_config_routes_to_maa_notify_without_raising(self) -> None:
+        import maa_activity_watch
+
+        with patch.object(maa_activity_watch.maa_notify, "notify", return_value=True) as pushed, \
+                patch.object(maa_activity_watch, "discord_request", side_effect=AssertionError("no discord")):
+            maa_activity_watch._notify({}, "🆕 新活动上线", "开始自动抄作业", 0x5865F2)
+            maa_activity_watch._notify({}, "⛔ 自动作业暂停排轮", "原因", 0xED4245)
+        self.assertEqual(pushed.call_count, 2)
+        self.assertEqual(pushed.call_args_list[0].kwargs["level"], "active")
+        self.assertEqual(pushed.call_args_list[1].kwargs["level"], "timeSensitive")
+
 
 class CopilotAutoPauseCommandTests(unittest.TestCase):
     """`copilot auto off|on|status`：Discord 里能叫停自动作业。"""
