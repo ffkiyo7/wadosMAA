@@ -625,6 +625,40 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         self.assertEqual((rep["won"], rep["total"]), (2, 2))
         self.assertEqual(len(rep["results"]), 2)
 
+    def test_copilot_progress_advance_list_stage_tracks_live_items(self) -> None:
+        """多作业单进程模式下，CopilotListLoadTaskFileSuccess 推进逐关实时进度。"""
+        import maa_copilot_worker as worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run.progress.json"
+            entries = [
+                {"stage": "TL-EX-1", "mode": "raid"},
+                {"stage": "TL-EX-2", "mode": "raid"},
+                {"stage": "TL-EX-3", "mode": "raid"},
+            ]
+            prog = worker.CopilotProgressFile(
+                path,
+                run_id="2026-11-21-copilot-aaa-190000",
+                phase="copilot-aaa",
+                entries=entries,
+                started=maa_common.now_beijing(),
+            )
+            prog.advance_list_stage(entries, 0)
+            p1 = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual([s["state"] for s in p1["steps"]], ["running", "pending", "pending"])
+            self.assertEqual(p1["copilot"]["current_stage"], "TL-EX-1")
+
+            prog.advance_list_stage(entries, 2)
+            p2 = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual([s["state"] for s in p2["steps"]], ["done", "done", "running"])
+            self.assertEqual(p2["copilot"]["done"], 2)
+            self.assertEqual(p2["copilot"]["current_stage"], "TL-EX-3")
+
+            # 收尾时若第 2 关实际失败，finish_stage 可回写准确终态
+            prog.finish_stage("TL-EX-2", "raid", "failed")
+            p3 = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual([s["state"] for s in p3["steps"]], ["done", "failed", "running"])
+
     def test_a_lost_stage_is_indexed_as_failed(self) -> None:
         result = self._run([self._entry("SR-5")], lambda *a: ("failed", "没打过"))
         self.assertEqual([(row["status"], row["failure"]) for row in result.index], [("failed", "stage_failed")])

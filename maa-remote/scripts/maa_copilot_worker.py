@@ -23,6 +23,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -500,6 +501,7 @@ def _run_copilot_with_watchdog(
     *,
     timeout: int | None = None,
     stall: tuple[str, int] | None = None,
+    on_marks: Callable[[int], None] | None = None,
 ) -> tuple[int, int]:
     """Run maa copilot; watchdog taps the takeover popup if it appears.
 
@@ -528,16 +530,22 @@ def _run_copilot_with_watchdog(
     deadline = time.monotonic() + timeout
     seen_marks = 0
     stall_deadline = time.monotonic() + (stall[1] if stall else timeout)
-    next_stall_check = time.monotonic() + 30
+    mark_interval = 5 if on_marks is not None else 30
+    next_stall_check = time.monotonic() + mark_interval
     try:
         while proc.poll() is None:
             now = time.monotonic()
             if stall and now >= next_stall_check:
-                next_stall_check = now + 30
+                next_stall_check = now + mark_interval
                 marks = _log_since(log_path, start_offset).count(stall[0])
                 if marks > seen_marks:
                     seen_marks = marks
                     stall_deadline = now + stall[1]
+                    if on_marks is not None:
+                        try:
+                            on_marks(marks)
+                        except Exception:  # noqa: BLE001 — (c) 进度回调尽力而为，不能打断战斗
+                            pass
             if now >= deadline or (stall and now >= stall_deadline):
                 proc.terminate()
                 try:
@@ -973,6 +981,28 @@ class CopilotProgressFile:
             self.steps[idx]["state"] = "running"
             self.steps[idx]["started_at"] = self.steps[idx]["started_at"] or stamp
             self.steps[idx]["finished_at"] = None
+        self.write()
+
+    def advance_list_stage(self, entries: list[dict[str, Any]], active_index: int) -> None:
+        """多作业单进程推进：第 `active_index` 份作业已载入，前面尚未终结的暂标为完成。
+
+        最终成败仍由 `_run_activity_round` 收尾时按 `list_outcomes` 逐关回写 `finish_stage`。
+        """
+        if self.final or active_index < 0 or active_index >= len(entries):
+            return
+        stamp = now_beijing().isoformat()
+        for prev in entries[:active_index]:
+            prev_idx = self._step_index(str(prev.get("stage") or ""), str(prev.get("mode") or "normal"))
+            if prev_idx is not None and self.steps[prev_idx]["state"] in ("pending", "running"):
+                self.steps[prev_idx]["state"] = "done"
+                self.steps[prev_idx]["started_at"] = self.steps[prev_idx]["started_at"] or stamp
+                self.steps[prev_idx]["finished_at"] = self.steps[prev_idx]["finished_at"] or stamp
+        cur = entries[active_index]
+        cur_idx = self._step_index(str(cur.get("stage") or ""), str(cur.get("mode") or "normal"))
+        if cur_idx is not None:
+            self.steps[cur_idx]["state"] = "running"
+            self.steps[cur_idx]["started_at"] = self.steps[cur_idx]["started_at"] or stamp
+            self.steps[cur_idx]["finished_at"] = None
         self.write()
 
     def finish_stage(self, stage: str, mode: str, outcome: str) -> None:
@@ -1816,6 +1846,8 @@ def _run_copilot_list(
     env: dict[str, str],
     log_path: Path,
     items: list[tuple[dict[str, Any], Path]],
+    *,
+    progress: CopilotProgressFile | None = None,
 ) -> list[tuple[str, str]]:
     """一张多作业列表：返回每项的 `(结论, 明细)`，与 `items` 一一对应。"""
     maa_bin = str(config.get("maa_bin", "/opt/homebrew/bin/maa"))
@@ -1830,6 +1862,12 @@ def _run_copilot_list(
     ]
     body = LIST_TOML_TEMPLATE.format(items="\n".join(lines))
     per_item = max(300, int(config.get("copilot_list_item_timeout", LIST_ITEM_TIMEOUT)))
+    item_entries = [entry for entry, _p in items]
+    on_marks = (
+        (lambda marks: progress.advance_list_stage(item_entries, marks - 1))
+        if progress is not None
+        else None
+    )
     with _isolated_config(env, {"copilot-list.toml": body}, no_battle=False) as list_env:
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(f"# {now_beijing().isoformat()} copilot-list "
@@ -1843,6 +1881,7 @@ def _run_copilot_list(
                 handle, log_path, list_env,
                 timeout=per_item * len(items) + 300,
                 stall=(maa_clearing.LIST_ITEM_EVENT, per_item),
+                on_marks=on_marks,
             )
     output = _log_since(log_path, offset)
     return maa_clearing.list_outcomes([str(path) for _e, path in items], output, return_code)
@@ -1957,7 +1996,9 @@ def _run_activity_round(
                 if progress is not None and items:
                     first = items[0][0]
                     progress.start_stage(str(first.get("stage") or ""), str(first.get("mode") or "normal"))
-                outcomes = _run_copilot_list(config, env, log_path, items)
+                    outcomes = _run_copilot_list(config, env, log_path, items, progress=progress)
+                else:
+                    outcomes = _run_copilot_list(config, env, log_path, items)
                 navigator.zone = None
                 settled, settle_note = settle_after_battle(
                     config, str(items[-1][0].get("stage") or ""), env, log_path

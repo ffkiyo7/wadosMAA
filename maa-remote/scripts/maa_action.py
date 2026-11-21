@@ -1819,9 +1819,15 @@ def copilot_go(token: str, chosen: str = "") -> tuple[bool, str, dict[str, Any]]
     preview["search_token"] = search
     atomic_write_json(_preview_path(token), preview)
     dispatch_batch(search)
+    has_discord = str(config.get("channel_id") or "").strip().isdigit()
+    msg = (
+        f"▶️ 开打 {code}（作业 {candidate['id']}）；Discord 上有「已排程」卡，可以在那里取消。"
+        if has_discord
+        else f"▶️ 开打 {code}（作业 {candidate['id']}）；可随时取消。"
+    )
     return done(
         "copilot_started",
-        f"▶️ 开打 {code}（作业 {candidate['id']}）；Discord 上有「已排程」卡，可以在那里取消。",
+        msg,
         {"token": search, "stage": code, "candidate_id": candidate["id"]},
     )
 
