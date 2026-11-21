@@ -589,21 +589,41 @@ class APIContext:
         lock: Mapping[str, Any] | None,
         last_run: Mapping[str, Any] | None,
     ) -> dict[str, Any] | None:
+        # 持锁态：只接受当前 lock.run_id 自己的进度文件，新文件未写入前直接返回 None，绝不回退旧场进度。
+        if lock is not None:
+            lock_run_id = lock.get("run_id")
+            if not isinstance(lock_run_id, str) or not is_safe_run_id(lock_run_id):
+                return None
+            resolved = _resolve_under(self.runs_dir, self.runs_dir / f"{lock_run_id}.progress.json")
+            if resolved is None or not resolved.is_file():
+                return None
+            doc = maa_common.load_json(resolved, None)
+            if not isinstance(doc, dict):
+                return None
+            if doc.get("run_id") and str(doc.get("run_id")) != lock_run_id:
+                return None
+            if (
+                last_run
+                and str(last_run.get("run_id") or "") == lock_run_id
+                and last_run.get("started_at")
+                and str(doc.get("started_at") or "") != str(last_run.get("started_at"))
+            ):
+                return None
+            return doc
+
+        # 空闲态：按 last_run 定位，严格遵守 DEV_GUIDE §12.3 的 started_at 一致性规则。
+        if not last_run:
+            return None
         candidates: list[Path] = []
-        if lock and isinstance(lock.get("run_id"), str) and is_safe_run_id(lock["run_id"]):
-            candidates.append(self.runs_dir / f"{lock['run_id']}.progress.json")
-        if last_run:
-            raw_prog = last_run.get("progress")
-            if isinstance(raw_prog, str) and raw_prog:
-                p = Path(raw_prog)
-                if p.is_file():
-                    candidates.append(p)
-                else:
-                    # 兼容迁目录后的重映射兜底
-                    candidates.append(self.runs_dir / p.name)
-            run_id = last_run.get("run_id")
-            if isinstance(run_id, str) and is_safe_run_id(run_id):
-                candidates.append(self.runs_dir / f"{run_id}.progress.json")
+        raw_prog = last_run.get("progress")
+        if isinstance(raw_prog, str) and raw_prog:
+            p = Path(raw_prog)
+            candidates.append(p if p.is_file() else self.runs_dir / p.name)
+        run_id = last_run.get("run_id")
+        if isinstance(run_id, str) and is_safe_run_id(run_id):
+            candidates.append(self.runs_dir / f"{run_id}.progress.json")
+
+        expected_started = str(last_run.get("started_at") or "")
         for path in candidates:
             resolved = _resolve_under(self.runs_dir, path)
             if resolved is None or not resolved.is_file():
@@ -611,10 +631,8 @@ class APIContext:
             doc = maa_common.load_json(resolved, None)
             if not isinstance(doc, dict):
                 continue
-            # 对照 DEV_GUIDE §12.3：started_at 对不上说明是同名旧场的文件，忽略。
-            if last_run and last_run.get("started_at") and doc.get("started_at"):
-                if not lock and str(doc.get("started_at")) != str(last_run.get("started_at")):
-                    continue
+            if expected_started and str(doc.get("started_at") or "") != expected_started:
+                continue
             return doc
         return None
 

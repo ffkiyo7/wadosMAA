@@ -143,7 +143,14 @@ class DaemonAPITests(unittest.TestCase):
         )
         maa_common.atomic_write_json(
             self.runs_dir / f"{run_id}.progress.json",
-            {"schema_version": 1, "kind": "daily", "run_id": run_id, "status": "running", "current": "fight"},
+            {
+                "schema_version": 1,
+                "kind": "daily",
+                "run_id": run_id,
+                "started_at": "2026-11-21T19:21:35+08:00",
+                "status": "running",
+                "current": "fight",
+            },
         )
         maa_common.atomic_write_json(
             self.runs_dir / f"{run_id}-report.json",
@@ -446,6 +453,72 @@ class DaemonAPITests(unittest.TestCase):
         self.assertIsNone(snap["upstream"])
         for failed_key in ("config", "today_plan", "schedule", "upstream"):
             self.assertIn(failed_key, snap["errors"])
+
+    def test_active_progress_never_falls_back_to_previous_run_while_locked_and_enforces_started_at(self) -> None:
+        """评审【5】回归：持锁且新进度文件尚未落盘时返回 None；空闲或持锁均严格遵守 started_at 规则。"""
+        old_id = "2026-11-21-now-190000"
+        new_id = "2026-11-21-now-203000"
+        maa_common.atomic_write_json(
+            self.state_dir / "last_run.json",
+            {
+                "schema_version": 1,
+                "run_id": old_id,
+                "phase": "now",
+                "status": "success",
+                "started_at": "2026-11-21T19:00:00+08:00",
+                "progress": str(self.runs_dir / f"{old_id}.progress.json"),
+            },
+        )
+        maa_common.atomic_write_json(
+            self.runs_dir / f"{old_id}.progress.json",
+            {
+                "schema_version": 1,
+                "kind": "daily",
+                "run_id": old_id,
+                "started_at": "2026-11-21T19:00:00+08:00",
+                "status": "success",
+                "current": None,
+            },
+        )
+
+        # 1. 新场次刚拿到锁、新 progress.json 还没写出来 → 绝不能回退旧场次进度
+        new_lock = {"holder": "daily", "detail": "手动", "pid": 456, "run_id": new_id}
+        last_run = self.ctx._read_last_run()
+        self.assertIsNone(self.ctx._read_active_progress(new_lock, last_run))
+
+        # 2. update 等无 run_id 的持锁任务 → 也不返回旧场次进度
+        update_lock = {"holder": "update", "detail": "gui", "pid": 457}
+        self.assertIsNone(self.ctx._read_active_progress(update_lock, last_run))
+
+        # 3. 新场次进度文件写入后，持锁态立刻读出新进度
+        maa_common.atomic_write_json(
+            self.runs_dir / f"{new_id}.progress.json",
+            {
+                "schema_version": 1,
+                "kind": "daily",
+                "run_id": new_id,
+                "started_at": "2026-11-21T20:30:00+08:00",
+                "status": "running",
+                "current": "startup",
+            },
+        )
+        prog = self.ctx._read_active_progress(new_lock, last_run)
+        self.assertIsNotNone(prog)
+        assert prog is not None
+        self.assertEqual(prog["run_id"], new_id)
+
+        # 4. 空闲态 started_at 对不上（如同名旧文件或缺失 started_at）→ 忽略返回 None
+        maa_common.atomic_write_json(
+            self.runs_dir / f"{old_id}.progress.json",
+            {
+                "schema_version": 1,
+                "kind": "daily",
+                "run_id": old_id,
+                "started_at": "2026-11-20T19:00:00+08:00",
+                "status": "success",
+            },
+        )
+        self.assertIsNone(self.ctx._read_active_progress(None, last_run))
 
 
 if __name__ == "__main__":
