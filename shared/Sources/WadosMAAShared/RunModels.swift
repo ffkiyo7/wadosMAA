@@ -112,11 +112,25 @@ public struct CopilotStageRow: Decodable, Sendable, Identifiable, Hashable {
     public let statusText: String?
     /// 本地记账里有通关记录（MAA 打赢的或手动标的），可以撤销。旧版 maa-remote 没有这个键。
     public let ledgerCleared: Bool?
+    /// `normal` / `ex` / `s`。旧版 maa-remote 没有这个键，用 `stageCategory` 读。
+    public let category: String?
 
     public var id: String { stage }
 
+    /// 优先用后端给的分组，缺失时按关卡名判断（和 `maa_copilot.stage_category` 同一规则）。
+    public var stageCategory: String {
+        if let category, ["normal", "ex", "s"].contains(category) { return category }
+        let parts = stage.uppercased().split(separator: "-")
+        guard parts.count == 3 else { return "normal" }
+        switch parts[1] {
+        case "EX": return "ex"
+        case "S": return "s"
+        default: return "normal"
+        }
+    }
+
     enum CodingKeys: String, CodingKey {
-        case stage, code, nav, reason, status
+        case stage, code, nav, reason, status, category
         case statusText = "status_text"
         case ledgerCleared = "ledger_cleared"
     }

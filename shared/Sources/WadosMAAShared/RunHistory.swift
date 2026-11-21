@@ -20,11 +20,19 @@ public struct RunRecord: Identifiable, Equatable, Sendable {
     public let durationSeconds: Int?
     /// 这一场的进度文件（`runs/<场>.progress.json`）；旧行或抄作业没有。
     public let progressPath: String?
+    /// 抄作业这一轮通过几关、一共几关；日常和旧行没有。
+    public let won: Int?
+    public let total: Int?
+
+    public var isCopilot: Bool { phase.hasPrefix("copilot-") }
 
     public init(
         id: String, phase: String, stage: String, status: String, failure: String, skipReason: String,
-        startedAt: Date?, finishedAt: Date?, durationSeconds: Int?, progressPath: String?
+        startedAt: Date?, finishedAt: Date?, durationSeconds: Int?, progressPath: String?,
+        won: Int? = nil, total: Int? = nil
     ) {
+        self.won = won
+        self.total = total
         self.id = id
         self.phase = phase
         self.stage = stage
@@ -52,7 +60,9 @@ public struct RunRecord: Identifiable, Equatable, Sendable {
             startedAt: row["started_at"]?.string.flatMap(BeijingTime.parseISO),
             finishedAt: row["finished_at"]?.string.flatMap(BeijingTime.parseISO),
             durationSeconds: row["duration_seconds"]?.number.map { Int($0) },
-            progressPath: row["progress"]?.string)
+            progressPath: row["progress"]?.string,
+            won: row["won"]?.number.map { Int($0) },
+            total: row["total"]?.number.map { Int($0) })
     }
 
     /// 结束时刻：有 `finished_at` 用它，没有就按耗时推。

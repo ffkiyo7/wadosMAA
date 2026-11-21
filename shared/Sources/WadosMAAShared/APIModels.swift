@@ -68,6 +68,45 @@ public struct ResignStatus: Decodable, Sendable, Equatable {
     }
 }
 
+/// 快照的 `sanity`：森空岛实测值和按恢复速度估算的当前值。读不到练度快照时整段缺失。
+public struct SanityStatus: Decodable, Sendable, Equatable {
+    public let current: Int
+    public let max: Int
+    public let measuredAt: Date?
+    public let estimatedNow: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case current, max
+        case measuredAt = "measured_at"
+        case estimatedNow = "estimated_now"
+    }
+
+    public init(current: Int, max: Int, measuredAt: Date?, estimatedNow: Int?) {
+        self.current = current
+        self.max = max
+        self.measuredAt = measuredAt
+        self.estimatedNow = estimatedNow
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        current = Int(try c.decode(Double.self, forKey: .current))
+        max = Int(try c.decode(Double.self, forKey: .max))
+        measuredAt = (try? c.decodeIfPresent(String.self, forKey: .measuredAt)).flatMap { $0 }
+            .flatMap(BeijingTime.parseISO)
+        estimatedNow = (try? c.decodeIfPresent(Double.self, forKey: .estimatedNow)).flatMap { $0 }.map { Int($0) }
+    }
+}
+
+/// 快照的 `notify`：Bark 推送是否配好。
+public struct NotifyStatus: Decodable, Sendable, Equatable {
+    public let configured: Bool
+
+    public init(configured: Bool) {
+        self.configured = configured
+    }
+}
+
 /// `GET /api/v1/snapshot`。
 public struct RemoteSnapshot: Sendable {
     public var lock: LockHolder?
@@ -80,6 +119,10 @@ public struct RemoteSnapshot: Sendable {
     public var activity: [String: JSONValue]?
     public var scheduler: SchedulerStatus?
     public var resign: ResignStatus?
+    /// 旧版后端没有这个键。
+    public var sanity: SanityStatus?
+    /// 旧版后端没有这个键。
+    public var notify: NotifyStatus?
     /// 服务端报告的失败字段，加上本端解不开的字段。
     public var errors: [String: String]
 
@@ -103,6 +146,8 @@ public struct RemoteSnapshot: Sendable {
         activity = root["activity"]?.object
         scheduler = field(root, "scheduler", SchedulerStatus.self)
         resign = field(root, "resign", ResignStatus.self)
+        sanity = field(root, "sanity", SanityStatus.self)
+        notify = field(root, "notify", NotifyStatus.self)
     }
 
     /// 应用一条 SSE 事件；不认识的事件返回 false。

@@ -160,3 +160,42 @@ import Testing
         #expect(parser.parse(line: "Current sanity: 104/208") == .sanity(104))
     }
 }
+
+@Suite struct AppFieldTests {
+    @Test func readsSanityAndNotify() throws {
+        let json = #"{"sanity":{"current":11,"max":208,"measured_at":"2026-11-22T08:18:00+08:00","estimated_now":148},"notify":{"configured":true}}"#
+        let snapshot = try #require(RemoteSnapshot(data: Data(json.utf8)))
+        #expect(snapshot.sanity?.current == 11)
+        #expect(snapshot.sanity?.max == 208)
+        #expect(snapshot.sanity?.estimatedNow == 148)
+        #expect(snapshot.sanity?.measuredAt != nil)
+        #expect(snapshot.notify?.configured == true)
+    }
+
+    @Test func oldBackendHasNoSanityOrNotify() throws {
+        let snapshot = try #require(RemoteSnapshot(data: Data("{}".utf8)))
+        #expect(snapshot.sanity == nil)
+        #expect(snapshot.notify == nil)
+    }
+
+    @Test func stageCategoryFallsBackToName() throws {
+        func row(_ json: String) throws -> CopilotStageRow {
+            try JSONDecoder().decode(CopilotStageRow.self, from: Data(json.utf8))
+        }
+        #expect(try row(#"{"stage":"TL-1","category":"s"}"#).stageCategory == "s")
+        #expect(try row(#"{"stage":"TL-EX-3"}"#).stageCategory == "ex")
+        #expect(try row(#"{"stage":"TL-S-2"}"#).stageCategory == "s")
+        #expect(try row(#"{"stage":"TL-9"}"#).stageCategory == "normal")
+    }
+
+    @Test func copilotRecordKeepsWonAndTotal() throws {
+        let record = try #require(
+            RunRecord(row: [
+                "id": .string("c1"), "phase": .string("copilot-c1"), "status": .string("success"),
+                "won": .number(3), "total": .number(3),
+            ]))
+        #expect(record.isCopilot)
+        #expect(record.won == 3)
+        #expect(record.total == 3)
+    }
+}
