@@ -785,22 +785,71 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
     def ctx(self) -> APIContext:
         return self.server.ctx
 
+    def _should_close_connection(self) -> bool:
+        if self.close_connection:
+            return True
+        return getattr(self, "_declared_body_len", 0) > 0 and not getattr(self, "_body_consumed", False)
+
+    def _begin_request(self, *, allow_body: bool) -> bool:
+        """校验 HTTP/1.1 请求帧边界：拒绝 Transfer-Encoding、重复/非法 Content-Length，标记未消费请求体。"""
+        self._body_consumed = False
+        self._declared_body_len = 0
+
+        if self.headers.get_all("Transfer-Encoding"):
+            self.close_connection = True
+            self._send_error_json(
+                HTTPStatus.BAD_REQUEST,
+                "unsupported_transfer_encoding",
+                "不支持 Transfer-Encoding 请求。",
+            )
+            return False
+
+        cl_values = self.headers.get_all("Content-Length") or []
+        if len(cl_values) > 1:
+            self.close_connection = True
+            self._send_error_json(HTTPStatus.BAD_REQUEST, "bad_request", "不允许多个 Content-Length 头。")
+            return False
+        if len(cl_values) == 1:
+            raw_len = cl_values[0].strip()
+            if not raw_len.isdigit():
+                self.close_connection = True
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "bad_request", "无效的 Content-Length。")
+                return False
+            self._declared_body_len = int(raw_len)
+            if self._declared_body_len > 0 and not allow_body:
+                # GET / DELETE 不会读取请求体，响应后必须关闭连接以防剩余字节被当作下一条请求。
+                self.close_connection = True
+        return True
+
+    def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+        # 任何框架层错误（如不支持的 HTTP 方法）一律关闭连接，避免未消费请求体滞留。
+        self.close_connection = True
+        super().send_error(code, message, explain)
+
     def _send_json(self, status: int, payload: Any) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if self._should_close_connection():
+            self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(body)
 
     def _send_bytes(self, status: int, data: bytes, content_type: str, *, cache_control: str = "no-store") -> None:
+        if self._should_close_connection():
+            self.close_connection = True
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.end_headers()
         self.wfile.write(data)
 
@@ -811,18 +860,18 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
         self._send_json(status, body)
 
     def _read_json_body(self) -> tuple[dict[str, Any] | None, tuple[int, str, str] | None]:
-        raw_len = self.headers.get("Content-Length", "").strip()
-        if not raw_len:
-            return {}, None
-        try:
-            length = int(raw_len)
-        except ValueError:
-            return None, (HTTPStatus.BAD_REQUEST, "bad_request", "无效的 Content-Length。")
+        length = getattr(self, "_declared_body_len", 0)
         if length < 0 or length > MAX_REQUEST_BODY_BYTES:
+            self.close_connection = True
             return None, (HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "payload_too_large", "请求体超过大小限制。")
         if length == 0:
+            self._body_consumed = True
             return {}, None
         raw = self.rfile.read(length)
+        if len(raw) < length:
+            self.close_connection = True
+            return None, (HTTPStatus.BAD_REQUEST, "bad_request", "请求体不完整。")
+        self._body_consumed = True
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -843,8 +892,11 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         try:
+            if not self._begin_request(allow_body=False):
+                return
             self._handle_get()
         except Exception as exc:  # noqa: BLE001 — (a) HTTP 处理器顶层兜底，返回结构化 500
+            self.close_connection = True
             self._send_error_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 "internal_error",
@@ -854,8 +906,11 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         try:
+            if not self._begin_request(allow_body=True):
+                return
             self._handle_post()
         except Exception as exc:  # noqa: BLE001 — (a) HTTP 处理器顶层兜底，返回结构化 500
+            self.close_connection = True
             self._send_error_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 "internal_error",
@@ -865,8 +920,11 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         try:
+            if not self._begin_request(allow_body=False):
+                return
             self._handle_delete()
         except Exception as exc:  # noqa: BLE001 — (a) HTTP 处理器顶层兜底，返回结构化 500
+            self.close_connection = True
             self._send_error_json(
                 HTTPStatus.INTERNAL_SERVER_ERROR,
                 "internal_error",

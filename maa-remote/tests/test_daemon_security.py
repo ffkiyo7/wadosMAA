@@ -417,6 +417,112 @@ class DaemonSecurityTests(unittest.TestCase):
         self.assertIsNone(re.search(r"<script[^>]+src=", html, re.IGNORECASE))
         self.assertIsNone(re.search(r"<link[^>]+href=", html, re.IGNORECASE))
 
+    def test_http11_unconsumed_body_closes_connection_and_rejects_transfer_encoding(self) -> None:
+        """评审【1】回归：未消费请求体的 401/403/413/404 与带 body 的 GET/DELETE 必须断开，且拒绝 Transfer-Encoding。"""
+        full_token = maa_tls.generate_token()
+        resign_token = maa_tls.generate_token()
+        secrets_path = self.daemon_dir / "secrets.json"
+        maa_tls.merge_secrets(
+            secrets_path,
+            {
+                "full_token_sha256": maa_tls.hash_token(full_token),
+                "resign_only_token_sha256": maa_tls.hash_token(resign_token),
+            },
+        )
+        ctx = maa_api.APIContext(
+            home_dir=self.home,
+            scripts_dir=ROOT / "scripts",
+            state_dir=self.state_dir,
+            runs_dir=self.runs_dir,
+            daemon_dir=self.daemon_dir,
+            secrets_path=secrets_path,
+            rescue_html_path=ROOT / "daemon" / "rescue.html",
+        )
+        server = maa_api.create_server("127.0.0.1", 0, ctx)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
+        thread.start()
+        self.addCleanup(lambda: (server.shutdown(), server.server_close(), thread.join(timeout=2.0)))
+
+        def send_raw(raw_bytes: bytes) -> bytes:
+            with socket.create_connection(("127.0.0.1", port), timeout=3.0) as sock:
+                sock.settimeout(2.0)
+                sock.sendall(raw_bytes)
+                chunks: list[bytes] = []
+                while True:
+                    try:
+                        chunk = sock.recv(4096)
+                    except (ConnectionResetError, TimeoutError, socket.timeout):
+                        break
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                return b"".join(chunks)
+
+        smuggled = b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n"
+
+        # 1. 无 Token 的 POST 内嵌 GET /healthz：只应返回 401 + Connection: close，绝不返回第二条 200
+        raw_401 = (
+            f"POST /api/v1/run/cancel HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len(smuggled)}\r\n\r\n".encode()
+            + smuggled
+        )
+        resp_401 = send_raw(raw_401)
+        self.assertIn(b"HTTP/1.1 401 ", resp_401)
+        self.assertIn(b"Connection: close", resp_401)
+        self.assertEqual(resp_401.count(b"HTTP/1.1 "), 1, f"发生 HTTP/1.1 请求走私：{resp_401!r}")
+
+        # 2. resign_only 越权 403 带未消费 body：必须关连接
+        raw_403 = (
+            f"POST /api/v1/run/cancel HTTP/1.1\r\nHost: localhost\r\n"
+            f"Authorization: Bearer {resign_token}\r\n"
+            f"Content-Length: {len(smuggled)}\r\n\r\n".encode()
+            + smuggled
+        )
+        resp_403 = send_raw(raw_403)
+        self.assertIn(b"HTTP/1.1 403 ", resp_403)
+        self.assertEqual(resp_403.count(b"HTTP/1.1 "), 1)
+
+        # 3. 413 超限 body：不读体且关连接
+        raw_413 = (
+            f"POST /api/v1/plan/skip HTTP/1.1\r\nHost: localhost\r\n"
+            f"Authorization: Bearer {full_token}\r\n"
+            f"Content-Length: {maa_api.MAX_REQUEST_BODY_BYTES + 100}\r\n\r\n".encode()
+            + smuggled
+        )
+        resp_413 = send_raw(raw_413)
+        self.assertIn(b"HTTP/1.1 413 ", resp_413)
+        self.assertEqual(resp_413.count(b"HTTP/1.1 "), 1)
+
+        # 4. 404 带未消费 body（GET/DELETE 同样覆盖）
+        raw_get_body = (
+            f"GET /healthz HTTP/1.1\r\nHost: localhost\r\nContent-Length: {len(smuggled)}\r\n\r\n".encode()
+            + smuggled
+        )
+        resp_get = send_raw(raw_get_body)
+        self.assertIn(b"HTTP/1.1 200 ", resp_get)
+        self.assertIn(b"Connection: close", resp_get)
+        self.assertEqual(resp_get.count(b"HTTP/1.1 "), 1)
+
+        raw_del_body = (
+            f"DELETE /api/v1/unknown HTTP/1.1\r\nHost: localhost\r\n"
+            f"Authorization: Bearer {full_token}\r\n"
+            f"Content-Length: {len(smuggled)}\r\n\r\n".encode()
+            + smuggled
+        )
+        resp_del = send_raw(raw_del_body)
+        self.assertIn(b"HTTP/1.1 404 ", resp_del)
+        self.assertEqual(resp_del.count(b"HTTP/1.1 "), 1)
+
+        # 5. 拒绝 Transfer-Encoding: chunked 且立即断连
+        raw_te = (
+            b"POST /api/v1/plan/skip HTTP/1.1\r\nHost: localhost\r\n"
+            b"Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n" + smuggled
+        )
+        resp_te = send_raw(raw_te)
+        self.assertIn(b"HTTP/1.1 400 ", resp_te)
+        self.assertIn(b"unsupported_transfer_encoding", resp_te)
+        self.assertEqual(resp_te.count(b"HTTP/1.1 "), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
