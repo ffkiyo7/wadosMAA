@@ -2204,39 +2204,34 @@ class GameProbeTests(unittest.TestCase):
         lock.__enter__.return_value = True
         lock.__exit__.return_value = False
         probe = probe or unittest.mock.MagicMock(return_value=(online, "探测明细"))
-        with patch.object(maa_daily, "now_beijing", return_value=at), patch.object(
-            maa_daily, "load_config", return_value={"channel_id": "123"}
-        ), patch.object(maa_daily, "discord_token", return_value="token"), patch.object(
-            maa_daily, "load_json", return_value={}
-        ), patch.object(
-            maa_daily, "effective_plan", return_value=maa_common.normalize_plan({})
-        ), patch.object(maa_daily, "run_lock", return_value=lock), patch.object(
-            maa_daily, "cleanup_run_files"
-        ), patch.object(maa_daily, "atomic_write_json"), patch.object(
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(maa_daily, "now_beijing", return_value=at))
+            stack.enter_context(patch.object(maa_daily, "load_config", return_value={"channel_id": "123"}))
+            stack.enter_context(patch.object(maa_daily, "discord_token", return_value="token"))
+            stack.enter_context(patch.object(maa_daily, "load_json", return_value={}))
+            stack.enter_context(patch.object(maa_daily, "effective_plan", return_value=maa_common.normalize_plan({})))
+            stack.enter_context(patch.object(maa_daily, "run_lock", return_value=lock))
+            stack.enter_context(patch.object(maa_daily, "cleanup_run_files"))
+            stack.enter_context(patch.object(maa_daily, "atomic_write_json"))
             # 进度文件桩掉了，场次索引（#66）也别落到共享 HOME 里。
-            maa_daily, "append_run_index"
-        ) as index, patch.object(
-            maa_daily, "should_skip", return_value=False
-        ), patch.object(
-            maa_playcover, "game_is_online", probe
-        ), patch.object(maa_daily, "merge_last_run") as merge, patch.object(
-            maa_daily, "discord_request"
-        ) as request, patch.object(
+            index = stack.enter_context(patch.object(maa_daily, "append_run_index"))
+            stack.enter_context(patch.object(maa_daily, "should_skip", return_value=False))
+            stack.enter_context(patch.object(maa_playcover, "game_is_online", probe))
+            merge = stack.enter_context(patch.object(maa_daily, "merge_last_run"))
+            request = stack.enter_context(patch.object(maa_daily, "discord_request"))
             # 探测在线的汇报走 maa_common 那份通用实现（四期 1d），
             # 它的 Discord / 状态写入必须一起桩掉，否则单测会真的打网络。
-            maa_common, "merge_last_run"
-        ) as common_merge, patch.object(
-            maa_common, "discord_request"
-        ) as common_request, patch.object(
-            maa_common, "discord_token", return_value="token"
-        ), patch.object(maa_daily, "require_executable"), patch.object(
+            common_merge = stack.enter_context(patch.object(maa_common, "merge_last_run"))
+            common_request = stack.enter_context(patch.object(maa_common, "discord_request"))
+            stack.enter_context(patch.object(maa_common, "discord_token", return_value="token"))
+            stack.enter_context(patch.object(maa_daily, "require_executable"))
             # 不桩它就会真去读 PlayCover 里明日方舟的安装和 MaaTools 设置。
-            maa_playcover, "verify_game_installed"
-        ), patch.object(
-            maa_playcover, "launch_game", side_effect=RuntimeError("STOP: probe passed")
-        ) as opened, patch.object(maa_daily, "send_direct_failure"), patch.object(
-            maa_daily, "manual_run_request", return_value=manual
-        ):
+            stack.enter_context(patch.object(maa_playcover, "verify_game_installed"))
+            opened = stack.enter_context(
+                patch.object(maa_playcover, "launch_game", side_effect=RuntimeError("STOP: probe passed"))
+            )
+            stack.enter_context(patch.object(maa_daily, "send_direct_failure"))
+            stack.enter_context(patch.object(maa_daily, "manual_run_request", return_value=manual))
             code = maa_daily.execute(phase, "tok" if manual else "")
         merge.call_args_list = merge.call_args_list + common_merge.call_args_list  # pyright: ignore[reportAttributeAccessIssue]  # 合并两处桩的调用记录
         request.call_args_list = request.call_args_list + common_request.call_args_list  # pyright: ignore[reportAttributeAccessIssue]  # 合并两处桩的调用记录
