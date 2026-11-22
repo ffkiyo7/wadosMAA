@@ -478,7 +478,7 @@ struct RunChangedNotice: Identifiable, Equatable {
         case .copilot:
             isRunSheetPresented = false
             selectedTab = .copilot
-        case .resign:
+        case .settings, .resign:
             isRunSheetPresented = false
             selectedTab = .settings
         #if DEBUG

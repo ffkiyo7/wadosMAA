@@ -2,7 +2,7 @@
 //  DeepLink.swift
 //  Wado's MAA (iOS)
 //
-//  `wadosmaa://run/latest`、`run/<id>`、`today`、`copilot`、`resign`（SPEC §6.3）。
+//  `wadosmaa://run/latest`、`run/<id>`、`today`、`copilot`、`settings`、`resign`（SPEC §6.3）。
 //
 
 import Foundation
@@ -12,6 +12,7 @@ enum DeepLink: Equatable {
     case run(String)
     case today
     case copilot
+    case settings
     case resign
     #if DEBUG
     case demo(String)
@@ -25,6 +26,7 @@ enum DeepLink: Equatable {
         case let ("run", id?) where Self.isSafeRunID(id): self = .run(id)
         case ("today", nil): self = .today
         case ("copilot", nil): self = .copilot
+        case ("settings", nil): self = .settings
         case ("resign", nil): self = .resign
         #if DEBUG
         case let ("demo", name?): self = .demo(name)
