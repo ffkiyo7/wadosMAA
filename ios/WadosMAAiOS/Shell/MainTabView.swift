@@ -27,6 +27,7 @@ struct MainTabView: View {
         }
         .tabViewBottomAccessory(isEnabled: store.activeRun != nil || (store.selectedTab == .today && store.hasData)) {
             RunAccessory()
+                .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         }
         .overlay(alignment: .bottom) {
             if let toast = store.toast {

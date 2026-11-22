@@ -91,7 +91,7 @@ struct StartRunSheet: View {
     private var stageSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("关卡")
-                .font(.system(size: 15, weight: .semibold))
+                .scaledFont(size: 15, weight: .semibold)
                 .foregroundStyle(Palette.secondary)
                 .padding(.horizontal, 4)
             WCard(vertical: 0) {
@@ -112,13 +112,13 @@ struct StartRunSheet: View {
                         isPickingStage = true
                     } label: {
                         HStack {
-                            Text("全部关卡").font(.system(size: 16))
+                            Text("全部关卡").scaledFont(size: 16)
                             Spacer()
                             if !quickStages.contains(where: { $0.stage == stage }), !stage.isEmpty {
-                                Text(stage).foregroundStyle(Palette.blue).font(.system(size: 16, weight: .semibold))
+                                Text(stage).foregroundStyle(Palette.blue).scaledFont(size: 16, weight: .semibold)
                             }
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 12, weight: .bold))
+                                .scaledFont(size: 12, weight: .bold)
                                 .foregroundStyle(Palette.secondary)
                         }
                         .frame(minHeight: 48)
@@ -133,7 +133,7 @@ struct StartRunSheet: View {
     private var switchSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("环节")
-                .font(.system(size: 15, weight: .semibold))
+                .scaledFont(size: 15, weight: .semibold)
                 .foregroundStyle(Palette.secondary)
                 .padding(.horizontal, 4)
             WCard(horizontal: 12, vertical: 12) {
@@ -169,7 +169,7 @@ struct StartRunSheet: View {
                     Label("开始", systemImage: "play.fill")
                 }
             }
-            .font(.system(size: 18, weight: .bold))
+            .scaledFont(size: 18, weight: .bold)
             .foregroundStyle(canStart ? Color.white : Palette.secondary)
             .frame(maxWidth: .infinity, minHeight: 56)
             .background(canStart ? Palette.accent : Palette.ghost, in: .capsule)
@@ -228,11 +228,11 @@ struct StageChoiceRow: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(title)
-                    .font(.system(size: 16, weight: isSelected ? .bold : .regular))
+                    .scaledFont(size: 16, weight: isSelected ? .bold : .regular)
                     .lineLimit(1)
                 if !detail.isEmpty {
                     Text(detail)
-                        .font(.system(size: 14))
+                        .scaledFont(size: 14)
                         .foregroundStyle(Palette.secondary)
                         .lineLimit(1)
                 }
@@ -240,7 +240,7 @@ struct StageChoiceRow: View {
             Spacer(minLength: 8)
             if isSelected {
                 Image(systemName: "checkmark")
-                    .font(.system(size: 15, weight: .bold))
+                    .scaledFont(size: 15, weight: .bold)
                     .foregroundStyle(Palette.blue)
             }
         }

@@ -75,7 +75,7 @@ struct CopilotPreviewView: View {
         VStack(spacing: 18) {
             Spacer()
             ProgressView().controlSize(.large)
-            Text("正在搜作业").font(.system(size: 21, weight: .bold))
+            Text("正在搜作业").scaledFont(size: 21, weight: .bold)
             Button {
                 let id = requestID
                 phase = .canceled
@@ -135,7 +135,7 @@ struct CopilotPreviewView: View {
                     .frame(width: 128, height: 128)
                     .frame(maxWidth: .infinity)
                 Text(perfect.isEmpty ? "没有完美作业" : "\(perfect.count) 份完美作业")
-                    .font(.system(size: 30, weight: .heavy))
+                    .scaledFont(size: 30, weight: .heavy)
                     .padding(.horizontal, 4)
                 if !perfect.isEmpty {
                     HStack(alignment: .top, spacing: 18) {
@@ -156,7 +156,7 @@ struct CopilotPreviewView: View {
                 }
                 if let blocker = preview.blocker, !blocker.isEmpty {
                     Text(blocker)
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(Palette.amber)
                         .padding(.horizontal, 4)
                 }
@@ -206,7 +206,7 @@ struct CopilotPreviewView: View {
                 Text(title)
             }
         }
-        .font(.system(size: 18, weight: .bold))
+        .scaledFont(size: 18, weight: .bold)
         .foregroundStyle(enabled ? Color.white : Palette.secondary)
         .frame(maxWidth: .infinity, minHeight: 58)
         .background(enabled ? Palette.accent : Palette.ghost, in: .capsule)
@@ -225,11 +225,11 @@ struct CopilotPreviewView: View {
                         radio(isSelected: isSelected, isPerfect: candidate.perfect)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(candidate.title?.isEmpty == false ? candidate.title ?? "" : "作业 #\(candidate.id)")
-                                .font(.system(size: 16, weight: .bold))
+                                .scaledFont(size: 16, weight: .bold)
                                 .foregroundStyle(candidate.perfect ? Color.primary : Palette.secondary)
                                 .lineLimit(1)
                             Text(candidate.perfect ? statsText(candidate) : gapText(gaps))
-                                .font(.system(size: 14))
+                                .scaledFont(size: 14)
                                 .foregroundStyle(candidate.perfect ? Palette.secondary : Palette.red)
                                 .lineLimit(1)
                         }
@@ -245,7 +245,7 @@ struct CopilotPreviewView: View {
                         withAnimation(.snappy) { expandedID = expandedID == candidate.id ? nil : candidate.id }
                     } label: {
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 13, weight: .bold))
+                            .scaledFont(size: 13, weight: .bold)
                             .foregroundStyle(Palette.secondary)
                             .rotationEffect(.degrees(expandedID == candidate.id ? 180 : 0))
                             .frame(width: 44, height: 44)
@@ -258,7 +258,7 @@ struct CopilotPreviewView: View {
             if expandedID == candidate.id {
                 VStack(alignment: .leading, spacing: 3) {
                     ForEach(gaps, id: \.self) { gap in
-                        Text(gap).font(.system(size: 14)).foregroundStyle(Palette.red)
+                        Text(gap).scaledFont(size: 14).foregroundStyle(Palette.red)
                     }
                 }
                 .padding(.leading, 36)
@@ -273,7 +273,7 @@ struct CopilotPreviewView: View {
             if isSelected {
                 Circle().fill(Palette.accent)
                 Image(systemName: "checkmark")
-                    .font(.system(size: 12, weight: .heavy))
+                    .scaledFont(size: 12, weight: .heavy)
                     .foregroundStyle(.white)
             } else if isPerfect {
                 Circle().strokeBorder(Palette.secondary, lineWidth: 2)

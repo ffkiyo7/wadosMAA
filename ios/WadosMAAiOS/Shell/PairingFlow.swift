@@ -146,11 +146,11 @@ struct PairingFlow: View {
         VStack(spacing: 14) {
             Spacer()
             Image(systemName: "macmini")
-                .font(.system(size: 72, weight: .light))
+                .scaledFont(size: 72, weight: .light)
                 .foregroundStyle(Palette.accent)
                 .padding(.bottom, 12)
             Text("连接 Mac mini")
-                .font(.system(size: 30, weight: .heavy))
+                .scaledFont(size: 30, weight: .heavy)
             Spacer()
             Button {
                 let canScan = DataScannerViewController.isSupported && DataScannerViewController.isAvailable
@@ -252,20 +252,20 @@ struct PairingFlow: View {
                 ProgressView().controlSize(.large)
             case let (false, .success(probe)?):
                 Image(systemName: "checkmark.circle.fill")
-                    .font(.system(size: 64))
+                    .scaledFont(size: 64)
                     .foregroundStyle(Palette.green)
                 Text("已连接")
-                    .font(.system(size: 30, weight: .heavy))
+                    .scaledFont(size: 30, weight: .heavy)
                 Text("\(probe.route == .lan ? "局域网" : "远程") · \(probe.latencyMilliseconds) ms")
                     .font(.title3)
                     .monospacedDigit()
                     .foregroundStyle(Palette.secondary)
             case let (false, .failure(failure)?):
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 64))
+                    .scaledFont(size: 64)
                     .foregroundStyle(Palette.red)
                 Text(Self.message(failure))
-                    .font(.system(size: 24, weight: .heavy))
+                    .scaledFont(size: 24, weight: .heavy)
                     .multilineTextAlignment(.center)
             }
             Spacer()

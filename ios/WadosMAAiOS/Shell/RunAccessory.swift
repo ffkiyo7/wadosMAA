@@ -61,7 +61,7 @@ struct RunAccessory: View {
                 store.isStartRunPresented = true
             } label: {
                 Label("现在开一场", systemImage: "play.fill")
-                    .font(.system(size: 17, weight: .bold))
+                    .scaledFont(size: 17, weight: .bold)
                     .foregroundStyle(Palette.blue)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .contentShape(.rect)

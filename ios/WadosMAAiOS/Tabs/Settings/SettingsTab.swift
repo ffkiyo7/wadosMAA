@@ -102,7 +102,7 @@ struct SettingsTab: View {
 
     private func node(_ symbol: String) -> some View {
         Image(systemName: symbol)
-            .font(.system(size: 26, weight: .medium))
+            .scaledFont(size: 26, weight: .medium)
             .frame(width: 64, height: 64)
             .background(Palette.ghost, in: .circle)
     }
@@ -127,13 +127,13 @@ struct SettingsTab: View {
     @ViewBuilder private var latencyText: some View {
         if case let .online(_, latency) = store.connection {
             HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text("\(latency)").font(.system(size: 34, weight: .heavy)).monospacedDigit()
+                Text("\(latency)").scaledFont(size: 34, weight: .heavy).monospacedDigit()
                 Text("ms")
-                    .font(.system(size: 16, weight: .semibold))
+                    .scaledFont(size: 16, weight: .semibold)
                     .foregroundStyle(Palette.secondary)
             }
         } else {
-            Text("—").font(.system(size: 34, weight: .heavy))
+            Text("—").scaledFont(size: 34, weight: .heavy)
         }
     }
 
@@ -202,7 +202,7 @@ struct SettingsTab: View {
         WCard(vertical: 8) {
             VStack(alignment: .leading, spacing: 0) {
                 Text("演示数据")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .foregroundStyle(Palette.secondary)
                     .padding(.vertical, 6)
                 ForEach(DemoScenario.allCases) { scenario in
@@ -210,7 +210,7 @@ struct SettingsTab: View {
                         store.startDemo(scenario)
                     } label: {
                         HStack {
-                            Text(scenario.title).font(.system(size: 16))
+                            Text(scenario.title).scaledFont(size: 16)
                             Spacer()
                             if store.demoScenario == scenario {
                                 Image(systemName: "checkmark").foregroundStyle(Palette.accent)
@@ -239,20 +239,20 @@ private struct EntryRow: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: symbol)
-                .font(.system(size: 17, weight: .medium))
+                .scaledFont(size: 17, weight: .medium)
                 .foregroundStyle(Palette.accent)
                 .frame(width: 24)
-            Text(title).font(.system(size: 16))
+            Text(title).scaledFont(size: 16)
             Spacer(minLength: 8)
             if let value {
                 Text(value)
-                    .font(.system(size: 16))
+                    .scaledFont(size: 16)
                     .monospacedDigit()
                     .foregroundStyle(Palette.secondary)
                     .lineLimit(1)
             }
             Image(systemName: "chevron.right")
-                .font(.system(size: 12, weight: .bold))
+                .scaledFont(size: 12, weight: .bold)
                 .foregroundStyle(Palette.secondary.opacity(0.7))
         }
         .frame(minHeight: 50)

@@ -122,10 +122,10 @@ struct TodayTab: View {
             Circle().fill(dot).frame(width: 12, height: 12)
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
-                    .font(.system(size: 13))
+                    .scaledFont(size: 13)
                     .foregroundStyle(Palette.secondary)
                 Text(value)
-                    .font(.system(size: 15, weight: .bold))
+                    .scaledFont(size: 15, weight: .bold)
                     .monospacedDigit()
                     .lineLimit(1)
             }
@@ -170,7 +170,7 @@ private struct TodayOverview: View {
         let focus = store.focusSession
         VStack(alignment: .leading, spacing: 12) {
             Text(store.headline(for: focus))
-                .font(.system(size: 30, weight: .heavy))
+                .scaledFont(size: 30, weight: .heavy)
                 .padding(.horizontal, 4)
                 .padding(.top, 6)
             if let run = store.activeRun, run.phase == nil {
@@ -205,7 +205,7 @@ private struct OtherRunCard: View {
                     VStack(alignment: .leading, spacing: 2) {
                         MoreLabel(title: run.title)
                         Text(run.statusText)
-                            .font(.system(size: 21, weight: .bold))
+                            .scaledFont(size: 21, weight: .bold)
                             .lineLimit(1)
                             .minimumScaleFactor(0.7)
                     }
@@ -234,11 +234,11 @@ private struct FocusSessionCard: View {
                             VStack(alignment: .leading, spacing: 0) {
                                 MoreLabel(title: session.name).frame(height: 24)
                                 Text(session.time)
-                                    .font(.system(size: 42, weight: .heavy))
+                                    .scaledFont(size: 42, weight: .heavy)
                                     .monospacedDigit()
                                     .tracking(-1)
                                 Text(stageLine)
-                                    .font(.system(size: 16, weight: .semibold))
+                                    .scaledFont(size: 16, weight: .semibold)
                                     .foregroundStyle(stageColor)
                                     .lineLimit(1)
                             }
@@ -316,7 +316,7 @@ private struct OtherSessionCard: View {
                             MoreLabel(title: session.name).frame(height: 24)
                         } else {
                             Text(session.name)
-                                .font(.system(size: 15, weight: .semibold))
+                                .scaledFont(size: 15, weight: .semibold)
                                 .foregroundStyle(Palette.secondary)
                                 .frame(height: 24)
                         }
@@ -324,7 +324,7 @@ private struct OtherSessionCard: View {
                             HStack(spacing: 9) {
                                 Circle().fill(line.color).frame(width: 12, height: 12)
                                 Text(line.text)
-                                    .font(.system(size: 18, weight: .bold))
+                                    .scaledFont(size: 18, weight: .bold)
                                     .monospacedDigit()
                                     .lineLimit(1)
                                     .minimumScaleFactor(0.7)
@@ -393,7 +393,7 @@ private struct OverviewActivityCard: View {
                     VStack(alignment: .leading, spacing: 0) {
                         MoreLabel(title: activity.name).frame(height: 24)
                         Text(activity.end.map { BeijingDay.remaining(until: $0) } ?? "进行中")
-                            .font(.system(size: 30, weight: .heavy))
+                            .scaledFont(size: 30, weight: .heavy)
                             .lineLimit(1)
                             .minimumScaleFactor(0.7)
                         HStack(spacing: 12) {
@@ -401,7 +401,7 @@ private struct OverviewActivityCard: View {
                             Text("EX \(tally.ex.done)/\(tally.ex.total)").foregroundStyle(Palette.violet)
                             Text("S \(tally.s.done)/\(tally.s.total)").foregroundStyle(Palette.pink)
                         }
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(size: 15, weight: .semibold)
                         .monospacedDigit()
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
@@ -448,12 +448,12 @@ struct RunRow: View {
     var body: some View {
         HStack {
             Text(timeText)
-                .font(.system(size: 16))
+                .scaledFont(size: 16)
                 .monospacedDigit()
                 .fixedSize()
             Spacer(minLength: 12)
             Text(store.recentText(record))
-                .font(.system(size: 16))
+                .scaledFont(size: 16)
                 .foregroundStyle(isBad ? Palette.red : Palette.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
@@ -638,12 +638,12 @@ private struct SessionPage: View {
                 .frame(maxWidth: .infinity)
             HStack(alignment: .firstTextBaseline) {
                 Text(run.currentDailyStep?.title ?? "准备中")
-                    .font(.system(size: 30, weight: .heavy))
+                    .scaledFont(size: 30, weight: .heavy)
                     .foregroundStyle(run.currentDailyStep?.color ?? Color.primary)
                 Spacer()
                 if let eta = run.progress?.eta {
                     Text("约 \(BeijingTime.clock(eta))")
-                        .font(.system(size: 17, weight: .semibold))
+                        .scaledFont(size: 17, weight: .semibold)
                         .monospacedDigit()
                         .foregroundStyle(Palette.secondary)
                 }
@@ -684,7 +684,7 @@ private struct SessionPage: View {
                 .frame(width: 264, height: 264)
                 .frame(maxWidth: .infinity)
             Text(title)
-                .font(.system(size: 30, weight: .heavy))
+                .scaledFont(size: 30, weight: .heavy)
                 .padding(.horizontal, 4)
             SessionControls(session: session, status: status, onChangeStage: onChangeStage)
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 18), GridItem(.flexible())], spacing: 18) {
@@ -790,7 +790,7 @@ private struct SanityPage: View {
             Spacer()
             Text(value).foregroundStyle(Palette.secondary).monospacedDigit()
         }
-        .font(.system(size: 16))
+        .scaledFont(size: 16)
         .frame(minHeight: 48)
     }
 
@@ -881,14 +881,14 @@ struct ResourceStrip: View {
                         .frame(width: 22)
                 }
                 Text(title(kind))
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .lineLimit(1)
                 Spacer(minLength: 6)
                 if kind != .running {
                     Button("现在更新") {
                         Task { await store.updateResources() }
                     }
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .foregroundStyle(Palette.blue)
                     .frame(minHeight: 44)
                     .disabled(!store.canWrite || updateBlocked)

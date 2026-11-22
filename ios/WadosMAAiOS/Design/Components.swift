@@ -46,10 +46,10 @@ struct MoreLabel: View {
         HStack(spacing: 4) {
             Text(title)
             Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .bold))
+                .scaledFont(size: 11, weight: .bold)
                 .opacity(0.7)
         }
-        .font(.system(size: 15, weight: .semibold))
+        .scaledFont(size: 15, weight: .semibold)
         .foregroundStyle(color)
         .lineLimit(1)
     }
@@ -64,11 +64,11 @@ struct PillLabel: View {
     var body: some View {
         HStack(spacing: 5) {
             if let symbol {
-                Image(systemName: symbol).font(.system(size: 13, weight: .semibold))
+                Image(systemName: symbol).scaledFont(size: 13, weight: .semibold)
             }
-            Text(title).lineLimit(1).minimumScaleFactor(0.75)
+            Text(title).lineLimit(1).minimumScaleFactor(0.6)
         }
-        .font(.system(size: fontSize, weight: .semibold))
+        .scaledFont(size: fontSize, weight: .semibold)
         .foregroundStyle(isOn ? Color.white : Color.primary)
         .frame(maxWidth: .infinity, minHeight: 44)
         .background(isOn ? Palette.accent : Palette.ghost, in: .capsule)
@@ -86,17 +86,17 @@ struct FactView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(label)
-                .font(.system(size: 14, weight: .semibold))
+                .scaledFont(size: 14, weight: .semibold)
                 .foregroundStyle(color)
                 .lineLimit(1)
             Text(value)
-                .font(.system(size: valueSize, weight: .bold))
+                .scaledFont(size: valueSize, weight: .bold)
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             if let note {
                 Text(note)
-                    .font(.system(size: 14))
+                    .scaledFont(size: 14)
                     .monospacedDigit()
                     .foregroundStyle(Palette.secondary)
                     .lineLimit(1)
@@ -186,7 +186,7 @@ struct TimelineLanes: View {
                     HStack(spacing: 6) {
                         if let symbol = item.symbol {
                             Image(systemName: symbol)
-                                .font(.system(size: 13, weight: .semibold))
+                                .scaledFont(size: 13, weight: .semibold)
                                 .frame(width: 18)
                         }
                         Text(item.title).lineLimit(1).minimumScaleFactor(0.7)
@@ -198,7 +198,7 @@ struct TimelineLanes: View {
                                 .fixedSize()
                         }
                     }
-                    .font(.system(size: 14, weight: .semibold))
+                    .scaledFont(size: 14, weight: .semibold)
                     .monospacedDigit()
                     .foregroundStyle(item.isPending ? Palette.secondary : item.color)
                     .frame(width: labelWidth, alignment: .leading)
@@ -232,7 +232,7 @@ struct TimelineLanes: View {
                     Spacer()
                     Text(endLabel ?? "")
                 }
-                .font(.system(size: 13, weight: .semibold))
+                .scaledFont(size: 13, weight: .semibold)
                 .monospacedDigit()
                 .foregroundStyle(Palette.secondary)
                 .padding(.leading, labelWidth + 8)
@@ -342,7 +342,7 @@ struct StepperPill: View {
             .disabled(!canIncrease)
             .accessibilityLabel("增加\(title)")
         }
-        .font(.system(size: 16, weight: .semibold))
+        .scaledFont(size: 16, weight: .semibold)
         .buttonStyle(.plain)
         .background(Palette.ghost, in: .capsule)
     }
@@ -368,7 +368,7 @@ struct ConfigStepperCard: View {
         WCard {
             VStack(alignment: .leading, spacing: 8) {
                 Text(title)
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .foregroundStyle(color)
                 HStack(alignment: .center) {
                     valueText
@@ -386,11 +386,11 @@ struct ConfigStepperCard: View {
 
     @ViewBuilder private var valueText: some View {
         if value == 0, let zeroText {
-            Text(zeroText).font(.system(size: 30, weight: .heavy))
+            Text(zeroText).scaledFont(size: 30, weight: .heavy)
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text("\(value)").font(.system(size: 30, weight: .heavy)).monospacedDigit()
-                Text(unit).font(.system(size: 15, weight: .semibold)).foregroundStyle(Palette.secondary)
+                Text("\(value)").scaledFont(size: 30, weight: .heavy).monospacedDigit()
+                Text(unit).scaledFont(size: 15, weight: .semibold).foregroundStyle(Palette.secondary)
             }
         }
     }

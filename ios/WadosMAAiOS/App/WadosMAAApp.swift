@@ -13,6 +13,7 @@ struct WadosMAAApp: App {
     var body: some Scene {
         WindowGroup {
             RootView()
+                .dynamicTypeSize(...DynamicTypeSize.accessibility2)
                 .environment(store)
                 .task { store.start() }
                 .onOpenURL { store.open($0) }

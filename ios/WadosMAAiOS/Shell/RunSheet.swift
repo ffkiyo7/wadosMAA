@@ -128,7 +128,7 @@ private struct DailyRunSummary: View {
                 .frame(width: 112, height: 112)
             VStack(alignment: .leading, spacing: 4) {
                 Text(run.statusText)
-                    .font(.system(size: 30, weight: .heavy))
+                    .scaledFont(size: 30, weight: .heavy)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
                 if let eta = progress?.eta {
@@ -229,7 +229,7 @@ private struct CopilotRunSummary: View {
             }
             .frame(width: 112, height: 112)
             Text(copilot?.currentStage ?? "抄作业")
-                .font(.system(size: 30, weight: .heavy))
+                .scaledFont(size: 30, weight: .heavy)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
@@ -283,7 +283,7 @@ private struct OtherRunSummary: View {
         HStack(spacing: 14) {
             ProgressView()
             Text(run.statusText)
-                .font(.system(size: 30, weight: .heavy))
+                .scaledFont(size: 30, weight: .heavy)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
@@ -306,10 +306,10 @@ private struct FactGrid: View {
             ForEach(facts) { fact in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(fact.label)
-                        .font(.system(size: 14))
+                        .scaledFont(size: 14)
                         .foregroundStyle(Palette.secondary)
                     Text(fact.value)
-                        .font(.system(size: 21, weight: .semibold))
+                        .scaledFont(size: 21, weight: .semibold)
                         .monospacedDigit()
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)

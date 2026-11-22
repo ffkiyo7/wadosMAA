@@ -167,7 +167,7 @@ struct RunDetailView: View {
                     } label: {
                         WCard(vertical: 0) {
                             HStack {
-                                Text("日志").font(.system(size: 16, weight: .semibold))
+                                Text("日志").scaledFont(size: 16, weight: .semibold)
                                 Spacer()
                                 MoreLabel(title: "")
                             }
@@ -206,7 +206,7 @@ struct RunDetailView: View {
                 .padding(.horizontal, 4)
         }
         Text(dailyHeadline)
-            .font(.system(size: 30, weight: .heavy))
+            .scaledFont(size: 30, weight: .heavy)
             .lineLimit(1)
             .minimumScaleFactor(0.7)
             .padding(.horizontal, 4)
@@ -230,7 +230,7 @@ struct RunDetailView: View {
         .padding(.horizontal, 4)
         if let summary = report?.summary, progress == nil, !summary.isEmpty {
             WCard {
-                Text(summary).font(.system(size: 15))
+                Text(summary).scaledFont(size: 15)
             }
         }
         notesCard(progress?.notes.map(\.text) ?? report?.notes ?? [])
@@ -264,7 +264,7 @@ struct RunDetailView: View {
                     .padding(.horizontal, 4)
             }
             Text(copilotHeadline(report))
-                .font(.system(size: 30, weight: .heavy))
+                .scaledFont(size: 30, weight: .heavy)
                 .padding(.horizontal, 4)
             HStack(alignment: .center, spacing: 12) {
                 LazyVGrid(columns: [GridItem(.flexible(), spacing: 18), GridItem(.flexible())], spacing: 14) {
@@ -296,7 +296,7 @@ struct RunDetailView: View {
             }
             if let reason = report.stopReason {
                 WCard {
-                    Text(reason).font(.system(size: 15)).foregroundStyle(Palette.red)
+                    Text(reason).scaledFont(size: 15).foregroundStyle(Palette.red)
                 }
             }
         } else {
@@ -315,14 +315,14 @@ struct RunDetailView: View {
     private func resultRow(_ row: RunReport.StageResult) -> some View {
         HStack {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(row.stage).font(.system(size: 16, weight: .bold))
+                Text(row.stage).scaledFont(size: 16, weight: .bold)
                 Text(row.modeTitle)
-                    .font(.system(size: 14, weight: .semibold))
+                    .scaledFont(size: 14, weight: .semibold)
                     .foregroundStyle(Palette.secondary)
             }
             Spacer()
             Text(row.outcomeTitle)
-                .font(.system(size: 15, weight: .semibold))
+                .scaledFont(size: 15, weight: .semibold)
                 .foregroundStyle(row.outcome == "won" ? Palette.green : row.outcome == "skipped" ? Palette.secondary : Palette.red)
         }
         .frame(minHeight: 48)
@@ -334,7 +334,7 @@ struct RunDetailView: View {
             WCard {
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(notes, id: \.self) { note in
-                        Text(note).font(.system(size: 15))
+                        Text(note).scaledFont(size: 15)
                     }
                 }
             }
@@ -357,7 +357,7 @@ struct RunDetailView: View {
                             .frame(height: 176)
                             .clipped()
                         Text(isCopilot ? "结算截图" : "主页截图")
-                            .font(.system(size: 14, weight: .semibold))
+                            .scaledFont(size: 14, weight: .semibold)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 5)
                             .background(Palette.background.opacity(0.9), in: .capsule)
@@ -408,7 +408,7 @@ private struct ScreenshotViewer: View {
                 dismiss()
             } label: {
                 Image(systemName: "xmark")
-                    .font(.system(size: 17, weight: .semibold))
+                    .scaledFont(size: 17, weight: .semibold)
                     .foregroundStyle(.white)
                     .frame(width: 44, height: 44)
                     .glassEffect(.regular, in: .circle)
@@ -489,7 +489,7 @@ private struct RunLogView: View {
                 LazyVStack(alignment: .leading, spacing: 3) {
                     ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
                         Text(line)
-                            .font(.system(size: 12.5, design: .monospaced))
+                            .scaledFont(size: 12.5, design: .monospaced)
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .id(index)

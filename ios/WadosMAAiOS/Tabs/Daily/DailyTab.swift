@@ -57,7 +57,7 @@ struct DailyTab: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     if let text = lastChangeText {
                         Text(text)
-                            .font(.system(size: 14))
+                            .scaledFont(size: 14)
                             .monospacedDigit()
                             .foregroundStyle(Palette.secondary)
                             .fixedSize()
@@ -130,7 +130,7 @@ struct DailyTab: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(name)
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .foregroundStyle(color)
                 Spacer()
                 Toggle(
@@ -146,7 +146,7 @@ struct DailyTab: View {
                 timeTarget = TimeTarget(phase: phase, name: name, time: time)
             } label: {
                 Text(time)
-                    .font(.system(size: 30, weight: .heavy))
+                    .scaledFont(size: 30, weight: .heavy)
                     .monospacedDigit()
                     .foregroundStyle(enabled ? Color.primary : Palette.secondary)
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
@@ -168,7 +168,7 @@ struct DailyTab: View {
         } label: {
             WCard(vertical: 0) {
                 HStack {
-                    Text("保护窗口").font(.system(size: 16, weight: .semibold))
+                    Text("保护窗口").scaledFont(size: 16, weight: .semibold)
                     Spacer()
                     MoreLabel(title: "\(store.configInt("manual_run_blackout_minutes", fallback: 30)) 分")
                 }
@@ -189,7 +189,7 @@ struct DailyTab: View {
                 VStack(alignment: .leading, spacing: 4) {
                     MoreLabel(title: "默认关卡", color: Palette.blue)
                     Text(defaultStageText)
-                        .font(.system(size: 30, weight: .heavy))
+                        .scaledFont(size: 30, weight: .heavy)
                         .monospacedDigit()
                         .lineLimit(1)
                 }
@@ -231,7 +231,7 @@ struct DailyTab: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Text("临期药")
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(Palette.orange)
                     Spacer()
                     HStack(spacing: 4) {
@@ -245,12 +245,12 @@ struct DailyTab: View {
                 }
                 HStack {
                     if value == 0 {
-                        Text("不吃").font(.system(size: 30, weight: .heavy))
+                        Text("不吃").scaledFont(size: 30, weight: .heavy)
                     } else {
                         HStack(alignment: .firstTextBaseline, spacing: 3) {
-                            Text("\(value)").font(.system(size: 30, weight: .heavy)).monospacedDigit()
+                            Text("\(value)").scaledFont(size: 30, weight: .heavy).monospacedDigit()
                             Text("天内")
-                                .font(.system(size: 15, weight: .semibold))
+                                .scaledFont(size: 15, weight: .semibold)
                                 .foregroundStyle(Palette.secondary)
                         }
                     }
@@ -279,7 +279,7 @@ struct DailyTab: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("公招")
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(Palette.pink)
                     Spacer()
                     HStack(spacing: 6) {
@@ -293,9 +293,9 @@ struct DailyTab: View {
                 }
                 HStack {
                     HStack(alignment: .firstTextBaseline, spacing: 3) {
-                        Text("\(value)").font(.system(size: 30, weight: .heavy)).monospacedDigit()
+                        Text("\(value)").scaledFont(size: 30, weight: .heavy).monospacedDigit()
                         Text("次")
-                            .font(.system(size: 15, weight: .semibold))
+                            .scaledFont(size: 15, weight: .semibold)
                             .foregroundStyle(Palette.secondary)
                     }
                     Spacer()
@@ -325,7 +325,7 @@ struct DailyTab: View {
         WCard(vertical: 8) {
             VStack(alignment: .leading, spacing: 0) {
                 Text("领奖")
-                    .font(.system(size: 15, weight: .semibold))
+                    .scaledFont(size: 15, weight: .semibold)
                     .foregroundStyle(Palette.violet)
                     .padding(.top, 4)
                 ConfigToggleRow(key: "award_orundum", title: "幸运墙")
@@ -341,7 +341,7 @@ struct DailyTab: View {
         NavigationLink(value: CreditShopRoute()) {
             WCard(vertical: 0) {
                 HStack {
-                    Text("信用商店").font(.system(size: 16, weight: .semibold))
+                    Text("信用商店").scaledFont(size: 16, weight: .semibold)
                     Spacer()
                     MoreLabel(title: store.configBool("mall_reserve_max_credit") ? "300 停买" : "")
                 }
@@ -366,7 +366,7 @@ struct ConfigToggleRow: View {
                     store.changeConfig(key, to: .bool(value), toast: "\(title)已\(value ? "打开" : "关闭")")
                 })
         )
-        .font(.system(size: 16))
+        .scaledFont(size: 16)
         .frame(minHeight: 48)
         .disabled(!store.canWrite || store.settings == nil)
     }
@@ -527,7 +527,7 @@ struct CreditShopView: View {
                 Text("—").foregroundStyle(Palette.secondary)
             } else {
                 Text(items.wrappedValue.joined(separator: "、"))
-                    .font(.system(size: 16))
+                    .scaledFont(size: 16)
             }
         } header: {
             Text(title).foregroundStyle(color)

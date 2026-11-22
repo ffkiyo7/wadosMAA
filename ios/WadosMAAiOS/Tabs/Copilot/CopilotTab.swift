@@ -108,7 +108,7 @@ struct CopilotTab: View {
                 get: { store.copilotAutoEnabled },
                 set: { value in Task { await store.setCopilotAuto(value) } })
         ) {
-            Text("自动抄作业").font(.system(size: 17, weight: .bold))
+            Text("自动抄作业").scaledFont(size: 17, weight: .bold)
         }
         .toggleStyle(.switch)
         .frame(minHeight: 44)
@@ -148,10 +148,10 @@ struct CopilotTab: View {
                         withAnimation(.snappy) { showsCleared.toggle() }
                     } label: {
                         HStack {
-                            Text("已通 \(cleared.count)").font(.system(size: 16, weight: .bold))
+                            Text("已通 \(cleared.count)").scaledFont(size: 16, weight: .bold)
                             Spacer()
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 12, weight: .bold))
+                                .scaledFont(size: 12, weight: .bold)
                                 .foregroundStyle(Palette.secondary)
                                 .rotationEffect(.degrees(showsCleared ? 90 : 0))
                         }
@@ -187,11 +187,11 @@ struct CopilotTab: View {
             }
             HStack(alignment: .firstTextBaseline) {
                 Text(tally.remaining == 0 ? "全部通关" : "还差 \(tally.remaining) 关")
-                    .font(.system(size: 30, weight: .heavy))
+                    .scaledFont(size: 30, weight: .heavy)
                 Spacer()
                 if let end = store.choices?.activity?.end {
                     Text(BeijingDay.remaining(until: end))
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(Palette.secondary)
                 }
             }
@@ -204,12 +204,12 @@ struct CopilotTab: View {
         } label: {
             VStack(alignment: .leading, spacing: 0) {
                 Text(title)
-                    .font(.system(size: 14, weight: .semibold))
+                    .scaledFont(size: 14, weight: .semibold)
                     .foregroundStyle(color)
                 HStack(alignment: .firstTextBaseline, spacing: 0) {
-                    Text("\(group.done)").font(.system(size: 24, weight: .heavy))
+                    Text("\(group.done)").scaledFont(size: 24, weight: .heavy)
                     Text("/\(group.total)")
-                        .font(.system(size: 15, weight: .semibold))
+                        .scaledFont(size: 15, weight: .semibold)
                         .foregroundStyle(Palette.secondary)
                 }
                 .monospacedDigit()
@@ -243,7 +243,7 @@ struct CopilotTab: View {
 
     private func clearedLabel(_ row: CopilotStageRow) -> some View {
         Text(row.displayCode)
-            .font(.system(size: 14, weight: .semibold))
+            .scaledFont(size: 14, weight: .semibold)
             .foregroundStyle(Palette.green)
             .lineLimit(1)
             .minimumScaleFactor(0.7)
@@ -267,11 +267,11 @@ struct CopilotTab: View {
         HStack(spacing: 10) {
             Circle().fill(row.statusColor).frame(width: 12, height: 12)
             Text(row.displayCode)
-                .font(.system(size: 16, weight: .bold))
+                .scaledFont(size: 16, weight: .bold)
                 .lineLimit(1)
             Spacer(minLength: 8)
             Text(row.statusTitle)
-                .font(.system(size: 15, weight: .semibold))
+                .scaledFont(size: 15, weight: .semibold)
                 .foregroundStyle(row.statusColor)
                 .lineLimit(1)
         }
