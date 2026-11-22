@@ -32,6 +32,7 @@ extension RemoteReceipt {
 }
 
 enum RemoteBridgeError: LocalizedError {
+    case legacyHome
     case notDeployed(String)
     case launchFailed(String)
     case timedOut([String])
@@ -40,6 +41,7 @@ enum RemoteBridgeError: LocalizedError {
     /// 界面上的一句人话；技术细节在 `diagnostic`，用「复制诊断信息」拿。
     var errorDescription: String? {
         switch self {
+        case .legacyHome: return "当前数据目录已停用，请到「设置 → 高级 → 开发者」切到线上。"
         case .notDeployed: return "Wado's MAA 还没装好，暂时用不了。"
         case .launchFailed: return "Wado's MAA 启动不了，请稍后再试。"
         case .timedOut: return "Wado's MAA 太久没有响应，请稍后再试。"
@@ -50,6 +52,7 @@ enum RemoteBridgeError: LocalizedError {
     // copy-guard: developer
     var diagnostic: String {
         switch self {
+        case .legacyHome: return "refused legacy home ~/.hermes; switch to \(RemoteConfig.liveWadosHome)"
         case let .notDeployed(path): return "maa_action.py not found: \(path)"
         case let .launchFailed(detail): return "cannot launch maa_action.py: \(detail)"
         case let .timedOut(args): return "maa_action.py \(args.joined(separator: " ")) timed out"
@@ -69,6 +72,9 @@ enum RemoteBridgeError: LocalizedError {
 enum RemoteBridge {
     /// 跑一条命令。`timeout` 默认 30 秒；`copilot preview`、`upstream status --online` 要给长一点。
     static func run(_ args: [String], timeout: TimeInterval = 30) async throws -> RemoteReceipt {
+        guard !RemoteConfig.refusesLegacyHome else {
+            throw RemoteBridgeError.recorded(.legacyHome)
+        }
         let script = RemoteConfig.actionScript.path
         guard FileManager.default.fileExists(atPath: script) else {
             throw RemoteBridgeError.recorded(.notDeployed(script))

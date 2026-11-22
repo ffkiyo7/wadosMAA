@@ -191,10 +191,10 @@ struct AdvancedSection: View {
             }
         }
         .alert("切到线上？", isPresented: $askLive) {
-            Button("切到线上", role: .destructive) { hermesHome = RemoteConfig.liveHermesHome }
+            Button("切到线上", role: .destructive) { hermesHome = RemoteConfig.liveWadosHome }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("之后的改动会写进 \(RemoteConfig.liveHermesHome)，并同步到 Discord。")
+            Text("之后的改动会写进 \(RemoteConfig.liveWadosHome)。")
         }
     }
 

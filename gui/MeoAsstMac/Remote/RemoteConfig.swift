@@ -14,9 +14,11 @@ enum RemoteConfig {
     static let liveWadosHome = "~/.wados-maa"
     static let liveHermesHome = "~/.hermes"
 
-    /// Phase 3 生产切线防回落开关：开启后代码层拒绝解析到已停用的 `~/.hermes`。
-    /// Phase 1–2 过渡期保持 `false`，切线时统一置 `true`。
-    static let disallowLegacyHermesHome = false
+    /// Phase 3 生产切线防回落开关：拒绝读写已停用的 `~/.hermes`，也不悄悄改用别的目录，
+    /// 否则回滚后 App 和旧线上会各拿一把 `run.lock`。
+    static let disallowLegacyHermesHome = true
+    /// 被拒绝时状态都从这个空目录读，界面不显示旧线上的数据。
+    private static let refusedHome = URL(fileURLWithPath: "/var/empty", isDirectory: true)
 
     static let hermesHomeKey = "RemoteHermesHome"
     static let pythonKey = "RemotePython"
@@ -30,22 +32,24 @@ enum RemoteConfig {
     }
 
     /// 解析顺序：`WADOS_MAA_HOME` → `HERMES_HOME` → 设置里填的 → 开发副本。
-    static var hermesHome: URL {
+    private static var requestedHome: URL {
         let env = ProcessInfo.processInfo.environment
-        let candidate: URL
         if let raw = env["WADOS_MAA_HOME"], !raw.isEmpty {
-            candidate = expand(raw)
+            return expand(raw)
         } else if let raw = env["HERMES_HOME"], !raw.isEmpty {
-            candidate = expand(raw)
+            return expand(raw)
         } else if let stored = UserDefaults.standard.string(forKey: hermesHomeKey), !stored.isEmpty {
-            candidate = expand(stored)
-        } else {
-            candidate = expand(developmentHermesHome)
+            return expand(stored)
         }
-        if disallowLegacyHermesHome && isLegacyHermesHome(candidate) {
-            return expand(liveWadosHome)
-        }
-        return candidate
+        return expand(developmentHermesHome)
+    }
+
+    static var refusesLegacyHome: Bool {
+        disallowLegacyHermesHome && isLegacyHermesHome(requestedHome)
+    }
+
+    static var hermesHome: URL {
+        refusesLegacyHome ? refusedHome : requestedHome
     }
 
     static func isLegacyHermesHome(_ url: URL) -> Bool {
