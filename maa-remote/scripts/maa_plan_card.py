@@ -1088,6 +1088,7 @@ def copilot_card_stages(
             {
                 "stage": stage,
                 "code": resolved[1] if resolved else "",
+                "category": maa_copilot.stage_category(stage),
                 "materials": (drops.get(stage) or {}).get("materials") or [],
                 "nav": status not in {"no_nav", "not_indexed"},
                 "reason": text if status in {"no_nav", "not_indexed"} else "",

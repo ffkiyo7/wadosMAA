@@ -216,6 +216,8 @@ class DaemonAPITests(unittest.TestCase):
                     "activity",
                     "scheduler",
                     "resign",
+                    "sanity",
+                    "notify",
                     "errors",
                 },
             )
@@ -223,6 +225,8 @@ class DaemonAPITests(unittest.TestCase):
             self.assertEqual(snap["progress"]["run_id"], run_id)
             self.assertTrue(snap["copilot_auto_paused"])
             self.assertEqual(snap["resign"]["status"], "ok")
+            self.assertIsNone(snap["sanity"])
+            self.assertEqual(snap["notify"], {"configured": False})
 
             # GET /api/v1/choices, /copilot/stages, /config, /defaults
             self.assertEqual(self._json("GET", "/api/v1/choices")[1], {"choices": [{"stage": "1-7"}]})
@@ -241,6 +245,29 @@ class DaemonAPITests(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertFalse(page2["has_more"])
         self.assertEqual([item["id"] for item in page2["items"]], [old_id])
+
+        # GET /api/v1/history?kind=daily|copilot 过滤后计算 total 和 has_more
+        st, daily_p1 = self._json("GET", "/api/v1/history?kind=daily&limit=1&offset=0")
+        self.assertEqual(st, 200)
+        self.assertEqual(daily_p1["total"], 2)
+        self.assertTrue(daily_p1["has_more"])
+        self.assertEqual([item["id"] for item in daily_p1["items"]], [run_id])
+
+        st, daily_p2 = self._json("GET", "/api/v1/history?kind=daily&limit=1&offset=1")
+        self.assertEqual(st, 200)
+        self.assertEqual(daily_p2["total"], 2)
+        self.assertFalse(daily_p2["has_more"])
+        self.assertEqual([item["id"] for item in daily_p2["items"]], [old_id])
+
+        st, cop_only = self._json("GET", "/api/v1/history?kind=copilot&limit=10&offset=0")
+        self.assertEqual(st, 200)
+        self.assertEqual(cop_only["total"], 1)
+        self.assertFalse(cop_only["has_more"])
+        self.assertEqual([item["id"] for item in cop_only["items"]], [cop_id])
+
+        st, bad_kind = self._json("GET", "/api/v1/history?kind=unknown")
+        self.assertEqual(st, 400)
+        self.assertEqual(bad_kind["code"], "bad_args")
 
         # GET /api/v1/runs/<id>/report（日常 + 抄作业 + 旧命名 + 404）
         self.assertEqual(self._json("GET", f"/api/v1/runs/{run_id}/report")[1]["title"], "日常战报")
@@ -519,6 +546,108 @@ class DaemonAPITests(unittest.TestCase):
             },
         )
         self.assertIsNone(self.ctx._read_active_progress(None, last_run))
+
+    def test_snapshot_sanity_returns_estimated_fields_and_null_when_missing(self) -> None:
+        from datetime import datetime
+
+        base_dt = datetime(2026, 11, 21, 10, 0, 0, tzinfo=maa_common.BEIJING)
+        now_dt = datetime(2026, 11, 21, 11, 0, 0, tzinfo=maa_common.BEIJING)
+        self.ctx.clock = lambda: now_dt
+
+        with patch.object(maa_common, "run_lock_holder", return_value=None), \
+                patch.object(maa_common, "load_config", return_value={"schema_version": 1}), \
+                patch.object(maa_action, "plan_today", return_value=(True, "ok", {"date": "2026-11-21", "sessions": []})), \
+                patch.object(maa_schedule, "schedule_report", return_value={"backend": "daemon", "sessions": {}}), \
+                patch.object(maa_upstream, "status", return_value={"verdict": "ok"}), \
+                patch.object(maa_copilot, "auto_pause_state", return_value=None):
+            # 1. 无 roster.json 时 sanity 为 None
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertIsNone(snap["sanity"])
+
+            # 2. 写入有效 roster.json（10:00 测得 80/208，11:00 应估算为 90/208）
+            ts = int(base_dt.timestamp())
+            roster_path = self.state_dir / "copilot" / "roster.json"
+            maa_common.atomic_write_json(
+                roster_path,
+                {
+                    "fetched_at": base_dt.isoformat(),
+                    "source": "skland",
+                    "chars": {},
+                    "sanity": {
+                        "current": 80,
+                        "max": 208,
+                        "last_ap_add_at": ts,
+                        "server_current_at": ts,
+                    },
+                },
+            )
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertEqual(
+                snap["sanity"],
+                {
+                    "current": 80,
+                    "max": 208,
+                    "measured_at": base_dt.isoformat(),
+                    "estimated_now": 90,
+                },
+            )
+
+            # 3. 写入更新的 operbox 快照（无 sanity）→ 返回 None
+            maa_common.atomic_write_json(
+                self.state_dir / "copilot" / "roster-operbox.json",
+                {
+                    "fetched_at": now_dt.isoformat(),
+                    "source": "operbox",
+                    "chars": {},
+                },
+            )
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertIsNone(snap["sanity"])
+
+    def test_snapshot_notify_configured_flag_never_leaks_secrets(self) -> None:
+        secret_device = "SUPER_SECRET_BARK_DEVICE_KEY_999"
+        secret_aes = "0123456789abcdef0123456789abcdef"  # 32 bytes
+
+        with patch.object(maa_common, "run_lock_holder", return_value=None), \
+                patch.object(maa_common, "load_config", return_value={"schema_version": 1}), \
+                patch.object(maa_action, "plan_today", return_value=(True, "ok", {"date": "2026-11-21", "sessions": []})), \
+                patch.object(maa_schedule, "schedule_report", return_value={"backend": "daemon", "sessions": {}}), \
+                patch.object(maa_upstream, "status", return_value={"verdict": "ok"}), \
+                patch.object(maa_copilot, "auto_pause_state", return_value=None):
+            # 1. 未配置 → False
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertEqual(snap["notify"], {"configured": False})
+
+            # 2. 配置 bark 但缺 aes key → False
+            maa_common.atomic_write_json(self.daemon_dir / "daemon.json", {"notify_backend": "bark"})
+            maa_tls.merge_secrets(self.secrets_path, {"bark_device_key": secret_device})
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertEqual(snap["notify"], {"configured": False})
+
+            # 3. 补齐 32 字节 aes key → True，且绝不泄露任何密钥
+            maa_tls.merge_secrets(self.secrets_path, {"bark_aes_key": secret_aes})
+            st, _ct, raw = self._req("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            text = raw.decode("utf-8")
+            snap = json.loads(text)
+            self.assertEqual(snap["notify"], {"configured": True})
+            self.assertEqual(set(snap["notify"]), {"configured"})
+            self.assertNotIn(secret_device, text)
+            self.assertNotIn(secret_aes, text)
+            self.assertNotIn("bark_device_key", text)
+            self.assertNotIn("bark_aes_key", text)
+            self.assertNotIn("full_token_sha256", text)
+
+            # 4. backend 切回 none → False
+            maa_common.atomic_write_json(self.daemon_dir / "daemon.json", {"notify_backend": "none"})
+            st, snap = self._json("GET", "/api/v1/snapshot")
+            self.assertEqual(st, 200)
+            self.assertEqual(snap["notify"], {"configured": False})
 
 
 if __name__ == "__main__":

@@ -52,6 +52,24 @@ def load_notify_secrets() -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def is_configured(
+    *,
+    config: Mapping[str, Any] | None = None,
+    secret_map: Mapping[str, Any] | None = None,
+) -> bool:
+    """判断通知出口是否已配置完整（仅返回布尔值，绝不返回任何密钥）。"""
+    cfg = load_notify_config() if config is None else config
+    backend = str(cfg.get("notify_backend") or "none").strip().lower()
+    if backend != "bark":
+        return False
+    sec = load_notify_secrets() if secret_map is None else secret_map
+    device_key = str(sec.get("bark_device_key") or "").strip()
+    aes_key = str(sec.get("bark_aes_key") or "").strip()
+    if not device_key or not aes_key:
+        return False
+    return len(aes_key.encode("utf-8")) in (16, 32)
+
+
 def encrypt_payload(
     plaintext: str,
     key: str,

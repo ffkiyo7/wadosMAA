@@ -1005,9 +1005,11 @@ class CopilotProgressFile:
             self.steps[cur_idx]["finished_at"] = None
         self.write()
 
-    def finish_stage(self, stage: str, mode: str, outcome: str) -> None:
+    def finish_stage(self, stage: str, mode: str, outcome: str) -> tuple[str | None, str | None]:
+        started_at: str | None = None
+        finished_at: str | None = None
         if self.final:
-            return
+            return started_at, finished_at
         idx = self._step_index(stage, mode)
         if idx is not None:
             stamp = now_beijing().isoformat()
@@ -1015,8 +1017,14 @@ class CopilotProgressFile:
             self.steps[idx]["state"] = mapped
             if mapped != "skipped":
                 self.steps[idx]["started_at"] = self.steps[idx]["started_at"] or stamp
-                self.steps[idx]["finished_at"] = stamp
+                self.steps[idx]["finished_at"] = self.steps[idx]["finished_at"] or stamp
+            else:
+                self.steps[idx]["started_at"] = None
+                self.steps[idx]["finished_at"] = None
+            started_at = self.steps[idx]["started_at"]
+            finished_at = self.steps[idx]["finished_at"]
         self.write()
+        return started_at, finished_at
 
     def note(self, text: str) -> None:
         if text:
@@ -1308,19 +1316,31 @@ def _batch_run_locked(
                 if mode == "raid" and not raid_on:
                     # 最后一道防线：条目可能是开关关掉**之前**排的（轮次落盘后配置改了、
                     # 手动轮排在前面），照跑会打普通难度却记成突袭通关。宁可什么都不做。
+                    started_at, finished_at = progress.finish_stage(stage, mode, "skipped")
                     results.append(
-                        {"stage": stage, "mode": mode, "outcome": "skipped",
-                         "detail": RAID_DISABLED_NOTICE}
+                        {
+                            "stage": stage,
+                            "mode": mode,
+                            "outcome": "skipped",
+                            "detail": RAID_DISABLED_NOTICE,
+                            "started_at": started_at,
+                            "finished_at": finished_at,
+                        }
                     )
-                    progress.finish_stage(stage, mode, "skipped")
                     continue
                 if stage in failed_stages:
                     # 普通没过就别去撞突袭：突袭是同一关再打一遍，普通没通它根本没解锁。
+                    started_at, finished_at = progress.finish_stage(stage, mode, "skipped")
                     results.append(
-                        {"stage": stage, "mode": mode, "outcome": "skipped",
-                         "detail": "同一关的普通模式未通过"}
+                        {
+                            "stage": stage,
+                            "mode": mode,
+                            "outcome": "skipped",
+                            "detail": "同一关的普通模式未通过",
+                            "started_at": started_at,
+                            "finished_at": finished_at,
+                        }
                     )
-                    progress.finish_stage(stage, mode, "skipped")
                     continue
                 if auto_round and maa_copilot.auto_pause_state():
                     stop_reason = "自动作业已暂停"
@@ -1355,10 +1375,17 @@ def _batch_run_locked(
                     log_name=log_path.name,
                 )
                 maa_copilot.save_ledger(ledger, ledger_file)
+                started_at, finished_at = progress.finish_stage(stage, mode, verdict)
                 results.append(
-                    {"stage": stage, "mode": mode, "outcome": verdict, "detail": detail}
+                    {
+                        "stage": stage,
+                        "mode": mode,
+                        "outcome": verdict,
+                        "detail": detail,
+                        "started_at": started_at,
+                        "finished_at": finished_at,
+                    }
                 )
-                progress.finish_stage(stage, mode, verdict)
                 if verdict == "won":
                     continue
                 # 突袭没过 → 这一关不算通关（D7），下一轮只排它剩下的模式。
@@ -1908,22 +1935,54 @@ def _run_activity_round(
     )
 
     def skip(entry: dict[str, Any], detail: str) -> None:
-        results.append({"stage": entry.get("stage"), "mode": entry.get("mode"),
-                        "outcome": "skipped", "detail": detail})
+        started_at: str | None = None
+        finished_at: str | None = None
         if progress is not None:
-            progress.finish_stage(str(entry.get("stage") or ""), str(entry.get("mode") or "normal"), "skipped")
+            started_at, finished_at = progress.finish_stage(
+                str(entry.get("stage") or ""), str(entry.get("mode") or "normal"), "skipped"
+            )
+        results.append(
+            {
+                "stage": entry.get("stage"),
+                "mode": entry.get("mode"),
+                "outcome": "skipped",
+                "detail": detail,
+                "started_at": started_at,
+                "finished_at": finished_at,
+            }
+        )
 
-    def record(entry: dict[str, Any], verdict: str, detail: str) -> None:
+    def record(
+        entry: dict[str, Any],
+        verdict: str,
+        detail: str,
+        *,
+        fallback_started_at: str | None = None,
+    ) -> None:
+        stage = str(entry.get("stage") or "")
+        mode = str(entry.get("mode") or "normal")
         maa_copilot.record_copilot_attempt(
-            ledger, str(entry.get("stage") or ""), str(entry.get("mode") or "normal"),
+            ledger, stage, mode,
             outcome=verdict, op=int((entry.get("candidate") or {}).get("id") or 0),
             detail=detail, log_name=log_path.name,
         )
         maa_copilot.save_ledger(ledger, ledger_file)
-        results.append({"stage": entry.get("stage"), "mode": entry.get("mode"),
-                        "outcome": verdict, "detail": detail})
         if progress is not None:
-            progress.finish_stage(str(entry.get("stage") or ""), str(entry.get("mode") or "normal"), verdict)
+            started_at, finished_at = progress.finish_stage(stage, mode, verdict)
+        else:
+            stamp = now_beijing().isoformat()
+            started_at = fallback_started_at or stamp
+            finished_at = stamp
+        results.append(
+            {
+                "stage": entry.get("stage"),
+                "mode": entry.get("mode"),
+                "outcome": verdict,
+                "detail": detail,
+                "started_at": started_at,
+                "finished_at": finished_at,
+            }
+        )
 
     raid_on = maa_clearing.raid_enabled(config)
     runnable = []
@@ -1993,6 +2052,7 @@ def _run_activity_round(
                     skip(entry, detail)
                 stop_reason = detail
             else:
+                batch_started_at = now_beijing().isoformat()
                 if progress is not None and items:
                     first = items[0][0]
                     progress.start_stage(str(first.get("stage") or ""), str(first.get("mode") or "normal"))
@@ -2014,7 +2074,7 @@ def _run_activity_round(
                         continue
                     if verdict != "won" and not settled:
                         detail = " · ".join(p for p in (detail, settle_note) if p)[:400]
-                    record(entry, verdict, detail)
+                    record(entry, verdict, detail, fallback_started_at=batch_started_at)
                 failed = next((d for v, d in outcomes if v != "won"), None)
                 if failed is not None:
                     stop_reason = str(failed or "有一份作业没过")

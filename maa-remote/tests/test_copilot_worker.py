@@ -624,6 +624,26 @@ class CopilotBatchExecutionTests(unittest.TestCase):
         self.assertTrue(rep["ok"])
         self.assertEqual((rep["won"], rep["total"]), (2, 2))
         self.assertEqual(len(rep["results"]), 2)
+        for res_item, step in zip(rep["results"], prog["steps"]):
+            self.assertIsInstance(res_item["started_at"], str)
+            self.assertIsInstance(res_item["finished_at"], str)
+            self.assertEqual(res_item["started_at"], step["started_at"])
+            self.assertEqual(res_item["finished_at"], step["finished_at"])
+
+    def test_copilot_report_skipped_stage_has_null_timestamps(self) -> None:
+        """跳过的关卡（如普通失败后的突袭）在 report.results 中 started_at/finished_at 为 None。"""
+        entries = [self._entry("SR-5", mode="normal"), self._entry("SR-5", mode="raid")]
+        result = self._run(entries, lambda *a: ("failed", "翻车"))
+        rep = result.report_file
+        self.assertIsNotNone(rep)
+        self.assertEqual(len(rep["results"]), 2)
+        first, second = rep["results"]
+        self.assertEqual(first["outcome"], "failed")
+        self.assertIsInstance(first["started_at"], str)
+        self.assertIsInstance(first["finished_at"], str)
+        self.assertEqual(second["outcome"], "skipped")
+        self.assertIsNone(second["started_at"])
+        self.assertIsNone(second["finished_at"])
 
     def test_copilot_progress_advance_list_stage_tracks_live_items(self) -> None:
         """多作业单进程模式下，CopilotListLoadTaskFileSuccess 推进逐关实时进度。"""
@@ -1666,6 +1686,41 @@ class CopilotCardTests(unittest.TestCase):
         self.assertNotIn(by_stage["SR-8"]["status"], {"cleared", "raid_pending"})
         # 记账里有记录的关可以撤销。
         self.assertTrue(by_stage["SR-5"]["ledger_cleared"])
+        # category 区分普通 / EX / S
+        self.assertEqual(by_stage["SR-1"]["category"], "normal")
+        self.assertEqual(by_stage["SR-EX-1"]["category"], "ex")
+
+    def test_copilot_card_stages_classifies_normal_ex_and_s_categories(self) -> None:
+        index = {
+            "codes": {
+                "SR-1": "act54side_01",
+                "SR-EX-1": "act54side_ex01",
+                "SR-S-1": "act54side_s01",
+            },
+            "ids": {
+                "act54side_01": "SR-1",
+                "act54side_ex01": "SR-EX-1",
+                "act54side_s01": "SR-S-1",
+            },
+        }
+        maa_common.atomic_write_json(self.watch, {"activity_key": SR_KEY})
+        with patch.object(maa_plan_card, "WATCH_PATH", self.watch), \
+             patch.object(maa_copilot, "SEARCHES_DIR", self.searches), \
+             patch.object(maa_copilot, "load_stage_index", return_value=index), \
+             patch.object(maa_copilot, "load_ledger", return_value={"stages": {}}), \
+             patch.object(maa_copilot, "load_roster", return_value=None), \
+             patch("maa_gamedata.load_layout", return_value=_helpers.SR_LAYOUT), \
+             _nav_patch({"SR-1", "SR-EX-1", "SR-S-1"}), \
+             patch.object(maa_plan_card, "stage_drops", return_value={}):
+            rows, in_activity = maa_plan_card.copilot_card_stages(RAID_ON)
+        self.assertTrue(in_activity)
+        self.assertEqual(
+            [(row["stage"], row["category"]) for row in rows],
+            [("SR-1", "normal"), ("SR-EX-1", "ex"), ("SR-S-1", "s")],
+        )
+        # 非活动资源本/主线归为 normal
+        self.assertEqual(maa_copilot.stage_category("CE-6"), "normal")
+        self.assertEqual(maa_copilot.stage_category("1-7"), "normal")
 
     def test_with_the_raid_switch_off_a_normal_clear_says_so_on_the_card(self) -> None:
         """开关关掉时 ✅ 只代表普通难度打过了，卡上必须写明白，不能让人误以为突袭也通了。"""

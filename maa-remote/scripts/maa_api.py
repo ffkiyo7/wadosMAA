@@ -686,6 +686,46 @@ class APIContext:
         raw = maa_common.load_json(self.state_dir / "activity_watch.json", None)
         return raw if isinstance(raw, dict) and raw else None
 
+    def _read_sanity(self) -> dict[str, Any] | None:
+        copilot_dir = self.state_dir / "copilot"
+        roster = (
+            maa_copilot.load_roster()
+            if self.state_dir == maa_common.STATE_DIR
+            else maa_copilot.load_roster(copilot_dir=copilot_dir)
+        )
+        if not isinstance(roster, dict):
+            return None
+        sanity_doc = roster.get("sanity")
+        if not isinstance(sanity_doc, dict):
+            return None
+        now = self.clock()
+        estimated_now = maa_copilot.estimated_sanity(sanity_doc, at=now)
+        if estimated_now is None:
+            return None
+        try:
+            maximum = int(sanity_doc["max"])
+            observed = int(sanity_doc["server_current_at"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if maximum <= 0 or observed <= 0:
+            return None
+        observed_dt = datetime.fromtimestamp(observed, tz=maa_common.BEIJING)
+        current_at_measured = maa_copilot.estimated_sanity(sanity_doc, at=observed_dt)
+        if current_at_measured is None:
+            return None
+        return {
+            "current": current_at_measured,
+            "max": maximum,
+            "measured_at": observed_dt.isoformat(),
+            "estimated_now": estimated_now,
+        }
+
+    def _read_notify(self) -> dict[str, bool]:
+        raw_cfg = maa_common.load_json(self.daemon_dir / "daemon.json", {})
+        cfg = raw_cfg if isinstance(raw_cfg, dict) else {}
+        sec = self.load_secrets()
+        return {"configured": maa_notify.is_configured(config=cfg, secret_map=sec)}
+
     def build_snapshot(self) -> dict[str, Any]:
         """`GET /api/v1/snapshot` 首屏聚合快照（SPEC §5.1）。
 
@@ -725,6 +765,8 @@ class APIContext:
         activity = safe("activity", self._read_activity)
         scheduler = safe("scheduler", self._read_scheduler)
         resign = safe("resign", self._read_resign)
+        sanity = safe("sanity", self._read_sanity)
+        notify = safe("notify", self._read_notify)
 
         return {
             "lock": lock,
@@ -737,6 +779,8 @@ class APIContext:
             "activity": activity,
             "scheduler": scheduler,
             "resign": resign,
+            "sanity": sanity,
+            "notify": notify,
             "errors": errors,
         }
 
@@ -761,10 +805,12 @@ class APIContext:
         capture("resign", self._read_resign)
         return out
 
-    def read_history(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+    def read_history(self, *, limit: int = 50, offset: int = 0, kind: str | None = None) -> dict[str, Any]:
         clamped_limit = max(1, min(200, limit))
         clamped_offset = max(0, offset)
         rows = maa_common.read_run_index(self.runs_dir)
+        if kind is not None:
+            rows = [row for row in rows if row.get("kind") == kind]
         rows.reverse()  # 倒序：最新在前
         total = len(rows)
         items = rows[clamped_offset : clamped_offset + clamped_limit]
@@ -1149,7 +1195,14 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
             except ValueError:
                 self._send_error_json(HTTPStatus.BAD_REQUEST, "bad_args", "limit 和 offset 必须是整数。")
                 return
-            self._send_json(HTTPStatus.OK, self.ctx.read_history(limit=limit, offset=offset))
+            raw_kind = query.get("kind", [""])[0].strip().lower()
+            if raw_kind and raw_kind not in ("daily", "copilot"):
+                self._send_error_json(HTTPStatus.BAD_REQUEST, "bad_args", "kind 仅支持 daily 或 copilot。")
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                self.ctx.read_history(limit=limit, offset=offset, kind=raw_kind or None),
+            )
             return
 
         # /api/v1/runs/<id>/(report|screenshot|log)
