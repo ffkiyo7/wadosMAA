@@ -181,17 +181,20 @@ struct CopilotPreviewView: View {
                         launchLabel(store.activeRun.map { "\($0.title)运行中" } ?? "确认开打", enabled: canLaunch)
                     }
                     .disabled(!canLaunch)
+                    .confirmationDialog(
+                        "开打 \(preview.stage)？", isPresented: $isConfirming, titleVisibility: .visible,
+                        presenting: selected
+                    ) { candidate in
+                        Button("开打") { launch(token: preview.token, candidate: candidate) }
+                        Button("取消", role: .cancel) {}
+                    } message: { candidate in
+                        Text("作业：\(candidate.title ?? "#\(candidate.id)")")
+                    }
                 }
             }
             .buttonStyle(.plain)
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-        }
-        .alert("开打 \(preview.stage)？", isPresented: $isConfirming, presenting: selected) { candidate in
-            Button("开打") { launch(token: preview.token, candidate: candidate) }
-            Button("取消", role: .cancel) {}
-        } message: { candidate in
-            Text("作业：\(candidate.title ?? "#\(candidate.id)")")
         }
     }
 

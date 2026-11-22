@@ -84,21 +84,6 @@ struct StartRunSheet: View {
                     if let picked { stage = picked }
                 }
             }
-            .alert("现在开一场？", isPresented: $isConfirming) {
-                Button("开始") { start(force: false) }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("\(stage) · 本次 \(enabledCount) 个环节")
-            }
-            .alert(
-                forceTitle ?? "",
-                isPresented: Binding(get: { forceTitle != nil }, set: { if !$0 { forceTitle = nil } })
-            ) {
-                Button("仍要开始", role: .destructive) { start(force: true) }
-                Button("取消", role: .cancel) {}
-            } message: {
-                Text("现在开始会占用这段时间")
-            }
         }
         .presentationDetents([.large])
     }
@@ -172,11 +157,8 @@ struct StartRunSheet: View {
     private var startButton: some View {
         Button {
             let blackout = store.choices?.blackout ?? ""
-            if blackout.isEmpty {
-                isConfirming = true
-            } else {
-                forceTitle = blackout
-            }
+            forceTitle = blackout.isEmpty ? nil : blackout
+            isConfirming = true
         } label: {
             Group {
                 if isStarting {
@@ -194,6 +176,16 @@ struct StartRunSheet: View {
         }
         .buttonStyle(.plain)
         .disabled(!canStart)
+        .confirmationDialog(forceTitle ?? "现在开一场？", isPresented: $isConfirming, titleVisibility: .visible) {
+            if forceTitle == nil {
+                Button("开始") { start(force: false) }
+            } else {
+                Button("仍要开始", role: .destructive) { start(force: true) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text(forceTitle == nil ? "\(stage) · 本次 \(enabledCount) 个环节" : "现在开始会占用这段时间")
+        }
     }
 
     private func setUp() {
@@ -218,7 +210,9 @@ struct StartRunSheet: View {
             isStarting = false
             switch outcome {
             case .started: dismiss()
-            case let .needsForce(message): forceTitle = message.isEmpty ? "定时场快开始了" : message
+            case let .needsForce(message):
+                forceTitle = message.isEmpty ? "定时场快开始了" : message
+                isConfirming = true
             case .failed: break
             }
         }

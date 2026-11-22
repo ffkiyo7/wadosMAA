@@ -24,19 +24,6 @@ struct RunSheet: View {
         .presentationDetents([.medium, .large], selection: $detent)
         .presentationDragIndicator(.visible)
         .alert(
-            store.activeRun?.stopTitle ?? "",
-            isPresented: $store.isStopConfirmationPresented
-        ) {
-            Button("继续运行", role: .cancel) {}
-            Button("停止", role: .destructive) {
-                Task { await store.confirmStop() }
-            }
-        } message: {
-            if let message = store.activeRun?.stopMessage, !message.isEmpty {
-                Text(message)
-            }
-        }
-        .alert(
             "运行已变化",
             isPresented: Binding(
                 get: { store.runChangedNotice != nil },
@@ -88,7 +75,8 @@ struct RunSheet: View {
     }
 
     private var stopButton: some View {
-        Button {
+        @Bindable var store = store
+        return Button {
             store.requestStop()
         } label: {
             Group {
@@ -105,6 +93,22 @@ struct RunSheet: View {
         .buttonStyle(.plain)
         .disabled(!store.canWrite || store.isStopping)
         .opacity(store.canWrite ? 1 : 0.4)
+        .confirmationDialog(
+            store.activeRun?.stopTitle ?? "",
+            isPresented: $store.isStopConfirmationPresented,
+            titleVisibility: .visible
+        ) {
+            Button("停止", role: .destructive) {
+                Task { await store.confirmStop() }
+            }
+            Button("继续运行", role: .cancel) {}
+        } message: {
+            if let message = store.activeRun?.stopMessage, !message.isEmpty {
+                Text(message)
+            }
+        }
+        // 这一场不能再停时按钮会消失，别把待确认状态留给下一场。
+        .onDisappear { store.isStopConfirmationPresented = false }
     }
 }
 
