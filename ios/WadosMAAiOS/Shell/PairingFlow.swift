@@ -27,6 +27,30 @@ struct PairingDraft: Equatable {
         token = payload.fullToken ?? ""
     }
 
+    init(config: ConnectionConfig, credentials: ConnectionCredentials?) {
+        lan = config.lanURL.absoluteString
+        remote = config.remoteURL.absoluteString
+        primaryPin = config.primaryPin
+        backupPin = config.backupPin
+        token = credentials?.token ?? ""
+        cfAccessClientId = credentials?.cfAccessClientId ?? ""
+        cfAccessClientSecret = credentials?.cfAccessClientSecret ?? ""
+    }
+
+    /// 扫到同一台 Mac 时保留码里没有的项；地址或指纹变了就不带，避免把旧凭据发给别的机器。
+    func merging(_ payload: PairingPayload, saved: ConnectionConfig?) -> PairingDraft {
+        var next = PairingDraft(payload: payload)
+        guard let saved, Self.httpsURL(payload.lanURL.absoluteString) == saved.lanURL,
+            Self.httpsURL(payload.remoteURL.absoluteString) == saved.remoteURL,
+            saved.pins.contains(payload.spkiSHA256)
+        else { return next }
+        if next.token.isEmpty { next.token = token }
+        next.backupPin = backupPin
+        next.cfAccessClientId = cfAccessClientId
+        next.cfAccessClientSecret = cfAccessClientSecret
+        return next
+    }
+
     var config: ConnectionConfig? {
         guard let lanURL = Self.httpsURL(lan), let remoteURL = Self.httpsURL(remote) else { return nil }
         let primary = primaryPin.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -70,6 +94,8 @@ struct PairingFlow: View {
     }
 
     var isSheet = false
+    /// 从连接详情进入：直接编辑当前配置。
+    var opensEditor = false
 
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -78,27 +104,39 @@ struct PairingFlow: View {
     @State private var isTesting = false
     @State private var testResult: Result<ProbeResult, TransportFailure>?
     @State private var saveFailed = false
+    @State private var didPrefill = false
 
     var body: some View {
         NavigationStack(path: $path) {
-            landing
-                .navigationDestination(for: Route.self) { route in
-                    switch route {
-                    case .scan: scanPage
-                    case .manual: manualPage
-                    case .result: resultPage
+            Group {
+                if opensEditor { manualPage } else { landing }
+            }
+            .navigationDestination(for: Route.self) { route in
+                switch route {
+                case .scan: scanPage
+                case .manual: manualPage
+                case .result: resultPage
+                }
+            }
+            .toolbar {
+                if isSheet {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") { dismiss() }
                     }
                 }
-                .toolbar {
-                    if isSheet {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button("取消") { dismiss() }
-                        }
-                    }
-                }
+            }
         }
         .alert("没能保存到钥匙串", isPresented: $saveFailed) {
             Button("好", role: .cancel) {}
+        }
+        .onAppear(perform: prefill)
+    }
+
+    private func prefill() {
+        guard !didPrefill else { return }
+        didPrefill = true
+        if let saved = store.pairedConfig {
+            draft = PairingDraft(config: saved, credentials: ConnectionCredentials.load())
         }
     }
 
@@ -151,7 +189,7 @@ struct PairingFlow: View {
     private var scanPage: some View {
         QRScanner { text in
             guard let payload = PairingPayload(text: text) else { return false }
-            draft = PairingDraft(payload: payload)
+            draft = draft.merging(payload, saved: store.pairedConfig)
             if draft.isValid {
                 path = [.result]
                 Task { await runTest() }
@@ -193,7 +231,7 @@ struct PairingFlow: View {
                     .disabled(!draft.isValid)
             }
         }
-        .navigationTitle("手工填写")
+        .navigationTitle(opensEditor ? "编辑连接" : "手工填写")
         .navigationBarTitleDisplayMode(.inline)
     }
 
@@ -278,6 +316,7 @@ struct PairingFlow: View {
             return
         }
         store.isPairingPresented = false
+        if isSheet { dismiss() }
     }
 }
 

@@ -289,6 +289,7 @@ extension UpstreamStatus {
 
 private struct ConnectionDetailView: View {
     @Environment(AppStore.self) private var store
+    @State private var isEditing = false
 
     var body: some View {
         Form {
@@ -329,6 +330,16 @@ private struct ConnectionDetailView: View {
         }
         .navigationTitle("连接")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if store.pairedConfig != nil {
+                ToolbarItem(placement: .primaryAction) {
+                    Button("编辑") { isEditing = true }
+                }
+            }
+        }
+        .sheet(isPresented: $isEditing) {
+            PairingFlow(isSheet: true, opensEditor: true)
+        }
     }
 
     private func mask(_ pin: String?) -> String {

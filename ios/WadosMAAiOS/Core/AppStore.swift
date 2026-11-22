@@ -292,6 +292,14 @@ struct RunChangedNotice: Identifiable, Equatable {
 
     // MARK: - 配对
 
+    /// 已保存的真实连接；演示数据不算，避免把钥匙串里的凭据填给演示地址。
+    var pairedConfig: ConnectionConfig? {
+        #if DEBUG
+        if demoScenario != nil { return nil }
+        #endif
+        return config
+    }
+
     func completePairing(config: ConnectionConfig, credentials: ConnectionCredentials) -> Bool {
         guard credentials.save() else { return false }
         config.save()
