@@ -110,6 +110,18 @@ import Testing
         #expect(!unknown)
     }
 
+    @Test func sseUpdatesSchedule() throws {
+        var snapshot = RemoteSnapshot()
+        let updated = snapshot.apply(
+            SSEEvent(
+                name: "schedule",
+                data: #"{"timezone":"Asia/Shanghai","sessions":{"am":{"time":"08:30","enabled":true,"plan_card_time":"08:20","daily_time":"08:30","cron":{}}},"jobs":{}}"#
+            ))
+        #expect(updated)
+        #expect(snapshot.schedule?.sessions["am"]?.time == "08:30")
+        #expect(snapshot.errors["schedule"] == nil)
+    }
+
     @Test func historyPageSkipsBadRows() throws {
         let json = #"""
             {"items":[{"id":"a","phase":"am","status":"success","stage":"TL-9"},{"id":"b"},

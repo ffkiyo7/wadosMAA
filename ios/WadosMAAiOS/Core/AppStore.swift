@@ -231,7 +231,7 @@ struct RunChangedNotice: Identifiable, Equatable {
         }
     }
 
-    /// 写操作之后、或一场结束时重读：SSE 不推理智、时间表和历史。
+    /// 写操作之后、或一场结束时重读：SSE 不推理智和历史。
     func refreshSnapshot() async {
         guard let transport else { return }
         if let data = try? await transport.read("/api/v1/snapshot", query: []),

@@ -162,6 +162,7 @@ public struct RemoteSnapshot: Sendable {
         case "last_run": lastRun = value.object
         case "progress": progress = value.object.map(RunProgressFile.init(file:))
         case "today_plan": todayPlan = field(root, "today_plan", TodayPlan.self)
+        case "schedule": schedule = field(root, "schedule", ScheduleReport.self)
         case "upstream": upstream = field(root, "upstream", UpstreamStatus.self, snakeCase: true)
         case "resign": resign = field(root, "resign", ResignStatus.self)
         default: return false

@@ -286,7 +286,7 @@ API 完整复用 [DEV_GUIDE.md §12](../maa-remote/docs/DEV_GUIDE.md#L732-L864) 
 |---|---|---|
 | `GET /healthz` | 探活与双轨选择（免鉴权，不含任何账号/游戏信息） | `{ok: true, service: "wados-maa", api_version: 1, server_time: "<ISO8601>"}` |
 | `GET /api/v1/snapshot` | **首屏聚合快照**（1 次 RTT 拿齐首页全部状态） | `{lock, last_run, progress, today_plan, schedule, upstream, copilot_auto_paused, activity, scheduler, resign}` |
-| `GET /api/v1/events` | **SSE 实时推送流**（带 25s 心跳） | 推送事件：`progress`（日常与抄作业均覆盖，变化时推送）、`lock`、`last_run`、`today_plan`、`upstream`、`resign` |
+| `GET /api/v1/events` | **SSE 实时推送流**（带 25s 心跳） | 推送事件：`progress`（日常与抄作业均覆盖，变化时推送）、`lock`、`last_run`、`today_plan`、`schedule`、`upstream`、`resign` |
 | `GET /api/v1/choices` | 手动日常关卡选项、开关、冲突与当期活动 | 同 `maa_action run choices` 的 `data` |
 | `GET /api/v1/copilot/stages` | 抄作业关卡列表与通关状态 | 同 `maa_action copilot stages` 的 `data` |
 | `GET /api/v1/config` | 可调配置白名单、当前值与修改元信息 | 同 `maa_action config get` 的 `data` |

@@ -785,7 +785,7 @@ class APIContext:
         }
 
     def build_sse_state(self) -> dict[str, Any]:
-        """SSE 监听的 6 类事件状态快照（逐源隔离，单源异常不阻塞 lock/progress 等事件推送）。"""
+        """SSE 监听的 7 类事件状态快照（逐源隔离，单源异常不阻塞 lock/progress 等事件推送）。"""
         out: dict[str, Any] = {}
 
         def capture(name: str, fn: Callable[[], Any]) -> Any:
@@ -801,6 +801,7 @@ class APIContext:
         last_run = capture("last_run", self._read_last_run)
         capture("progress", lambda: self._read_active_progress(lock, last_run))
         capture("today_plan", self._read_today_plan)
+        capture("schedule", lambda: maa_schedule.schedule_report(maa_common.load_config()))
         capture("upstream", self._read_upstream)
         capture("resign", self._read_resign)
         return out

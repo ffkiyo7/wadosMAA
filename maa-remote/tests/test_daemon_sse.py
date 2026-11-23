@@ -186,6 +186,53 @@ class DaemonSSETests(unittest.TestCase):
         self.assertEqual(item[0], "lock")
         self.assertEqual(item[1]["run_id"], "2026-11-21-now-202500")
 
+    def test_schedule_change_is_pushed_once(self) -> None:
+        """另一端改了场次时间要推 `schedule`；时间没变时不能空转。"""
+        from unittest.mock import patch
+
+        import maa_common
+
+        cfg_path = self.state_dir / "config.json"
+        config: dict[str, Any] = {
+            "schema_version": 1,
+            "session_schedule": {
+                "am": {"time": "08:00", "enabled": True},
+                "pm": {"time": "22:00", "enabled": True},
+            },
+        }
+        maa_common.atomic_write_json(cfg_path, config)
+        ctx = maa_api.APIContext(
+            home_dir=self.home,
+            scripts_dir=ROOT / "scripts",
+            state_dir=self.state_dir,
+            runs_dir=self.runs_dir,
+            daemon_dir=self.daemon_dir,
+            secrets_path=self.secrets_path,
+            rescue_html_path=ROOT / "daemon" / "rescue.html",
+        )
+
+        with patch.object(maa_common, "load_config", side_effect=lambda: json.loads(cfg_path.read_text("utf-8"))), \
+                patch.object(ctx, "_read_lock", return_value=None), \
+                patch.object(ctx, "_read_last_run", return_value=None), \
+                patch.object(ctx, "_read_active_progress", return_value=None), \
+                patch.object(ctx, "_read_today_plan", return_value=None), \
+                patch.object(ctx, "_read_upstream", return_value=None), \
+                patch.object(ctx, "_read_resign", return_value=None):
+            hub = maa_api.SSEHub(ctx.build_sse_state)
+            hub._seed_initial()
+            sub = hub.subscribe()
+            self.assertEqual(hub.poll_once(), [])
+
+            config["session_schedule"]["am"]["time"] = "08:30"
+            maa_common.atomic_write_json(cfg_path, config)
+            self.assertEqual(hub.poll_once(), ["schedule"])
+            self.assertEqual(hub.poll_once(), [])
+
+        item = sub.get_nowait()
+        assert item is not None
+        self.assertEqual(item[0], "schedule")
+        self.assertEqual(item[1]["sessions"]["am"]["time"], "08:30")
+
     def test_upstream_cache_invalidates_across_game_day_0400_and_update_blocked_window(self) -> None:
         """评审【6】回归：跨北京 04:00 游戏日或进入早晚场保护窗时，_read_upstream 缓存必须失效并推新事件。"""
         from datetime import datetime
