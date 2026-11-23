@@ -76,13 +76,14 @@ struct ToastView: View {
 
 struct SkeletonBlock: View {
     var height: CGFloat
+    var isAnimated = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         RoundedRectangle(cornerRadius: 24, style: .continuous)
             .fill(Palette.card)
             .frame(height: height)
-            .phaseAnimator(reduceMotion ? [1.0] : [1.0, 0.5]) { view, opacity in
+            .phaseAnimator(isAnimated && !reduceMotion ? [1.0, 0.5] : [1.0]) { view, opacity in
                 view.opacity(opacity)
             } animation: { _ in
                 .easeInOut(duration: 0.9)

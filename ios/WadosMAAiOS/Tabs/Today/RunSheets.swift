@@ -287,6 +287,7 @@ struct ChangeStageSheet: View {
 
 /// 选关：`nil` 代表自动定关。
 struct StagePickerSheet: View {
+    @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
     let title: String
@@ -344,6 +345,7 @@ struct StagePickerSheet: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .disabled(!store.canWrite)
                     }
                 }
                 if !activityChoices.isEmpty {
@@ -364,6 +366,7 @@ struct StagePickerSheet: View {
                             StageChoiceRow(title: customStage, isSelected: false)
                         }
                         .buttonStyle(.plain)
+                        .disabled(!store.canWrite)
                     }
                 }
             }
@@ -388,6 +391,7 @@ struct StagePickerSheet: View {
                 detail: choice.description, isSelected: current == choice.stage)
         }
         .buttonStyle(.plain)
+        .disabled(!store.canWrite)
     }
 
     private func pick(_ stage: String?) {

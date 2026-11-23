@@ -22,7 +22,7 @@ struct SettingsTab: View {
                 VStack(spacing: 12) {
                     ConnectionBanner()
                     connectionCard
-                    entries
+                    entries.dimmedWhenDisconnected()
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 4)

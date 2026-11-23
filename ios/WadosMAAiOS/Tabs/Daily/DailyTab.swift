@@ -28,25 +28,28 @@ struct DailyTab: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     ConnectionBanner()
-                    if store.settings == nil, store.snapshot?.schedule == nil, store.connection == .connecting {
-                        SkeletonBlock(height: 100)
-                        SkeletonBlock(height: 56)
-                        SkeletonBlock(height: 120)
-                        SkeletonBlock(height: 150)
-                    } else {
-                        scheduleCards
-                        blackoutRow
-                        defaultStageCard
-                        tasksCard
-                        medicineCard
-                        recruitCard
-                        ConfigStepperCard(
-                            key: "annihilation_sanity", title: "剿灭预留", unit: "理智", color: Palette.red,
-                            fallback: 25, range: 0...135, step: 5)
-                        reportCard
-                        awardCard
-                        shopRow
+                    Group {
+                        if store.settings == nil, store.snapshot?.schedule == nil, !store.connection.isOnline {
+                            SkeletonBlock(height: 100, isAnimated: !store.isDisconnected)
+                            SkeletonBlock(height: 56, isAnimated: !store.isDisconnected)
+                            SkeletonBlock(height: 120, isAnimated: !store.isDisconnected)
+                            SkeletonBlock(height: 150, isAnimated: !store.isDisconnected)
+                        } else {
+                            scheduleCards
+                            blackoutRow
+                            defaultStageCard
+                            tasksCard
+                            medicineCard
+                            recruitCard
+                            ConfigStepperCard(
+                                key: "annihilation_sanity", title: "剿灭预留", unit: "理智", color: Palette.red,
+                                fallback: 25, range: 0...135, step: 5)
+                            reportCard
+                            awardCard
+                            shopRow
+                        }
                     }
+                    .dimmedWhenDisconnected()
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 4)
@@ -496,6 +499,13 @@ struct CreditShopView: View {
             await store.loadSettings()
             sync()
         }
+        .onChange(of: store.canWrite) { _, canWrite in
+            guard !canWrite else { return }
+            // 断连时退出编辑，列表退回服务端的值，避免留下没存上的改动。
+            editMode = .inactive
+            addTarget = nil
+            sync()
+        }
         .onChange(of: store.settings?.values["mall_buy_first"]) { _, _ in sync() }
         .onChange(of: store.settings?.values["mall_blacklist"]) { _, _ in sync() }
         .alert(
@@ -546,7 +556,7 @@ struct CreditShopView: View {
     private func addItem() {
         let text = newItem.trimmingCharacters(in: .whitespacesAndNewlines)
         newItem = ""
-        guard !text.isEmpty, let target = addTarget else { return }
+        guard store.canWrite, !text.isEmpty, let target = addTarget else { return }
         switch target {
         case .buy where !buyFirst.contains(text):
             buyFirst.append(text)

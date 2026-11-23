@@ -8,6 +8,21 @@
 import SwiftUI
 import WadosMAAShared
 
+extension View {
+    /// 断连时内容整体变暗，横幅和连接入口不套这个。
+    func dimmedWhenDisconnected() -> some View {
+        modifier(DisconnectedDim())
+    }
+}
+
+private struct DisconnectedDim: ViewModifier {
+    @Environment(AppStore.self) private var store
+
+    func body(content: Content) -> some View {
+        content.opacity(store.isDisconnected ? 0.5 : 1)
+    }
+}
+
 /// 放在每个 Tab 滚动内容的最顶部，随内容滚走。
 struct ConnectionBanner: View {
     @Environment(AppStore.self) private var store
@@ -44,6 +59,16 @@ struct ConnectionBanner: View {
         }
     }
 
+    /// 不是今天的数据要带上日期，否则会被当成今天的。
+    private func dataTime(_ date: Date) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = BeijingTime.zone
+        let clock = BeijingTime.clock(date)
+        guard !calendar.isDate(date, inSameDayAs: Date()) else { return clock }
+        let day = calendar.dateComponents([.month, .day], from: date)
+        return "\(day.month ?? 0)月\(day.day ?? 0)日 \(clock)"
+    }
+
     var body: some View {
         if let content {
             HStack(spacing: 12) {
@@ -55,7 +80,7 @@ struct ConnectionBanner: View {
                     Text(content.title)
                         .font(.subheadline.weight(.semibold))
                     if !store.connection.isOnline, let updated = store.lastUpdatedAt {
-                        Text("\(BeijingTime.clock(updated)) 的数据")
+                        Text("\(dataTime(updated)) 的数据")
                             .font(.caption)
                             .foregroundStyle(Palette.secondary)
                     }

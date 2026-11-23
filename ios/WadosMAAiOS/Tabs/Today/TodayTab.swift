@@ -28,29 +28,32 @@ struct TodayTab: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     ConnectionBanner()
-                    ResourceStrip()
-                    if store.hasData {
-                        chips
-                        switch selection {
-                        case .overview:
-                            TodayOverview(
-                                onOpenSession: { withAnimation(.snappy) { selection = .session } },
-                                onChangeStage: { stageTarget = StageSheetTarget(session: $0) })
-                        case .session:
-                            if let session = store.focusSession {
-                                SessionPage(
-                                    session: session,
+                    Group {
+                        ResourceStrip()
+                        if store.hasData {
+                            chips
+                            switch selection {
+                            case .overview:
+                                TodayOverview(
+                                    onOpenSession: { withAnimation(.snappy) { selection = .session } },
                                     onChangeStage: { stageTarget = StageSheetTarget(session: $0) })
+                            case .session:
+                                if let session = store.focusSession {
+                                    SessionPage(
+                                        session: session,
+                                        onChangeStage: { stageTarget = StageSheetTarget(session: $0) })
+                                }
+                            case .sanity:
+                                SanityPage()
                             }
-                        case .sanity:
-                            SanityPage()
+                        } else {
+                            SkeletonBlock(height: 62, isAnimated: !store.isDisconnected)
+                            SkeletonBlock(height: 211, isAnimated: !store.isDisconnected)
+                            SkeletonBlock(height: 209, isAnimated: !store.isDisconnected)
+                            SkeletonBlock(height: 123, isAnimated: !store.isDisconnected)
                         }
-                    } else if store.connection == .connecting {
-                        SkeletonBlock(height: 62)
-                        SkeletonBlock(height: 211)
-                        SkeletonBlock(height: 209)
-                        SkeletonBlock(height: 123)
                     }
+                    .dimmedWhenDisconnected()
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 4)

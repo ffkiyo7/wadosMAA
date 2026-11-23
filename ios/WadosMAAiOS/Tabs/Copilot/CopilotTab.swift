@@ -100,9 +100,10 @@ struct CopilotTab: View {
                 if store.hasData, store.copilotStages != nil {
                     ContentUnavailableView("现在没有活动", systemImage: "square.on.square")
                         .frame(minHeight: 420)
-                } else if store.connection == .connecting {
-                    SkeletonBlock(height: 216)
-                    SkeletonBlock(height: 320)
+                        .dimmedWhenDisconnected()
+                } else {
+                    SkeletonBlock(height: 216, isAnimated: !store.isDisconnected)
+                    SkeletonBlock(height: 320, isAnimated: !store.isDisconnected)
                 }
             }
             .padding(.horizontal, 16)
@@ -154,18 +155,20 @@ struct CopilotTab: View {
             }
             Section {
                 header(tally)
+                    .dimmedWhenDisconnected()
                     .listRowBackground(Color.clear)
                     .listRowInsets(EdgeInsets(top: 4, leading: 4, bottom: 4, trailing: 4))
                     .listRowSeparator(.hidden)
             }
             Section {
-                autoToggle
+                autoToggle.dimmedWhenDisconnected()
             }
-            .listRowBackground(Palette.card)
+            .listRowBackground(rowBackground)
             if !pending.isEmpty {
                 Section {
                     ForEach(pending) { row in
                         stageRow(row)
+                            .dimmedWhenDisconnected()
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 Button("我打过了") {
                                     Task { await store.markCopilot(stage: row.stage, cleared: true) }
@@ -175,7 +178,7 @@ struct CopilotTab: View {
                             }
                     }
                 }
-                .listRowBackground(Palette.card)
+                .listRowBackground(rowBackground)
             }
             if !cleared.isEmpty {
                 Section {
@@ -194,6 +197,7 @@ struct CopilotTab: View {
                         .contentShape(.rect)
                     }
                     .buttonStyle(.plain)
+                    .dimmedWhenDisconnected()
                     .accessibilityValue(showsCleared ? "已展开" : "已收起")
                     .id(Self.clearedHeaderID)
                     if showsCleared {
@@ -201,14 +205,19 @@ struct CopilotTab: View {
                             ForEach(cleared) { clearedCell($0) }
                         }
                         .padding(.vertical, 6)
+                        .dimmedWhenDisconnected()
                     }
                 }
-                .listRowBackground(Palette.card)
+                .listRowBackground(rowBackground)
             }
         }
         .scrollContentBackground(.hidden)
         .background(Palette.background)
         .refreshable { await store.refreshSnapshot() }
+    }
+
+    private var rowBackground: Color {
+        store.isDisconnected ? Palette.card.opacity(0.5) : Palette.card
     }
 
     private func header(_ tally: CopilotTally) -> some View {
