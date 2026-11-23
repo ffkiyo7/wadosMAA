@@ -50,7 +50,7 @@ struct ConnectionBanner: View {
         case .certificateMismatch:
             return Content(symbol: "lock.trianglebadge.exclamationmark", title: "证书不匹配", action: "查看", run: detail)
         case .tunnelDown:
-            return Content(symbol: "cloud.slash", title: "隧道不通", action: "重试", run: retry)
+            return Content(symbol: "icloud.slash", title: "隧道不通", action: "重试", run: retry)
         case .online:
             guard store.lanPinMismatch else { return nil }
             return Content(symbol: "lock.trianglebadge.exclamationmark", title: "局域网证书不匹配", action: "查看", run: detail)

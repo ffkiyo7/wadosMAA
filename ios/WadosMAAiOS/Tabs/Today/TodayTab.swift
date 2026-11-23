@@ -549,7 +549,7 @@ struct SessionControls: View {
             }
             .buttonStyle(.plain)
             .disabled(!isEditable)
-            .opacity(isEditable ? 1 : 0.45)
+            .opacity(isEditable || store.isDisconnected ? 1 : 0.45)
         }
     }
 
@@ -583,7 +583,7 @@ private struct SessionRestoreButton: View {
         }
         .buttonStyle(.plain)
         .disabled(!isEnabled)
-        .opacity(isEnabled ? 1 : 0.45)
+        .opacity(isEnabled || store.isDisconnected ? 1 : 0.45)
     }
 }
 
@@ -870,7 +870,7 @@ struct ResourceStrip: View {
                     .foregroundStyle(Palette.blue)
                     .frame(minHeight: 44)
                     .disabled(!store.canWrite || updateBlocked)
-                    .opacity(store.canWrite && !updateBlocked ? 1 : 0.45)
+                    .opacity((store.canWrite && !updateBlocked) || store.isDisconnected ? 1 : 0.45)
                 }
             }
             .padding(.horizontal, 16)
