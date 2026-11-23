@@ -168,18 +168,26 @@ extension AppStore {
         session.skip && status(of: session) == .skipped && todayRecord(for: session) == nil
     }
 
-    /// 首屏主角：在跑的 → 下一场待跑的 → 最后一场没跑成的 → 最后一场。
+    /// 首屏主角：在跑的 → 下一场待跑的 → 最后一场还能处理的 → 最后一场跑完的 → 最后一场。
+    /// 已经记成跳过的场次没有可做的事，不占主卡。
     var focusSession: TodayPlan.Session? {
         let sessions = planSessions
         if let running = sessions.first(where: { status(of: $0) == .running }) { return running }
         if let planned = sessions.first(where: { status(of: $0) == .planned }) { return planned }
-        if let open = sessions.last(where: {
-            if case .finished = status(of: $0) { return false }
-            return true
+        if let open = sessions.last(where: { session in
+            switch status(of: session) {
+            case .finished: false
+            case .skipped: canRestore(session)
+            default: true
+            }
         }) {
             return open
         }
-        return sessions.last
+        let finished = sessions.last { session in
+            if case .finished = status(of: session) { return true }
+            return false
+        }
+        return finished ?? sessions.last
     }
 
     func headline(for session: TodayPlan.Session?) -> String {

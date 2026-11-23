@@ -332,8 +332,13 @@ private struct OtherSessionCard: View {
                         }
                     }
                     Spacer(minLength: 8)
-                    SessionDial(session: session, status: status)
-                        .frame(width: 104, height: 104)
+                    if store.canRestore(session) {
+                        SessionRestoreButton(session: session, title: "恢复")
+                            .frame(width: 92)
+                    } else {
+                        SessionDial(session: session, status: status)
+                            .frame(width: 104, height: 104)
+                    }
                 }
                 if let record, record.startedAt != nil {
                     Hairline()
