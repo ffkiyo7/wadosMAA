@@ -305,13 +305,12 @@ struct RunChangedNotice: Identifiable, Equatable {
 
     // MARK: - 本机缓存
 
-    /// 锁和进度只在当下有意义：旧缓存里的「运行中」不能当真。
+    /// 锁只在当下有意义：旧缓存里的「运行中」不能当真。进度留着，已结束场次的战果要用。
     private func restoreCache() {
         guard let payload = cache?.load(), let raw = payload.snapshot, var cached = RemoteSnapshot(data: raw) else {
             return
         }
         cached.lock = nil
-        cached.progress = nil
         cachePayload = payload
         snapshot = cached
         lastUpdatedAt = payload.savedAt
@@ -347,9 +346,9 @@ struct RunChangedNotice: Identifiable, Equatable {
         cache.save(cachePayload)
     }
 
-    /// SSE 推来的变化也写回缓存里的快照原文；锁和进度恢复时会丢弃，不用存。
+    /// SSE 推来的变化也写回缓存里的快照原文；锁恢复时会丢弃，不用存。
     private func rememberEvent(_ event: SSEEvent) {
-        guard ["last_run", "today_plan", "schedule", "upstream", "resign"].contains(event.name),
+        guard ["last_run", "progress", "today_plan", "schedule", "upstream", "resign"].contains(event.name),
             let raw = cachePayload.snapshot,
             case var .object(root)? = try? JSONDecoder().decode(JSONValue.self, from: raw),
             let value = try? JSONDecoder().decode(JSONValue.self, from: Data(event.data.utf8)),
