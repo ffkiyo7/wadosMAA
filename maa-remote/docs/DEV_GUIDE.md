@@ -33,7 +33,7 @@
 
 **窗口恢复让游戏直接开在虚拟屏上**：游戏默认按「新开窗口」启动，总开在当前主屏正中，无视存着的位置（启动前挪鼠标没用）。打开 `NSQuitAlwaysKeepsWindows` 后按「恢复上次的窗口」启动，回到上次 `close_game()` 时的位置。所以 `launch_game()` 在游戏**没在跑**时先调 `ensure_window_restore()`：`defaults read` 游戏容器的偏好设置域（`game_prefs_domain()`），不是 1 就写 `-bool true`；失败只打一行 stderr。游戏在跑时不碰设置。显示器关着时的恢复还没实测。来由见 [incidents/2026-11-05-pm-screencap-failed.md](./incidents/2026-11-05-pm-screencap-failed.md)。
 
-**挪屏是兜底**：`move_to_game_display()` 用 JXA 读 `NSScreen` 找 `game_display_name`（默认 `MAA-Game`）的范围，窗口没有**整个**落在里面就调 `~/.hermes/scripts/winmove <pid> <x> <y>`（`scripts/winmove.swift`，`deploy.py` 编译，AX `kAXPositionAttribute`）挪过去居中。winmove 要调用方有**辅助功能**权限（线上是 Hermes gateway 那个 Python），没有就退出码 3、只记警告。System Events / JXA 直接设 AX 位置都不行（前者要自动化权限，后者 `AXValueCreate` 回 -25200）。
+**挪屏是兜底**：`move_to_game_display()` 用 JXA 读 `NSScreen` 找 `game_display_name`（默认 `MAA-Game`）的范围，窗口没有**整个**落在里面就调 `~/.hermes/scripts/winmove <pid> <x> <y>`（`scripts/winmove.swift`，`deploy.py` 编译，AX `kAXPositionAttribute`）挪过去居中。winmove 要调用方有**辅助功能**权限（旧线上是 Hermes gateway 那个 Python，新后端是 `wados-maa-launcher`，要在系统设置里单独授权），没有就退出码 3、只记警告。System Events / JXA 直接设 AX 位置都不行（前者要自动化权限，后者 `AXValueCreate` 回 -25200）。
 
 **侧边栏缩略图**：台前调度把窗口缩成约 144×149 的缩略图时 `kCGWindowIsOnscreen` 仍是真，`SCRN` 却回 0 字节；进程另挂着几条不在屏的 1920×30 横条和一个 500×500 空窗口。`game_window()` 只滤两边都 < 100 的横条；`window_shelved()`（在屏且宽 < `MIN_GAME_WIDTH`）认缩略图；`window_usable()` = 在屏且不是缩略图。`settle_game_window()` 不挪缩略图，激活后每 0.5 秒看一次、最多 5 秒，一回到屏上就马上挪到虚拟屏并居中；摆不回来时告警里带窗口尺寸、位置、状态和各块屏的位置（`describe_window()`）。
 

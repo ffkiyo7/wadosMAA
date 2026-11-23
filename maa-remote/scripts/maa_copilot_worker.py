@@ -1297,8 +1297,16 @@ def _batch_run_locked(
         game_touched = True
         maa_playcover.wait_for_game(config)
         # 游戏窗口必须在 MAA-Game 虚拟屏台前，否则 MaaTools 截图为空。这里没有
-        # 日常那层重试兜底，这一步更不能省。
-        maa_playcover.settle_game_window(config)
+        # 日常那层重试兜底，这一步更不能省。摆不好不阻断，但要留痕，不能悄悄开在主屏上。
+        settle_trail: list[str] = []
+        settle_warning = maa_playcover.settle_game_window(config, trail=settle_trail)
+        with log_path.open("a", encoding="utf-8") as handle:
+            for line in settle_trail:
+                handle.write(f"{line}\n")
+            if settle_warning:
+                handle.write(f"摆窗告警：{settle_warning}\n")
+        if settle_warning:
+            progress.note(f"游戏窗口没摆好，照常开始：{settle_warning}")
         env = maa_subprocess_env(config)
         env["MAA_LOG_PREFIX"] = "Never"
 

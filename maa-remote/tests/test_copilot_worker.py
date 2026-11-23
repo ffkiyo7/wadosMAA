@@ -456,7 +456,7 @@ class CopilotBatchExecutionTests(unittest.TestCase):
                 patch.object(maa_playcover, "launch_game"),
                 patch.object(maa_playcover, "wait_for_game"),
                 patch.object(maa_playcover, "verify_game_installed"),
-                patch.object(maa_playcover, "settle_game_window"),
+                patch.object(maa_playcover, "settle_game_window", return_value=""),
                 patch.object(worker, "maa_subprocess_env", return_value={}),
                 patch.object(maa_playcover, "capture_screenshot", return_value=(True, "")),
                 patch.object(maa_playcover, "close_game", return_value=[]),

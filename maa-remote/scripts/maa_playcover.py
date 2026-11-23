@@ -602,7 +602,8 @@ def move_to_game_display(config: Config, window: dict[str, Any]) -> tuple[bool, 
     )
     if result.returncode == 3:
         return False, (
-            f"游戏窗口不在 {name} 上，挪不过去：Hermes 的 Python 没有「辅助功能」权限。"
+            f"游戏窗口不在 {name} 上，挪不过去：运行 MAA 的进程"
+            "（新后端是 wados-maa-launcher）没有「辅助功能」权限。"
             "窗口留在原处，别的窗口一盖住它截图就会失败。"
         )
     if result.returncode != 0:
@@ -656,7 +657,7 @@ def front_finder() -> str:
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         return f"切到访达失败（{type(exc).__name__}）。"
     if result.returncode == 3:
-        return "切到访达失败：Hermes 的 Python 没有「辅助功能」权限。"
+        return "切到访达失败：运行 MAA 的进程（新后端是 wados-maa-launcher）没有「辅助功能」权限。"
     if result.returncode != 0:
         return f"切到访达失败：{(result.stdout or result.stderr).strip()[:120]}"
     return ""
