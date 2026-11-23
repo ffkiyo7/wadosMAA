@@ -8,15 +8,7 @@
 import SwiftUI
 import WadosMAAShared
 
-extension View {
-    /// 放在每个 Tab 的 NavigationStack 内容上：横幅固定在标题下面，不遮标题。
-    func connectionBanner() -> some View {
-        safeAreaInset(edge: .top, spacing: 0) {
-            ConnectionBanner()
-        }
-    }
-}
-
+/// 放在每个 Tab 滚动内容的最顶部，随内容滚走。
 struct ConnectionBanner: View {
     @Environment(AppStore.self) private var store
 
@@ -77,8 +69,6 @@ struct ConnectionBanner: View {
             .padding(.trailing, 10)
             .frame(minHeight: 56)
             .background(Palette.card, in: .rect(cornerRadius: 20, style: .continuous))
-            .padding(.horizontal, 16)
-            .padding(.bottom, 6)
             .accessibilityElement(children: .combine)
         }
     }

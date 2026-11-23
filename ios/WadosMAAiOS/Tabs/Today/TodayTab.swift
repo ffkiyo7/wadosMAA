@@ -27,6 +27,7 @@ struct TodayTab: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    ConnectionBanner()
                     ResourceStrip()
                     if store.hasData {
                         chips
@@ -55,7 +56,6 @@ struct TodayTab: View {
                 .padding(.top, 4)
                 .padding(.bottom, 24)
             }
-            .connectionBanner()
             .refreshable { await store.refreshSnapshot() }
             .toolbar(.hidden, for: .navigationBar)
             .navigationTitle("今天")

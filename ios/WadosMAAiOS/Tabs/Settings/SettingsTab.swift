@@ -20,6 +20,7 @@ struct SettingsTab: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 12) {
+                    ConnectionBanner()
                     connectionCard
                     entries
                 }
@@ -27,7 +28,6 @@ struct SettingsTab: View {
                 .padding(.top, 4)
                 .padding(.bottom, 24)
             }
-            .connectionBanner()
             .navigationTitle("设置")
             .navigationDestination(isPresented: $store.isConnectionDetailPresented) {
                 ConnectionDetailView()

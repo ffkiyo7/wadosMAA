@@ -73,20 +73,10 @@ struct CopilotTab: View {
             Group {
                 if let tally = store.copilotTally {
                     content(tally)
-                } else if store.hasData, store.copilotStages != nil {
-                    ContentUnavailableView("现在没有活动", systemImage: "square.on.square")
-                } else if store.connection == .connecting {
-                    VStack(spacing: 12) {
-                        SkeletonBlock(height: 216)
-                        SkeletonBlock(height: 320)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 16)
                 } else {
-                    Color.clear
+                    emptyContent
                 }
             }
-            .connectionBanner()
             .navigationTitle(store.choices?.activity?.name ?? "抄作业")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -101,6 +91,25 @@ struct CopilotTab: View {
                 CopilotRulesSheet()
             }
         }
+    }
+
+    private var emptyContent: some View {
+        ScrollView {
+            VStack(spacing: 12) {
+                ConnectionBanner()
+                if store.hasData, store.copilotStages != nil {
+                    ContentUnavailableView("现在没有活动", systemImage: "square.on.square")
+                        .frame(minHeight: 420)
+                } else if store.connection == .connecting {
+                    SkeletonBlock(height: 216)
+                    SkeletonBlock(height: 320)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+            .padding(.bottom, 24)
+        }
+        .refreshable { await store.refreshSnapshot() }
     }
 
     private var autoToggle: some View {
@@ -135,6 +144,14 @@ struct CopilotTab: View {
 
     private func stageList(_ tally: CopilotTally) -> some View {
         List {
+            if store.showsConnectionBanner {
+                Section {
+                    ConnectionBanner()
+                        .listRowBackground(Color.clear)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                }
+            }
             Section {
                 header(tally)
                     .listRowBackground(Color.clear)

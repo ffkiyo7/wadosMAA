@@ -116,6 +116,18 @@ struct RunChangedNotice: Identifiable, Equatable {
         connection.isOnline
     }
 
+    /// 真的断了；`connecting` 还在试，不算。
+    var isDisconnected: Bool {
+        switch connection {
+        case .offline, .tokenInvalid, .certificateMismatch, .tunnelDown: true
+        case .online, .connecting: false
+        }
+    }
+
+    var showsConnectionBanner: Bool {
+        isDisconnected || (connection.isOnline && lanPinMismatch)
+    }
+
     /// 抄作业角标：当期还没通的关。
     var copilotRemaining: Int {
         guard let stages = copilotStages, stages.inActivity else { return 0 }

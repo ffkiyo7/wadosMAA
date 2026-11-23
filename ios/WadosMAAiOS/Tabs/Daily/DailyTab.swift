@@ -27,6 +27,7 @@ struct DailyTab: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
+                    ConnectionBanner()
                     if store.settings == nil, store.snapshot?.schedule == nil, store.connection == .connecting {
                         SkeletonBlock(height: 100)
                         SkeletonBlock(height: 56)
@@ -51,7 +52,6 @@ struct DailyTab: View {
                 .padding(.top, 4)
                 .padding(.bottom, 24)
             }
-            .connectionBanner()
             .navigationTitle("日常")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
