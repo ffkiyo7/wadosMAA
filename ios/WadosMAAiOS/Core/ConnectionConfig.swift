@@ -35,6 +35,7 @@ struct ConnectionConfig: Codable, Equatable, Sendable {
 
     static func clear() {
         UserDefaults.standard.removeObject(forKey: defaultsKey)
+        LastDataCache.removeStored()
     }
 }
 

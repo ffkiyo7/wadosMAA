@@ -54,8 +54,10 @@ extension AppStore {
 
     private func readData(_ path: String, query: [URLQueryItem] = []) async -> Data? {
         guard let transport else { return nil }
+        let epoch = dataEpoch
         do {
-            return try await transport.read(path, query: query)
+            let data = try await transport.read(path, query: query)
+            return epoch == dataEpoch ? data : nil
         } catch TransportFailure.unauthorized {
             markTokenInvalid()
             return nil
@@ -96,6 +98,7 @@ extension AppStore {
             let value = try? JSONDecoder().decode(RunChoices.self, from: data)
         else { return }
         choices = value
+        remember(\.choices, data)
     }
 
     func startRun(stage: String, switches: [String: Bool], force: Bool) async -> StartRunOutcome {
@@ -211,11 +214,13 @@ extension AppStore {
             let value = try? JSONDecoder().decode(ConfigSnapshot.self, from: data)
         {
             settings = value
+            remember(\.config, data)
         }
         if let data = await readData("/api/v1/defaults"),
             let value = try? JSONDecoder().decode(DefaultsSnapshot.self, from: data)
         {
             dailyDefaults = value
+            remember(\.defaults, data)
         }
     }
 

@@ -105,8 +105,10 @@ actor DemoTransport: BackendTransport {
 
     private var hasNewFields: Bool { scenario != .missingFields }
 
-    init(scenario: DemoScenario) {
+    /// `coldStart`：连接异常的场景一上来就失败，不先给一份数据。
+    init(scenario: DemoScenario, coldStart: Bool = false) {
         self.scenario = scenario
+        hasConnectedOnce = coldStart
         running = [.daily, .copilot, .runChanged].contains(scenario)
         showsCopilot = scenario == .copilot
         pmSkip = scenario == .skipped

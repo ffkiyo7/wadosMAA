@@ -101,6 +101,13 @@ struct RunChangedNotice: Identifiable, Equatable {
     @ObservationIgnored private var lastPathDescription: String?
     @ObservationIgnored private var isForeground = true
     @ObservationIgnored private var pendingRunLink: DeepLink?
+    @ObservationIgnored private var cache: LastDataCache?
+    @ObservationIgnored private var cachePayload = LastDataCache.Payload()
+    @ObservationIgnored private var cacheSaveTask: Task<Void, Never>?
+    /// 显示的还是上次存下的数据，这次启动没读到过新快照。
+    @ObservationIgnored private var isShowingCachedData = false
+    /// 换连接时加一：之前发出、晚到的响应不能写进新连接的数据和缓存。
+    @ObservationIgnored private(set) var dataEpoch = 0
 
     var needsPairing: Bool {
         config == nil
@@ -148,8 +155,13 @@ struct RunChangedNotice: Identifiable, Equatable {
             return
         }
         #endif
-        guard let config = ConnectionConfig.load(), let credentials = ConnectionCredentials.load() else { return }
+        guard let config = ConnectionConfig.load(), let credentials = ConnectionCredentials.load() else {
+            LastDataCache.removeStored()
+            return
+        }
         self.config = config
+        cache = LastDataCache(config: config)
+        restoreCache()
         transport = HTTPTransport(config: config, credentials: credentials)
         startPathMonitor()
         reconnect()
@@ -163,6 +175,7 @@ struct RunChangedNotice: Identifiable, Equatable {
             reconnect()
         case .background:
             isForeground = false
+            flushCache()
             connectionTask?.cancel()
             connectionTask = nil
         default:
@@ -219,39 +232,57 @@ struct RunChangedNotice: Identifiable, Equatable {
     }
 
     private func reloadAll(_ transport: any BackendTransport) async throws {
+        let epoch = dataEpoch
         let data = try await transport.read("/api/v1/snapshot", query: [])
+        guard epoch == dataEpoch else { throw CancellationError() }
         guard let fresh = RemoteSnapshot(data: data) else { throw TransportFailure.badResponse }
+        acceptSnapshot(fresh, raw: data)
+        await reloadCopilotStages(transport)
+        await reloadSupplementary(transport)
+        // 日常页没打开过也要有配置可缓存。
+        await loadSettings()
+    }
+
+    private func acceptSnapshot(_ fresh: RemoteSnapshot, raw: Data) {
         snapshot = fresh
         lastUpdatedAt = Date()
+        isShowingCachedData = false
+        remember(\.snapshot, raw)
         if let link = pendingRunLink {
             pendingRunLink = nil
             route(link)
         }
-        await reloadCopilotStages(transport)
-        await reloadSupplementary(transport)
     }
 
     /// 手动选项和最近场次读不到不影响主流程。
     private func reloadSupplementary(_ transport: any BackendTransport) async {
+        let epoch = dataEpoch
         if let data = try? await transport.read("/api/v1/choices", query: []),
+            epoch == dataEpoch,
             let value = try? JSONDecoder().decode(RunChoices.self, from: data)
         {
             choices = value
+            remember(\.choices, data)
         }
         let query = [URLQueryItem(name: "limit", value: "20"), URLQueryItem(name: "offset", value: "0")]
-        if let data = try? await transport.read("/api/v1/history", query: query), let page = HistoryPage(data: data) {
+        if let data = try? await transport.read("/api/v1/history", query: query),
+            epoch == dataEpoch,
+            let page = HistoryPage(data: data)
+        {
             recentRuns = page.items
+            remember(\.history, data)
         }
     }
 
     /// 写操作之后、或一场结束时重读：SSE 不推理智和历史。
     func refreshSnapshot() async {
         guard let transport else { return }
+        let epoch = dataEpoch
         if let data = try? await transport.read("/api/v1/snapshot", query: []),
+            epoch == dataEpoch,
             let fresh = RemoteSnapshot(data: data)
         {
-            snapshot = fresh
-            lastUpdatedAt = Date()
+            acceptSnapshot(fresh, raw: data)
         }
         await reloadCopilotStages(transport)
         await reloadSupplementary(transport)
@@ -263,10 +294,68 @@ struct RunChangedNotice: Identifiable, Equatable {
 
     /// 角标读不到不影响主流程。
     private func reloadCopilotStages(_ transport: any BackendTransport) async {
+        let epoch = dataEpoch
         guard let data = try? await transport.read("/api/v1/copilot/stages", query: []),
+            epoch == dataEpoch,
             let stages = try? JSONDecoder().decode(CopilotStages.self, from: data)
         else { return }
         copilotStages = stages
+        remember(\.copilotStages, data)
+    }
+
+    // MARK: - 本机缓存
+
+    /// 锁和进度只在当下有意义：旧缓存里的「运行中」不能当真。
+    private func restoreCache() {
+        guard let payload = cache?.load(), let raw = payload.snapshot, var cached = RemoteSnapshot(data: raw) else {
+            return
+        }
+        cached.lock = nil
+        cached.progress = nil
+        cachePayload = payload
+        snapshot = cached
+        lastUpdatedAt = payload.savedAt
+        isShowingCachedData = true
+        let decoder = JSONDecoder()
+        copilotStages = payload.copilotStages.flatMap { try? decoder.decode(CopilotStages.self, from: $0) }
+        choices = payload.choices.flatMap { try? decoder.decode(RunChoices.self, from: $0) }
+        recentRuns = payload.history.flatMap(HistoryPage.init(data:))?.items ?? []
+        settings = payload.config.flatMap { try? decoder.decode(ConfigSnapshot.self, from: $0) }
+        dailyDefaults = payload.defaults.flatMap { try? decoder.decode(DefaultsSnapshot.self, from: $0) }
+    }
+
+    func remember(_ field: WritableKeyPath<LastDataCache.Payload, Data?>, _ data: Data) {
+        guard cache != nil else { return }
+        cachePayload[keyPath: field] = data
+        scheduleCacheSave()
+    }
+
+    private func scheduleCacheSave() {
+        cacheSaveTask?.cancel()
+        cacheSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            self?.flushCache()
+        }
+    }
+
+    private func flushCache() {
+        cacheSaveTask?.cancel()
+        cacheSaveTask = nil
+        guard let cache, cachePayload.snapshot != nil, !isShowingCachedData else { return }
+        cachePayload.savedAt = lastUpdatedAt ?? Date()
+        cache.save(cachePayload)
+    }
+
+    /// SSE 推来的变化也写回缓存里的快照原文；锁和进度恢复时会丢弃，不用存。
+    private func rememberEvent(_ event: SSEEvent) {
+        guard ["last_run", "today_plan", "schedule", "upstream", "resign"].contains(event.name),
+            let raw = cachePayload.snapshot,
+            case var .object(root)? = try? JSONDecoder().decode(JSONValue.self, from: raw),
+            let value = try? JSONDecoder().decode(JSONValue.self, from: Data(event.data.utf8)),
+            let patched = try? JSONEncoder().encode(JSONValue.object({ root[event.name] = value; return root }()))
+        else { return }
+        remember(\.snapshot, patched)
     }
 
     private func apply(_ event: SSEEvent, transport: any BackendTransport) {
@@ -274,6 +363,7 @@ struct RunChangedNotice: Identifiable, Equatable {
         guard current.apply(event) else { return }
         snapshot = current
         lastUpdatedAt = Date()
+        rememberEvent(event)
         switch event.name {
         case "last_run":
             Task { [weak self] in await self?.refreshSnapshot() }
@@ -321,6 +411,8 @@ struct RunChangedNotice: Identifiable, Equatable {
         #endif
         self.config = config
         clearData()
+        LastDataCache.removeStored()
+        cache = LastDataCache(config: config)
         connectionTask?.cancel()
         connectionTask = nil
         transport = HTTPTransport(config: config, credentials: credentials)
@@ -436,6 +528,12 @@ struct RunChangedNotice: Identifiable, Equatable {
     }
 
     private func clearData() {
+        dataEpoch += 1
+        cacheSaveTask?.cancel()
+        cacheSaveTask = nil
+        cachePayload = LastDataCache.Payload()
+        isShowingCachedData = false
+        cache?.remove()
         snapshot = nil
         copilotStages = nil
         lastUpdatedAt = nil
@@ -471,7 +569,7 @@ struct RunChangedNotice: Identifiable, Equatable {
     func open(_ url: URL) {
         guard let link = DeepLink(url: url) else { return }
         // 冷启动点推送时快照还没到，等第一份数据再判断这一场是否还在跑。
-        if snapshot == nil {
+        if snapshot == nil || isShowingCachedData {
             switch link {
             case .latestRun, .run:
                 pendingRunLink = link
@@ -522,11 +620,18 @@ struct RunChangedNotice: Identifiable, Equatable {
         isRunSheetPresented = false
         isPairingPresented = false
         dismissToast()
+        cache = nil  // 先摘掉，clearData 才不会删到真实缓存。
         clearData()
         lanPinMismatch = false
         config = DemoTransport.config
         connection = .connecting
-        let transport = DemoTransport(scenario: scenario)
+        // WADOS_DEMO_CACHE=1：用独立的演示缓存文件，模拟断连冷启动。
+        let usesDemoCache = ProcessInfo.processInfo.environment["WADOS_DEMO_CACHE"] == "1"
+        if usesDemoCache {
+            cache = .demo
+            restoreCache()
+        }
+        let transport = DemoTransport(scenario: scenario, coldStart: usesDemoCache)
         self.transport = transport
         connectionTask = Task { [weak self] in
             await self?.connectionLoop(transport)
