@@ -548,6 +548,40 @@ class DaemonSecurityTests(unittest.TestCase):
         rendered = maa_tls.render_qr_terminal(pairing)
         self.assertTrue(any(ch in rendered for ch in ("█", "▀", "▄")))
 
+    def test_qr_keeps_alignment_patterns_and_both_format_copies(self) -> None:
+        """Version 7 起校正图案会落在时序线上，漏画后手机无法解码配对码。"""
+        for length in (60, 150, 199, 270, 400, 580):
+            with self.subTest(length=length):
+                matrix = maa_tls.encode_qr_matrix("x" * length)
+                size = len(matrix)
+                version = (size - 17) // 4
+                centers = maa_tls._QR_ALIGNMENT[version]
+                corners = {
+                    (centers[0], centers[0]),
+                    (centers[0], centers[-1]),
+                    (centers[-1], centers[0]),
+                }
+                for row in centers:
+                    for col in centers:
+                        if (row, col) in corners:
+                            continue
+                        for dr in range(-2, 3):
+                            for dc in range(-2, 3):
+                                self.assertEqual(
+                                    matrix[row + dr][col + dc],
+                                    max(abs(dr), abs(dc)) != 1,
+                                    f"version={version} center=({row},{col}) offset=({dr},{dc})",
+                                )
+
+                first = [matrix[i][8] for i in range(6)] + [matrix[7][8], matrix[8][8], matrix[8][7]]
+                first += [matrix[8][14 - i] for i in range(9, 15)]
+                second = [matrix[8][size - 1 - i] for i in range(8)]
+                second += [matrix[size - 15 + i][8] for i in range(8, 15)]
+                self.assertEqual(first, second)
+                format_bits = sum(int(bit) << i for i, bit in enumerate(first))
+                self.assertIn(format_bits, {maa_tls._format_bits(0b01, mask) for mask in range(8)})
+                self.assertTrue(matrix[size - 8][8])
+
     def test_cloudflared_template_and_rescue_html_constraints(self) -> None:
         """S2-3 & S2-4：隧道配置校验（含 cloudflared validate）与 `/rescue` 零外部依赖校验。"""
         fake_cert = self.daemon_dir / "tls" / "cert.pem"

@@ -730,9 +730,15 @@ def encode_qr_matrix(text: str) -> list[list[bool]]:
 
     # Alignment Patterns
     centers = _QR_ALIGNMENT[version]
+    finder_corners = (
+        {(centers[0], centers[0]), (centers[0], centers[-1]), (centers[-1], centers[0])}
+        if centers
+        else set()
+    )
     for ar in centers:
         for ac in centers:
-            if is_func[ar][ac]:
+            # 只有和三个定位角重叠的才省略；落在时序线上的校正图案必须画。
+            if (ar, ac) in finder_corners:
                 continue
             for dr in range(-2, 3):
                 for dc in range(-2, 3):
@@ -814,10 +820,11 @@ def encode_qr_matrix(text: str) -> list[list[bool]]:
         grid[7][8] = bool((fbits >> 6) & 1)
         for i in range(9, 15):
             grid[14 - i][8] = bool((fbits >> (14 - i)) & 1)
+        # 第二份格式信息：低 8 位在右上横排，高 7 位在左下竖排，不能盖掉固定深色模块。
         for i in range(8):
-            grid[size - 1 - i][8] = bool((fbits >> i) & 1)
-        for i in range(8):
-            grid[8][size - 8 + i] = bool((fbits >> (7 - i)) & 1)
+            grid[8][size - 1 - i] = bool((fbits >> i) & 1)
+        for i in range(8, 15):
+            grid[size - 15 + i][8] = bool((fbits >> i) & 1)
         return grid
 
     best_grid: list[list[bool]] | None = None
