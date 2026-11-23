@@ -209,6 +209,30 @@ def zone_chain(layout: dict[str, Any], zone_id: str) -> list[str]:
     return sorted(members, key=lambda stage_id: (len(ancestors(layout, stage_id)), stage_id))
 
 
+def _skland_zone_chain(layout: dict[str, Any], act_id: str, zone_id: str) -> list[str]:
+    """森空岛的区域 → 游戏数据里的关卡链。
+
+    活动进复刻后，游戏数据把关卡挪到 `act46sre_zone2` 这样的区域，森空岛仍报
+    `act46side_zone2`。编号不能直接换：`act18d3` 的关就在 `act11sre_zone1` 里。
+    所以按「这个活动的关所在、序号相同的区域」找，找到的不唯一或混了别的活动就当不知道。
+    """
+    chain = zone_chain(layout, zone_id)
+    if chain:
+        return chain
+    suffix = f"_{zone_id.rsplit('_', 1)[-1]}"
+    candidates = {
+        str(info.get("zone_id") or "")
+        for stage_id, info in (layout.get("stages") or {}).items()
+        if isinstance(info, dict)
+        and act_id_of(stage_id) == act_id
+        and str(info.get("zone_id") or "").endswith(suffix)
+    }
+    if len(candidates) != 1:
+        return []
+    chain = zone_chain(layout, candidates.pop())
+    return chain if all(act_id_of(stage_id) == act_id for stage_id in chain) else []
+
+
 def skland_cleared(layout: dict[str, Any], roster: dict[str, Any] | None, act_id: str) -> set[str]:
     """森空岛按区域给的 `clearedStage` → 具体哪些关已经过了。
 
@@ -221,7 +245,7 @@ def skland_cleared(layout: dict[str, Any], roster: dict[str, Any] | None, act_id
     for zone in zones or []:
         if not isinstance(zone, dict):
             continue
-        chain = zone_chain(layout, str(zone.get("zoneId") or ""))
+        chain = _skland_zone_chain(layout, act_id, str(zone.get("zoneId") or ""))
         try:
             total = int(zone.get("totalStage") or 0)
             done = int(zone.get("clearedStage") or 0)

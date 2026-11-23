@@ -434,6 +434,42 @@ class CopilotGameDataTests(unittest.TestCase):
         # 区域一是链上前 3 关；区域二总数对不上（数据里只有 2 关），一关都不信。
         self.assertEqual(cleared, {"act52side_st01", "act52side_01", "act52side_tr01"})
 
+    def test_skland_progress_maps_rerun_zones_by_the_stages_activity(self) -> None:
+        # 复刻后关卡在 act46sre_zone*，森空岛仍报 act46side_zone*。
+        layout = {"stages": {
+            "act46side_st01": {"code": "OS-ST-1", "zone_id": "act46sre_zone1", "story": True,
+                               "unlock": []},
+            "act46side_tr01": {"code": "OS-TR-1", "zone_id": "act46sre_zone1",
+                               "unlock": ["act46side_st01"]},
+            "act46side_01": {"code": "OS-1", "zone_id": "act46sre_zone1",
+                             "unlock": ["act46side_tr01"]},
+            "act46side_ex01": {"code": "OS-EX-1", "zone_id": "act46sre_zone2",
+                               "unlock": ["act46side_01"]},
+        }, "zones": {}}
+        roster = {"activity_progress": {"act46side": [
+            {"zoneId": "act46side_zone1", "clearedStage": 3, "totalStage": 3},
+            {"zoneId": "act46side_zone2", "clearedStage": 0, "totalStage": 1},
+        ]}}
+        cleared = maa_gamedata.skland_cleared(layout, roster, "act46side")
+        self.assertEqual(cleared, {"act46side_st01", "act46side_tr01", "act46side_01"})
+        segments, dropped = maa_clearing.plan_segments(
+            [{"stage": "OS-EX-1", "stage_id": "act46side_ex01", "mode": "normal"}],
+            layout, cleared,
+        )
+        self.assertEqual(dropped, [])
+        self.assertEqual([(s["kind"], s["zone_id"]) for s in segments],
+                         [("copilot", "act46sre_zone2")])
+
+    def test_skland_rerun_mapping_does_not_guess_from_the_act_number(self) -> None:
+        # act18d3 的关在 act11sre_zone1：act11side 的进度不能算到它头上。
+        layout = {"stages": {
+            "act18d3_01": {"code": "OR-1", "zone_id": "act11sre_zone1", "unlock": []},
+        }, "zones": {}}
+        roster = {"activity_progress": {"act11side": [
+            {"zoneId": "act11side_zone1", "clearedStage": 1, "totalStage": 1},
+        ]}}
+        self.assertEqual(maa_gamedata.skland_cleared(layout, roster, "act11side"), set())
+
 
 class CopilotListPlanTests(unittest.TestCase):
     """`plan_segments()`：剧情关插段、教学关 / 缺口截断、EX 换区域。"""
