@@ -1737,10 +1737,63 @@ def _base_box_lines(lines: list[str], geometry: dict[str, Any]) -> list[str]:
     return converted
 
 
-def _screen_text(config: Config) -> list[str]:
+# 区域入口是压在深色地图上的艺术字，整屏 OCR 常常认不出（2026-11-24 OS 复刻的「变革之路」），
+# 裁到屏幕下方再认就稳了。1920×1080 游戏坐标，相邻两块有重叠，免得字被切开。
+ZONE_OCR_TILES: tuple[tuple[int, int, int, int], ...] = (
+    (1220, 810, 700, 270),
+    (610, 810, 700, 270),
+    (0, 810, 700, 270),
+)
+
+
+def _shift_box_lines(lines: list[str], dx: int, dy: int) -> list[str]:
+    """把裁剪图里的 OCR 框平移回整图像素；不是框的行丢掉。"""
+    shifted: list[str] = []
+    for line in lines:
+        match = OCR_BOX_RE.match(line)
+        if not match:
+            continue
+        text, x, y, w, h = match.group(1), *(int(part) for part in match.groups()[1:])
+        shifted.append(f"{text}\t[{x + dx},{y + dy},{w},{h}]")
+    return shifted
+
+
+def _tile_box_lines(
+    ocrbox: Path, shot: Path, geometry: dict[str, Any], tile: tuple[int, int, int, int]
+) -> list[str]:
+    """裁一块（游戏坐标）单独 OCR，返回整图像素的框。裁不了或认不出返回空表。"""
+    image_width, image_height = int(geometry["width"]), int(geometry["height"])
+    scale = image_width / maa_playcover.BASE_WIDTH
+    left = round(tile[0] * scale)
+    top = round(tile[1] * scale) + int(geometry.get("top", 0))
+    width = min(round(tile[2] * scale), image_width - left)
+    height = min(round(tile[3] * scale), image_height - top)
+    if width <= 0 or height <= 0:
+        return []
+    crop = shot.with_name(f".zone-crop-{tile[0]}.png")
+    try:
+        cropped = subprocess.run(
+            ["sips", "-c", str(height), str(width), "--cropOffset", str(top), str(left),
+             str(shot), "--out", str(crop)],
+            capture_output=True, text=True, check=False, timeout=15,
+        )
+        if cropped.returncode != 0 or not crop.is_file():
+            return []
+        result = subprocess.run([str(ocrbox), str(crop)], capture_output=True,
+                                text=True, check=False, timeout=15)
+        return _shift_box_lines(result.stdout.splitlines(), left, top)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    finally:
+        crop.unlink(missing_ok=True)
+
+
+def _screen_text(
+    config: Config, tiles: tuple[tuple[int, int, int, int], ...] = ()
+) -> list[str]:
     """当前屏幕的 OCR 行（`ocrbox`：`文字\\t[x,y,w,h]`，已换成 1920×1080 游戏坐标）。
 
-    读不到返回空表。
+    `tiles` 是额外单独认一遍的区域（游戏坐标）。读不到返回空表。
     """
     ocrbox = SCRIPTS_DIR / "ocrbox"
     shot = RUNS_DIR / ".zone.png"
@@ -1750,7 +1803,10 @@ def _screen_text(config: Config) -> list[str]:
         geometry = maa_playcover.capture_geometry(config, shot)
         result = subprocess.run([str(ocrbox), str(shot)], capture_output=True,
                                 text=True, check=False, timeout=15)
-        return _base_box_lines(result.stdout.splitlines(), geometry)
+        lines = result.stdout.splitlines()
+        for tile in tiles:
+            lines.extend(_tile_box_lines(ocrbox, shot, geometry, tile))
+        return _base_box_lines(lines, geometry)
     except Exception:  # noqa: BLE001 — (c) 读屏是辅助判断，失败当作没认出来
         return []
     finally:
@@ -1806,7 +1862,9 @@ class ActivityNavigator:
         if not name:
             return False, f"游戏数据里没有区域 {zone_id} 的名字"
         for attempt in range(2):
-            point = maa_clearing.zone_button(_screen_text(self.config), name, others)
+            point = maa_clearing.zone_button(
+                _screen_text(self.config, ZONE_OCR_TILES), name, others
+            )
             if point is not None:
                 try:
                     maa_playcover.tap(self.config, point[0], point[1])

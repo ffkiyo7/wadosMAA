@@ -2051,6 +2051,51 @@ class ManualMultiStageTests(unittest.TestCase):
         self.assertEqual(note, "")
 
 
+class ZoneTileOcrTests(unittest.TestCase):
+    """区域入口的艺术字要裁出来单独认，坐标还得换回游戏坐标。"""
+
+    def _run(self, geometry: dict[str, Any], ocr_output: str) -> tuple[list[str], list[str]]:
+        import maa_copilot_worker as worker
+
+        calls: list[list[str]] = []
+
+        def fake_run(args: list[str], **_kwargs: Any) -> SimpleNamespace:
+            calls.append(args)
+            if args[0] == "sips":
+                Path(args[-1]).write_bytes(b"crop")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            return SimpleNamespace(returncode=0, stdout=ocr_output, stderr="")
+
+        with tempfile.TemporaryDirectory() as raw, patch.object(
+            worker.subprocess, "run", fake_run
+        ):
+            root = Path(raw)
+            lines = worker._tile_box_lines(
+                root / "ocrbox", root / "shot.png", geometry, worker.ZONE_OCR_TILES[0]
+            )
+            self.assertEqual(list(root.glob(".zone-crop-*")), [])
+        return lines, calls[0]
+
+    def test_a_tile_hit_maps_back_to_game_coordinates(self) -> None:
+        import maa_copilot_worker as worker
+
+        geometry = {"source": "maatools", "width": 1920, "height": 1080, "top": 0}
+        lines, sips = self._run(geometry, "变革之路\t[319,147,132,38]\n")
+        self.assertEqual(sips[1:6], ["-c", "270", "700", "--cropOffset", "810"])
+        point = maa_clearing.zone_button(
+            worker._base_box_lines(lines, geometry), "变革之路", ["圣巡之旅", "喀兰之心"]
+        )
+        self.assertEqual(point, (1605, 976))
+
+    def test_a_window_capture_keeps_the_title_bar_offset(self) -> None:
+        import maa_copilot_worker as worker
+
+        geometry = {"source": "window", "width": 960, "height": 568, "top": 28}
+        lines, sips = self._run(geometry, "变革之路\t[160,74,66,19]\n")
+        self.assertEqual(sips[1:7], ["-c", "135", "350", "--cropOffset", "433", "610"])
+        base = worker._base_box_lines(lines, geometry)
+        self.assertEqual(base, ["变革之路\t[1540,958,132,38]"])
+
 
 if __name__ == "__main__":
     unittest.main()
