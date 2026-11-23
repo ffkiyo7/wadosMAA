@@ -14,9 +14,6 @@ enum DeepLink: Equatable {
     case copilot
     case settings
     case resign
-    #if DEBUG
-    case demo(String)
-    #endif
 
     init?(url: URL) {
         guard url.scheme?.lowercased() == "wadosmaa", let host = url.host()?.lowercased() else { return nil }
@@ -28,9 +25,6 @@ enum DeepLink: Equatable {
         case ("copilot", nil): self = .copilot
         case ("settings", nil): self = .settings
         case ("resign", nil): self = .resign
-        #if DEBUG
-        case let ("demo", name?): self = .demo(name)
-        #endif
         default: return nil
         }
     }

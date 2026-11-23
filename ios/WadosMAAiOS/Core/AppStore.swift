@@ -497,17 +497,13 @@ struct RunChangedNotice: Identifiable, Equatable {
         case .settings, .resign:
             isRunSheetPresented = false
             selectedTab = .settings
-        #if DEBUG
-        case let .demo(name):
-            if let scenario = DemoScenario(rawValue: name) { startDemo(scenario) }
-        #endif
         }
     }
 
-    // MARK: - 演示数据（只在 Debug 构建里有）
+    // MARK: - 演示数据（只在 Debug 构建里、靠 WADOS_DEMO 启动参数进入）
 
     #if DEBUG
-    func startDemo(_ scenario: DemoScenario) {
+    private func startDemo(_ scenario: DemoScenario) {
         connectionTask?.cancel()
         connectionTask = nil
         demoScenario = scenario
@@ -523,18 +519,6 @@ struct RunChangedNotice: Identifiable, Equatable {
         connectionTask = Task { [weak self] in
             await self?.connectionLoop(transport)
         }
-    }
-
-    func stopDemo() {
-        connectionTask?.cancel()
-        connectionTask = nil
-        demoScenario = nil
-        transport = nil
-        clearData()
-        config = nil
-        connection = .connecting
-        dismissToast()
-        start()
     }
     #endif
 }

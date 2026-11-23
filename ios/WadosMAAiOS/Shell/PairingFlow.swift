@@ -170,15 +170,6 @@ struct PairingFlow: View {
                     .font(.headline)
                     .frame(maxWidth: .infinity, minHeight: 44)
             }
-            #if DEBUG
-            Menu("演示数据") {
-                ForEach(DemoScenario.allCases) { scenario in
-                    Button(scenario.title) { store.startDemo(scenario) }
-                }
-            }
-            .font(.subheadline)
-            .frame(minHeight: 44)
-            #endif
         }
         .padding(.horizontal, 24)
         .padding(.bottom, 16)

@@ -22,9 +22,6 @@ struct SettingsTab: View {
                 VStack(spacing: 12) {
                     connectionCard
                     entries
-                    #if DEBUG
-                    demoCard
-                    #endif
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 4)
@@ -194,41 +191,6 @@ struct SettingsTab: View {
         }
         return BeijingDay.remaining(until: date)
     }
-
-    // MARK: - 演示
-
-    #if DEBUG
-    private var demoCard: some View {
-        WCard(vertical: 8) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text("演示数据")
-                    .scaledFont(size: 15, weight: .semibold)
-                    .foregroundStyle(Palette.secondary)
-                    .padding(.vertical, 6)
-                ForEach(DemoScenario.allCases) { scenario in
-                    Button {
-                        store.startDemo(scenario)
-                    } label: {
-                        HStack {
-                            Text(scenario.title).scaledFont(size: 16)
-                            Spacer()
-                            if store.demoScenario == scenario {
-                                Image(systemName: "checkmark").foregroundStyle(Palette.accent)
-                            }
-                        }
-                        .frame(minHeight: 44)
-                        .contentShape(.rect)
-                    }
-                    .buttonStyle(.plain)
-                }
-                if store.demoScenario != nil {
-                    Button("退出演示", role: .destructive) { store.stopDemo() }
-                        .frame(minHeight: 44)
-                }
-            }
-        }
-    }
-    #endif
 }
 
 private struct EntryRow: View {
