@@ -90,7 +90,7 @@ struct TodayTab: View {
                 }
                 if let tally = store.copilotTally {
                     Button {
-                        store.selectedTab = .copilot
+                        store.openCopilotList()
                     } label: {
                         chipText(
                             dot: Palette.teal, title: "抄作业",
@@ -173,9 +173,6 @@ private struct TodayOverview: View {
                 .scaledFont(size: 30, weight: .heavy)
                 .padding(.horizontal, 4)
                 .padding(.top, 6)
-            if let run = store.activeRun, run.phase == nil {
-                OtherRunCard(run: run)
-            }
             if let focus {
                 FocusSessionCard(session: focus, onOpen: onOpenSession, onChangeStage: onChangeStage)
             }
@@ -187,33 +184,6 @@ private struct TodayOverview: View {
             }
             RecentRunsCard()
         }
-    }
-}
-
-/// 手动场、抄作业这类不属于早晚场的运行，也要置顶。
-private struct OtherRunCard: View {
-    @Environment(AppStore.self) private var store
-    let run: ActiveRun
-
-    var body: some View {
-        Button {
-            store.isRunSheetPresented = true
-        } label: {
-            WCard {
-                HStack(spacing: 14) {
-                    RunMark(run: run).frame(width: 56, height: 56)
-                    VStack(alignment: .leading, spacing: 2) {
-                        MoreLabel(title: run.title)
-                        Text(run.statusText)
-                            .scaledFont(size: 21, weight: .bold)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -391,7 +361,7 @@ private struct OverviewActivityCard: View {
 
     var body: some View {
         Button {
-            store.selectedTab = .copilot
+            store.openCopilotList()
         } label: {
             WCard(vertical: 13) {
                 HStack {

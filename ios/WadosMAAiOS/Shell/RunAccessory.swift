@@ -85,7 +85,9 @@ struct RunMark: View {
             CopilotRing(
                 done: run.progress?.copilot?.done ?? 0,
                 total: run.progress?.copilot?.total ?? 0,
-                lineWidth: 4)
+                lineWidth: 4,
+                isRunning: true,
+                pulses: false)
         case .other:
             ProgressView()
         }
@@ -96,15 +98,43 @@ struct CopilotRing: View {
     let done: Int
     let total: Int
     var lineWidth: CGFloat = 10
+    var isRunning = false
+    /// 底条常驻，只留静态高亮；展开进度时才呼吸。
+    var pulses = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var fraction: Double {
         guard total > 0 else { return 0 }
         return min(Double(done) / Double(total), 1)
     }
 
+    /// 正在打的这一关占的那段弧；还不知道总数时是整圈。
+    private var currentEnd: Double {
+        guard total > 0 else { return 1 }
+        return min(Double(done + 1) / Double(total), 1)
+    }
+
+    private var currentArc: some View {
+        Circle()
+            .trim(from: fraction, to: currentEnd)
+            .stroke(Palette.teal, style: StrokeStyle(lineWidth: lineWidth, lineCap: .butt))
+            .rotationEffect(.degrees(-90))
+    }
+
     var body: some View {
         ZStack {
             Circle().stroke(Palette.ghost, lineWidth: lineWidth)
+            if isRunning, currentEnd > fraction {
+                if reduceMotion || !pulses {
+                    currentArc.opacity(0.55)
+                } else {
+                    currentArc.phaseAnimator([0.25, 0.8]) { arc, opacity in
+                        arc.opacity(opacity)
+                    } animation: { _ in
+                        .easeInOut(duration: 0.9)
+                    }
+                }
+            }
             Circle()
                 .trim(from: 0, to: fraction)
                 .stroke(Palette.teal, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))

@@ -63,6 +63,7 @@ struct RunChangedNotice: Identifiable, Equatable {
     var runChangedNotice: RunChangedNotice?
     var isStartRunPresented = false
     var runDetailRoute: RunRoute?
+    var copilotPath: [CopilotRoute] = []
 
     // 连接
     private(set) var config: ConnectionConfig?
@@ -436,6 +437,13 @@ struct RunChangedNotice: Identifiable, Equatable {
         configTasks = [:]
         configOriginals = [:]
         runDetailRoute = nil
+        copilotPath = []
+    }
+
+    /// 从别处跳来看的是关卡列表；直接点 Tab 才回到上次的页面。
+    func openCopilotList() {
+        copilotPath = []
+        selectedTab = .copilot
     }
 
     func showRun() {
@@ -485,7 +493,7 @@ struct RunChangedNotice: Identifiable, Equatable {
             selectedTab = .today
         case .copilot:
             isRunSheetPresented = false
-            selectedTab = .copilot
+            openCopilotList()
         case .settings, .resign:
             isRunSheetPresented = false
             selectedTab = .settings

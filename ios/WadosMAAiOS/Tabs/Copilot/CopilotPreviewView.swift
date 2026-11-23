@@ -181,8 +181,8 @@ struct CopilotPreviewView: View {
                         launchLabel(store.activeRun.map { "\($0.title)运行中" } ?? "确认开打", enabled: canLaunch)
                     }
                     .disabled(!canLaunch)
-                    .confirmationDialog(
-                        "开打 \(preview.stage)？", isPresented: $isConfirming, titleVisibility: .visible,
+                    .alert(
+                        "开打 \(preview.stage)？", isPresented: $isConfirming,
                         presenting: selected
                     ) { candidate in
                         Button("开打") { launch(token: preview.token, candidate: candidate) }

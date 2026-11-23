@@ -8,6 +8,10 @@ import SwiftUI
 struct MainTabView: View {
     @Environment(AppStore.self) private var store
 
+    private var showsAccessory: Bool {
+        store.activeRun != nil || (store.selectedTab == .today && store.hasData)
+    }
+
     var body: some View {
         @Bindable var store = store
         TabView(selection: $store.selectedTab) {
@@ -25,14 +29,14 @@ struct MainTabView: View {
                 SettingsTab()
             }
         }
-        .tabViewBottomAccessory(isEnabled: store.activeRun != nil || (store.selectedTab == .today && store.hasData)) {
+        .tabViewBottomAccessory(isEnabled: showsAccessory) {
             RunAccessory()
                 .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
         }
         .overlay(alignment: .bottom) {
             if let toast = store.toast {
                 ToastView(toast: toast)
-                    .padding(.bottom, store.activeRun == nil ? 96 : 150)
+                    .padding(.bottom, showsAccessory ? 113 : 57)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }

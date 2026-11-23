@@ -176,7 +176,7 @@ struct StartRunSheet: View {
         }
         .buttonStyle(.plain)
         .disabled(!canStart)
-        .confirmationDialog(forceTitle ?? "现在开一场？", isPresented: $isConfirming, titleVisibility: .visible) {
+        .alert(forceTitle ?? "现在开一场？", isPresented: $isConfirming) {
             if forceTitle == nil {
                 Button("开始") { start(force: false) }
             } else {

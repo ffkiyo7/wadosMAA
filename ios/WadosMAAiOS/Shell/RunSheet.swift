@@ -93,10 +93,9 @@ struct RunSheet: View {
         .buttonStyle(.plain)
         .disabled(!store.canWrite || store.isStopping)
         .opacity(store.canWrite ? 1 : 0.4)
-        .confirmationDialog(
+        .alert(
             store.activeRun?.stopTitle ?? "",
-            isPresented: $store.isStopConfirmationPresented,
-            titleVisibility: .visible
+            isPresented: $store.isStopConfirmationPresented
         ) {
             Button("停止", role: .destructive) {
                 Task { await store.confirmStop() }
@@ -222,13 +221,13 @@ private struct CopilotRunSummary: View {
     var body: some View {
         HStack(spacing: 18) {
             ZStack {
-                CopilotRing(done: copilot?.done ?? 0, total: copilot?.total ?? 0, lineWidth: 12)
+                CopilotRing(done: copilot?.done ?? 0, total: copilot?.total ?? 0, lineWidth: 12, isRunning: true)
                 Text("\(position)/\(copilot?.total ?? 0)")
                     .font(.system(size: 20, weight: .heavy, design: .rounded))
                     .monospacedDigit()
             }
             .frame(width: 112, height: 112)
-            Text(copilot?.currentStage ?? "抄作业")
+            Text(run.copilotTitle)
                 .scaledFont(size: 30, weight: .heavy)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)

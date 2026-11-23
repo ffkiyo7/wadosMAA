@@ -68,7 +68,8 @@ struct CopilotTab: View {
     }
 
     var body: some View {
-        NavigationStack {
+        @Bindable var store = store
+        NavigationStack(path: $store.copilotPath) {
             Group {
                 if let tally = store.copilotTally {
                     content(tally)
@@ -116,6 +117,23 @@ struct CopilotTab: View {
     }
 
     private func content(_ tally: CopilotTally) -> some View {
+        ScrollViewReader { proxy in
+            stageList(tally)
+                .onChange(of: showsCleared) { _, isShown in
+                    guard isShown else { return }
+                    // 等展开的格子排好版再滚，否则定位的还是收起时的高度。
+                    Task { @MainActor in
+                        try? await Task.sleep(for: .milliseconds(180))
+                        guard showsCleared else { return }
+                        withAnimation(.snappy) { proxy.scrollTo(Self.clearedHeaderID, anchor: .top) }
+                    }
+                }
+        }
+    }
+
+    private static let clearedHeaderID = "cleared-header"
+
+    private func stageList(_ tally: CopilotTally) -> some View {
         List {
             Section {
                 header(tally)
@@ -160,6 +178,7 @@ struct CopilotTab: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityValue(showsCleared ? "已展开" : "已收起")
+                    .id(Self.clearedHeaderID)
                     if showsCleared {
                         LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4), spacing: 8) {
                             ForEach(cleared) { clearedCell($0) }
@@ -249,7 +268,9 @@ struct CopilotTab: View {
             .minimumScaleFactor(0.7)
             .padding(.horizontal, 4)
             .frame(maxWidth: .infinity, minHeight: 44)
-            .background(Palette.green.opacity(0.14), in: .rect(cornerRadius: 12, style: .continuous))
+            .background(
+                Palette.green.opacity(row.ledgerCleared == true ? 0.14 : 0.05),
+                in: .rect(cornerRadius: 12, style: .continuous))
             .contentShape(.rect(cornerRadius: 12))
     }
 

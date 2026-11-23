@@ -64,6 +64,13 @@ struct ActiveRun: Equatable {
         progress?.copilot?.currentStage
     }
 
+    /// 开打前（开游戏、导航、清前置剧情）没有当前关，显示接下来要打的关。
+    var copilotTitle: String {
+        if let stage = currentCopilotStage { return stage }
+        if let next = progress?.steps.first(where: { $0.state == .pending }) { return "准备 \(next.label)" }
+        return "抄作业"
+    }
+
     /// 第几步（从 1 开始），用于「4/7」。
     var dailyPosition: Int? {
         guard let step = currentDailyStep, let index = DailyStep.allCases.firstIndex(of: step) else { return nil }
@@ -79,8 +86,7 @@ struct ActiveRun: Equatable {
         case .copilot:
             guard let copilot = progress?.copilot, copilot.total > 0 else { return "抄作业准备中" }
             let position = min(copilot.done + 1, copilot.total)
-            if let stage = copilot.currentStage { return "\(stage) · \(position)/\(copilot.total)" }
-            return "抄作业 \(position)/\(copilot.total)"
+            return "\(copilotTitle) · \(position)/\(copilot.total)"
         case .other:
             return "\(title)中"
         }
