@@ -37,6 +37,26 @@ struct ConnectionConfig: Codable, Equatable, Sendable {
         UserDefaults.standard.removeObject(forKey: defaultsKey)
         LastDataCache.removeStored()
     }
+
+    static func isPin(_ value: String) -> Bool {
+        Data(base64Encoded: value)?.count == 32
+    }
+
+    /// 按快照的 `tls` 更新指纹；不用改返回 nil。
+    /// - 服务端换上了备指纹那张：提升为主指纹；
+    /// - 服务端预生成了下一张、本地还没记：记成备指纹。
+    func adopting(_ tls: TLSStatus) -> ConnectionConfig? {
+        let served = tls.spkiSHA256.flatMap { Self.isPin($0) ? $0 : nil }
+        let staged = tls.nextSPKISHA256.flatMap { Self.isPin($0) ? $0 : nil }
+        var next = self
+        if let served, served == backupPin, served != primaryPin {
+            next.primaryPin = served
+            next.backupPin = staged.flatMap { $0 == served ? nil : $0 } ?? ""
+        } else if let staged, staged != primaryPin, staged != backupPin {
+            next.backupPin = staged
+        }
+        return next == self ? nil : next
+    }
 }
 
 struct ConnectionCredentials: Equatable, Sendable {

@@ -250,6 +250,7 @@ struct RunChangedNotice: Identifiable, Equatable {
         lastUpdatedAt = Date()
         isShowingCachedData = false
         remember(\.snapshot, raw)
+        adoptPins(fresh.tls)
         if let link = pendingRunLink {
             pendingRunLink = nil
             route(link)
@@ -392,6 +393,22 @@ struct RunChangedNotice: Identifiable, Equatable {
         defer { lastPathDescription = description }
         guard let last = lastPathDescription, last != description else { return }
         reconnect()
+    }
+
+    // MARK: - 证书轮换（S4-4）
+
+    /// Mac 上预生成了下一张证书就记成备指纹，换上之后提升为主指纹；轮换不用手输指纹。
+    private func adoptPins(_ tls: TLSStatus?) {
+        guard let tls, let current = pairedConfig, let next = current.adopting(tls),
+            let credentials = ConnectionCredentials.load()
+        else { return }
+        next.save()
+        config = next
+        cache = LastDataCache(config: next)
+        scheduleCacheSave()
+        transport = HTTPTransport(config: next, credentials: credentials)
+        // 现在这条连接照旧能用（两张证书都认），换到新指纹的连接上。
+        Task { @MainActor [weak self] in self?.reconnect() }
     }
 
     // MARK: - 配对

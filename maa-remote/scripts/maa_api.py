@@ -714,6 +714,35 @@ class APIContext:
         )
         return doc
 
+    def _read_tls(self) -> dict[str, Any] | None:
+        """S4-4：正在服务的证书指纹、到期，以及 `rotate_tls.py --stage` 预生成的下一张的指纹。
+
+        App 据此自动把下一张记成备指纹、换上后提升为主指纹，轮换时不用手输。
+        """
+        active = maa_common.load_json(self.daemon_dir / "active_tls.json", {})
+        active = active if isinstance(active, dict) else {}
+        check = maa_common.load_json(self.daemon_dir / "tls_check.json", {})
+        check = check if isinstance(check, dict) else {}
+        spki = str(active.get("spki_sha256") or check.get("spki_sha256") or "")
+        next_cert = self.daemon_dir / "tls" / "cert.next.pem"
+        next_spki = ""
+        sig = self._file_sig(next_cert)
+        if next_cert.is_file():
+            if getattr(self, "_next_spki_sig", None) == sig:
+                next_spki = str(getattr(self, "_next_spki_val", ""))
+            else:
+                next_spki = maa_tls.compute_spki_sha256(next_cert)
+                self._next_spki_sig = sig
+                self._next_spki_val = next_spki
+        if not spki and not next_spki:
+            return None
+        return {
+            "spki_sha256": spki or None,
+            "not_after": active.get("not_after") or check.get("not_after"),
+            "days_remaining": check.get("days_remaining"),
+            "next_spki_sha256": next_spki or None,
+        }
+
     def _read_scheduler(self) -> dict[str, Any] | None:
         raw = maa_common.load_json(self.daemon_dir / "scheduler.json", None)
         return raw if isinstance(raw, dict) and raw else None
@@ -803,6 +832,7 @@ class APIContext:
         resign = safe("resign", self._read_resign)
         sanity = safe("sanity", self._read_sanity)
         notify = safe("notify", self._read_notify)
+        tls = safe("tls", self._read_tls)
 
         return {
             "lock": lock,
@@ -817,6 +847,7 @@ class APIContext:
             "resign": resign,
             "sanity": sanity,
             "notify": notify,
+            "tls": tls,
             "errors": errors,
         }
 

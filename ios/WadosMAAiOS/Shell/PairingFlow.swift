@@ -73,7 +73,7 @@ struct PairingDraft: Equatable {
     }
 
     private static func isPin(_ value: String) -> Bool {
-        Data(base64Encoded: value)?.count == 32
+        ConnectionConfig.isPin(value)
     }
 
     private static func httpsURL(_ text: String) -> URL? {

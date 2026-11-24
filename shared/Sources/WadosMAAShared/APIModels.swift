@@ -91,6 +91,28 @@ public struct ResignStatus: Decodable, Sendable, Equatable {
     }
 }
 
+/// 快照的 `tls`（S4-4）：正在服务的证书指纹和到期，以及预生成的下一张的指纹。
+public struct TLSStatus: Decodable, Sendable, Equatable {
+    public let spkiSHA256: String?
+    public let notAfter: String?
+    public let daysRemaining: Double?
+    public let nextSPKISHA256: String?
+
+    enum CodingKeys: String, CodingKey {
+        case spkiSHA256 = "spki_sha256"
+        case notAfter = "not_after"
+        case daysRemaining = "days_remaining"
+        case nextSPKISHA256 = "next_spki_sha256"
+    }
+
+    public init(spkiSHA256: String?, notAfter: String? = nil, daysRemaining: Double? = nil, nextSPKISHA256: String?) {
+        self.spkiSHA256 = spkiSHA256
+        self.notAfter = notAfter
+        self.daysRemaining = daysRemaining
+        self.nextSPKISHA256 = nextSPKISHA256
+    }
+}
+
 /// 快照的 `sanity`：森空岛实测值和按恢复速度估算的当前值。读不到练度快照时整段缺失。
 public struct SanityStatus: Decodable, Sendable, Equatable {
     public let current: Int
@@ -146,6 +168,8 @@ public struct RemoteSnapshot: Sendable {
     public var sanity: SanityStatus?
     /// 旧版后端没有这个键。
     public var notify: NotifyStatus?
+    /// 旧版后端没有这个键。
+    public var tls: TLSStatus?
     /// 服务端报告的失败字段，加上本端解不开的字段。
     public var errors: [String: String]
 
@@ -171,6 +195,7 @@ public struct RemoteSnapshot: Sendable {
         resign = field(root, "resign", ResignStatus.self)
         sanity = field(root, "sanity", SanityStatus.self)
         notify = field(root, "notify", NotifyStatus.self)
+        tls = field(root, "tls", TLSStatus.self)
     }
 
     /// 应用一条 SSE 事件；不认识的事件返回 false。

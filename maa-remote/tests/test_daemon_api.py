@@ -227,6 +227,7 @@ class DaemonAPITests(unittest.TestCase):
                     "resign",
                     "sanity",
                     "notify",
+                    "tls",
                     "errors",
                 },
             )

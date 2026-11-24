@@ -428,6 +428,10 @@ actor DemoTransport: BackendTransport {
                 "estimated_now": min(11 + max(Int(Date().timeIntervalSince(todayAt("08:18")) / 360), 0), 208),
             ] as [String: Any]
             object["notify"] = ["configured": true]
+            object["tls"] = [
+                "spki_sha256": "nnVh9CSjbxFXuG9yMsJ0FoXWepk+SkOHYMnGLf+Y+2k=", "not_after": "2031-11-23T09:51:25+08:00",
+                "days_remaining": 1825, "next_spki_sha256": NSNull(),
+            ] as [String: Any]
         }
         if running {
             let holder = showsCopilot ? "copilot" : "daily"

@@ -10,6 +10,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -458,6 +459,29 @@ class EntryTests(ResignTestCase):
         ctx.handle_resign(True, "shortcut")
         self.assertEqual(seen, [(True, "shortcut")])
 
+        # S4-4：快照带上正在服务的指纹和预生成的下一张的指纹
+        self.assertIsNone(ctx._read_tls())
+        maa_common.atomic_write_json(
+            self.daemon_dir / "active_tls.json",
+            {"spki_sha256": "OLD=", "not_after": "2031-11-23T09:51:25+08:00"},
+        )
+        maa_common.atomic_write_json(self.daemon_dir / "tls_check.json", {"days_remaining": 1825.0})
+        self.assertEqual(
+            ctx._read_tls(),
+            {
+                "spki_sha256": "OLD=",
+                "not_after": "2031-11-23T09:51:25+08:00",
+                "days_remaining": 1825.0,
+                "next_spki_sha256": None,
+            },
+        )
+        (self.daemon_dir / "tls").mkdir()
+        (self.daemon_dir / "tls" / "cert.next.pem").write_text("pem", encoding="utf-8")
+        calls: list[Path] = []
+        with patch.object(maa_api.maa_tls, "compute_spki_sha256", side_effect=lambda p: calls.append(p) or "NEW="):
+            self.assertEqual(ctx._read_tls()["next_spki_sha256"], "NEW=")
+            self.assertEqual(ctx._read_tls()["next_spki_sha256"], "NEW=")
+        self.assertEqual(len(calls), 1, "同一张证书只算一次指纹")
 
 
 if __name__ == "__main__":

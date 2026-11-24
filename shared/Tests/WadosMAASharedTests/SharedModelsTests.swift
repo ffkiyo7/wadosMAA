@@ -188,18 +188,24 @@ import Testing
         let snapshot = try #require(RemoteSnapshot(data: Data("{}".utf8)))
         #expect(snapshot.sanity == nil)
         #expect(snapshot.notify == nil)
+        #expect(snapshot.tls == nil)
     }
 
-    @Test func readsResign() throws {
+    @Test func readsResignAndTLS() throws {
         let json = #"""
             {"resign":{"status":"due","last_signed_at":"2026-11-23T21:34:12+08:00",
              "expiration_date":"2026-11-30T21:34:12+08:00","last_result":"skipped",
-             "last_probe_detail":"手机不在局域网"}}
+             "last_probe_detail":"手机不在局域网"},
+             "tls":{"spki_sha256":"OLD=","not_after":"2031-11-23T09:51:25+08:00","days_remaining":1825.0,
+             "next_spki_sha256":null}}
             """#
         let snapshot = try #require(RemoteSnapshot(data: Data(json.utf8)))
         #expect(snapshot.resign?.status == "due")
         #expect(snapshot.resign?.lastResult == "skipped")
         #expect(snapshot.resign?.lastProbeDetail == "手机不在局域网")
+        #expect(snapshot.tls?.spkiSHA256 == "OLD=")
+        #expect(snapshot.tls?.nextSPKISHA256 == nil)
+        #expect(snapshot.tls?.daysRemaining == 1825)
         #expect(snapshot.errors.isEmpty)
     }
 
