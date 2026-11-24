@@ -342,6 +342,21 @@ extension AppStore {
         await writeAndRefresh("/api/v1/schedule", body: ["phase": phase, "enabled": enabled])
     }
 
+    // MARK: - iOS 签名
+
+    /// 服务端受理后在后台构建、无线安装；装新版时本 App 会被系统结束。
+    func requestResign() async {
+        guard !isRequestingResign else { return }
+        isRequestingResign = true
+        defer { isRequestingResign = false }
+        guard let receipt = await write("/api/v1/ios/resign", timeout: 20) else { return }
+        if receipt.ok {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            showToast(AppToast(text: receipt.message), lifetime: .seconds(8))
+        }
+        await refreshSnapshot()
+    }
+
     // MARK: - 推送
 
     func sendTestPush() async {

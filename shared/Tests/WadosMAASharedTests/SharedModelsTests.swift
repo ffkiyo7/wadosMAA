@@ -190,6 +190,19 @@ import Testing
         #expect(snapshot.notify == nil)
     }
 
+    @Test func readsResign() throws {
+        let json = #"""
+            {"resign":{"status":"due","last_signed_at":"2026-11-23T21:34:12+08:00",
+             "expiration_date":"2026-11-30T21:34:12+08:00","last_result":"skipped",
+             "last_probe_detail":"手机不在局域网"}}
+            """#
+        let snapshot = try #require(RemoteSnapshot(data: Data(json.utf8)))
+        #expect(snapshot.resign?.status == "due")
+        #expect(snapshot.resign?.lastResult == "skipped")
+        #expect(snapshot.resign?.lastProbeDetail == "手机不在局域网")
+        #expect(snapshot.errors.isEmpty)
+    }
+
     @Test func stageCategoryFallsBackToName() throws {
         func row(_ json: String) throws -> CopilotStageRow {
             try JSONDecoder().decode(CopilotStageRow.self, from: Data(json.utf8))

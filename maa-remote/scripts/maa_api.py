@@ -34,6 +34,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +45,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 import maa_action
 import maa_common
 import maa_copilot
+import maa_ios_resign
 import maa_notify
 import maa_schedule
 import maa_tls
@@ -64,7 +66,9 @@ SAFE_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 SAFE_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 ActionRunner = Callable[[list[str], str, float], dict[str, Any]]
-ResignHandler = Callable[[bool], tuple[int, dict[str, Any]]]
+# (if_due, 触发来源 'ios' | 'shortcut') -> (HTTP 状态码, 回执)
+ResignHandler = Callable[[bool, str], tuple[int, dict[str, Any]]]
+APP_ACTIVE_WINDOW_SECONDS = 120.0
 
 
 def _parse_networks(cidrs: tuple[str, ...] | list[str]) -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
@@ -128,15 +132,6 @@ def _sse_fingerprint(event: str, payload: Any) -> str:
 
 def _raise_missing_config(errors: Mapping[str, str]) -> Any:
     raise RuntimeError(f"config.json 不可用：{errors.get('config', '读取失败')}")
-
-
-def _default_resign_handler(if_due: bool) -> tuple[int, dict[str, Any]]:
-    return HTTPStatus.NOT_IMPLEMENTED, {
-        "ok": False,
-        "code": "not_configured",
-        "message": "iOS 无线续签尚未配置（将于 Phase 4 接入）。",
-        "data": {"if_due": if_due, "configured": False},
-    }
 
 
 def _kill_process_tree(proc: subprocess.Popen[Any]) -> None:
@@ -418,6 +413,40 @@ class APIContext:
     def __post_init__(self) -> None:
         self.allowed_networks = _parse_networks(self.allowed_cidrs)
         self.previews = PreviewRegistry(self.state_dir / "copilot" / "previews")
+        self._activity_lock = threading.Lock()
+        self._last_app_request = 0.0
+        self._sse_clients = 0
+
+    # App 是否正在用（S4-1 守卫：2 分钟内有 full Token 请求，或开着实时流）。
+    def note_app_request(self) -> None:
+        with self._activity_lock:
+            self._last_app_request = time.monotonic()
+
+    def sse_opened(self) -> None:
+        with self._activity_lock:
+            self._sse_clients += 1
+
+    def sse_closed(self) -> None:
+        with self._activity_lock:
+            self._sse_clients = max(0, self._sse_clients - 1)
+
+    def app_active(self, window: float = APP_ACTIVE_WINDOW_SECONDS) -> bool:
+        with self._activity_lock:
+            if self._sse_clients > 0:
+                return True
+            return self._last_app_request > 0 and time.monotonic() - self._last_app_request < window
+
+    def handle_resign(self, if_due: bool, trigger: str) -> tuple[int, dict[str, Any]]:
+        if self.resign_handler is not None:
+            return self.resign_handler(if_due, trigger)
+        return maa_ios_resign.request_resign(
+            if_due=if_due,
+            trigger=trigger,
+            daemon_dir=self.daemon_dir,
+            scripts_dir=self.scripts_dir,
+            python_bin=self.python_bin,
+            now=self.clock(),
+        )
 
     @classmethod
     def from_default_paths(
@@ -676,7 +705,14 @@ class APIContext:
 
     def _read_resign(self) -> dict[str, Any] | None:
         raw = maa_common.load_json(self.daemon_dir / "resign.json", None)
-        return raw if isinstance(raw, dict) and raw else None
+        if not isinstance(raw, dict) or not raw:
+            return None
+        doc = dict(raw)
+        # 文件里的 running 可能是被杀掉的进程留下的，以锁为准现算。
+        doc["status"] = maa_ios_resign.public_status(
+            doc, self.clock(), running=maa_ios_resign.is_locked(self.daemon_dir / "resign.lock")
+        )
+        return doc
 
     def _read_scheduler(self) -> dict[str, Any] | None:
         raw = maa_common.load_json(self.daemon_dir / "scheduler.json", None)
@@ -1087,6 +1123,8 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
         if role == "resign_only" and not allow_resign_only:
             self._send_error_json(HTTPStatus.FORBIDDEN, "forbidden", "当前令牌仅允许触发 iOS 无线续签。")
             return None
+        if role == "full":
+            self.ctx.note_app_request()
         return role
 
     def do_GET(self) -> None:
@@ -1274,6 +1312,7 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
 
         hub = self.server.sse_hub
         sub = hub.subscribe()
+        self.ctx.sse_opened()
         keepalive = max(0.05, float(self.ctx.sse_keepalive_seconds))
         try:
             self.wfile.write(b": connected\n\n")
@@ -1296,6 +1335,7 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
             pass
         finally:
             hub.unsubscribe(sub)
+            self.ctx.sse_closed()
 
     def _handle_post(self) -> None:
         parsed = urlparse(self.path)
@@ -1303,7 +1343,8 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
 
         if raw_path == "/api/v1/ios/resign":
-            if self._require_auth(allow_resign_only=True) is None:
+            role = self._require_auth(allow_resign_only=True)
+            if role is None:
                 return
             body, err = self._read_json_body()
             if err is not None:
@@ -1311,8 +1352,8 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
                 return
             assert body is not None
             if_due = _parse_bool_flag(query.get("if_due", ["0"])[0]) or bool(body.get("if_due", False))
-            handler = self.ctx.resign_handler or _default_resign_handler
-            status, payload = handler(if_due)
+            status, payload = self.ctx.handle_resign(if_due, "shortcut" if role == "resign_only" else "ios")
+            self.server.sse_hub.notify_changed()
             self._send_json(status, payload)
             return
 

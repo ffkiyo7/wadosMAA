@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import maa_api
+import maa_ios_resign
 import maa_tls
 from maa_common import (
     BEIJING,
@@ -103,6 +104,10 @@ def default_daemon_config() -> dict[str, Any]:
         "tls_handshake_timeout": maa_api.DEFAULT_HANDSHAKE_TIMEOUT,
         "tls_warn_days": maa_tls.DEFAULT_WARN_DAYS,
         "sse_keepalive_seconds": maa_api.DEFAULT_SSE_KEEPALIVE_SECONDS,
+        # S4-1 无线续签：没填 UDID 就不续签（开发副本保持空）。
+        "ios_resign_enabled": True,
+        "ios_device_udid": "",
+        "ios_device_lan_ip": "",
     }
 
 
@@ -499,6 +504,42 @@ class DaemonScheduler:
         self.state.save(self.state_path, config, daemon_cfg, now)
 
 
+class ResignMonitor:
+    """S4-1：到续签窗口后每 25 分钟拉起一次 `maa_ios_resign.py auto`（子进程脱离会话，构建不卡主循环）。"""
+
+    def __init__(
+        self,
+        *,
+        scripts_dir: Path | None = None,
+        python_bin: str | None = None,
+        daemon_dir: Path | None = None,
+        app_active: Callable[[], bool] = lambda: False,
+        spawner: Callable[[list[str]], Any] = maa_ios_resign.default_spawn,
+    ) -> None:
+        self.scripts_dir = scripts_dir or SCRIPTS_DIR
+        self.python_bin = python_bin or sys.executable
+        self.daemon_dir = daemon_dir or DAEMON_DIR
+        self.app_active = app_active
+        self.spawner = spawner
+        self.last_check: datetime | None = None
+        self.proc: Any = None
+
+    def tick(self, now: datetime) -> bool:
+        if self.proc is not None and self.proc.poll() is None:
+            return False
+        self.proc = None
+        if maa_ios_resign.is_locked(self.daemon_dir / "resign.lock"):
+            return False
+        cfg = maa_ios_resign.load_resign_config(self.daemon_dir / "daemon.json")
+        state = maa_ios_resign.load_state(self.daemon_dir / "resign.json")
+        if not maa_ios_resign.auto_should_spawn(state, cfg, now, self.last_check):
+            return False
+        self.last_check = now
+        args = ["auto"] + (["--app-active"] if self.app_active() else [])
+        self.proc = self.spawner(maa_ios_resign.spawn_argv(self.scripts_dir, self.python_bin, *args))
+        return True
+
+
 def _resolve_tls_paths(daemon_cfg: Mapping[str, Any]) -> tuple[Path, Path]:
     raw_cert = str(daemon_cfg.get("tls_cert_path") or "").strip()
     raw_key = str(daemon_cfg.get("tls_key_path") or "").strip()
@@ -619,6 +660,8 @@ def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
     reload_flag = False
     api_server: maa_api.SafeTLSThreadingHTTPServer | None = None
     api_thread: threading.Thread | None = None
+    api_ctx: maa_api.APIContext | None = None
+    resign_monitor = ResignMonitor(app_active=lambda: api_ctx is not None and api_ctx.app_active())
 
     def _on_stop(_signum: int, _frame: object) -> None:
         nonlocal stop_flag
@@ -651,6 +694,7 @@ def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
                     ),
                     on_schedule_reload=scheduler.reload,
                 )
+                api_ctx = ctx
                 api_host = str(daemon_cfg.get("api_host") or "0.0.0.0")
                 api_port = int(daemon_cfg.get("api_port") or 18170)
                 api_server = maa_api.create_server(
@@ -702,6 +746,10 @@ def run_forever(*, poll_interval: float = 10.0, enable_api: bool = True) -> int:
                 scheduler.tick()
             except Exception as exc:  # noqa: BLE001 — (a) 守护进程顶层兜底，单拍异常不退出
                 print(f"scheduler tick failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+            try:
+                resign_monitor.tick(now_beijing())
+            except Exception as exc:  # noqa: BLE001 — (c) 续签派发异常不阻断调度循环
+                print(f"ios resign dispatch failed: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
             try:
                 cur_cfg = load_daemon_config(DAEMON_CONFIG_PATH)
                 cur_cert, _cur_key = _resolve_tls_paths(cur_cfg)

@@ -51,13 +51,18 @@ public struct SchedulerStatus: Decodable, Sendable, Equatable {
     }
 }
 
-/// `daemon/resign.json`：iOS 签名状态（Phase 4 才写，现在通常没有）。
+/// `daemon/resign.json`：iOS 无线续签状态（S4-1）。`status` 为 ok / due / running / failed。
 public struct ResignStatus: Decodable, Sendable, Equatable {
     public let status: String?
     public let lastSignedAt: String?
     public let expirationDate: String?
     public let lastAttemptAt: String?
     public let lastError: String?
+    /// ok / skipped（暂时不行，下个周期再试）/ failed。
+    public let lastResult: String?
+    public let lastProbeAt: String?
+    /// 自动续签上次没动手的原因，如「手机不在局域网」。
+    public let lastProbeDetail: String?
 
     enum CodingKeys: String, CodingKey {
         case status
@@ -65,6 +70,24 @@ public struct ResignStatus: Decodable, Sendable, Equatable {
         case expirationDate = "expiration_date"
         case lastAttemptAt = "last_attempt_at"
         case lastError = "last_error"
+        case lastResult = "last_result"
+        case lastProbeAt = "last_probe_at"
+        case lastProbeDetail = "last_probe_detail"
+    }
+
+    public init(
+        status: String?, lastSignedAt: String?, expirationDate: String?, lastAttemptAt: String? = nil,
+        lastError: String? = nil, lastResult: String? = nil, lastProbeAt: String? = nil,
+        lastProbeDetail: String? = nil
+    ) {
+        self.status = status
+        self.lastSignedAt = lastSignedAt
+        self.expirationDate = expirationDate
+        self.lastAttemptAt = lastAttemptAt
+        self.lastError = lastError
+        self.lastResult = lastResult
+        self.lastProbeAt = lastProbeAt
+        self.lastProbeDetail = lastProbeDetail
     }
 }
 

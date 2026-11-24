@@ -60,6 +60,7 @@ struct RunChangedNotice: Identifiable, Equatable {
     var isStopConfirmationPresented = false
     var isPairingPresented = false
     var isConnectionDetailPresented = false
+    var isSigningDetailPresented = false
     var runChangedNotice: RunChangedNotice?
     var isStartRunPresented = false
     var runDetailRoute: RunRoute?
@@ -87,6 +88,7 @@ struct RunChangedNotice: Identifiable, Equatable {
     var defaultTaskOverrides: [String: Bool] = [:]
     var isUpdatingResources = false
     var isSendingTestPush = false
+    var isRequestingResign = false
 
     #if DEBUG
     private(set) var demoScenario: DemoScenario?
@@ -603,9 +605,13 @@ struct RunChangedNotice: Identifiable, Equatable {
         case .copilot:
             isRunSheetPresented = false
             openCopilotList()
-        case .settings, .resign:
+        case .settings:
             isRunSheetPresented = false
             selectedTab = .settings
+        case .resign:
+            isRunSheetPresented = false
+            selectedTab = .settings
+            isSigningDetailPresented = true
         }
     }
 

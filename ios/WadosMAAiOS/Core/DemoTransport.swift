@@ -100,6 +100,8 @@ actor DemoTransport: BackendTransport {
         "copilot_blackout_minutes": 25, "auto_copilot_min_lead_minutes": 40, "activity_search_retry_minutes": 30,
         "auto_copilot_max_attempts_per_day": 2,
     ]
+    private var resignFinishesAt: Date?
+    private var resignSignedAt = Date().addingTimeInterval(-5.4 * 86400)
     private var configMeta: [String: [String: String]] = [:]
     private var stageRows: [[String: Any]]
 
@@ -210,6 +212,9 @@ actor DemoTransport: BackendTransport {
             resourceUpdating = true
             resourceFinishesAt = Date().addingTimeInterval(6)
             return ok("update_started", "开始更新游戏资源")
+        case "/api/v1/ios/resign":
+            resignFinishesAt = Date().addingTimeInterval(8)
+            return ok("started", "开始续签。装新版时 App 会退出，几分钟后重新打开就行。")
         case "/api/v1/notify/test":
             return hasNewFields
                 ? ok("notify_sent", "测试推送已发送")
@@ -399,12 +404,7 @@ actor DemoTransport: BackendTransport {
             "copilot_auto_paused": copilotPaused,
             "activity": NSNull(),
             "scheduler": NSNull(),
-            "resign": [
-                "status": "ok",
-                "last_signed_at": iso(Date().addingTimeInterval(-2 * 86400)),
-                "expiration_date": iso(Date().addingTimeInterval(5 * 86400)),
-                "last_attempt_at": iso(Date().addingTimeInterval(-2 * 86400)),
-            ] as [String: Any],
+            "resign": resignObject(),
             "errors": [String: String](),
         ]
         if hasNewFields {
@@ -518,6 +518,23 @@ actor DemoTransport: BackendTransport {
                 session("pm", "晚场", pmTime, stage: pmStage, source: pmSource, skip: pmSkip, enabled: pmEnabled, fight: pmFight),
             ],
             "task_names": ["fight": "刷理智", "infrast": "基建", "recruit": "公招", "mall": "商店", "award": "领奖"],
+        ]
+    }
+
+    private func resignObject() -> [String: Any] {
+        if let finish = resignFinishesAt, finish <= Date() {
+            resignFinishesAt = nil
+            resignSignedAt = Date()
+        }
+        let due = Date().timeIntervalSince(resignSignedAt) >= 5 * 86400
+        return [
+            "status": resignFinishesAt != nil ? "running" : due ? "due" : "ok",
+            "last_signed_at": iso(resignSignedAt),
+            "expiration_date": iso(resignSignedAt.addingTimeInterval(7 * 86400)),
+            "last_attempt_at": iso(Date().addingTimeInterval(-900)),
+            "last_result": due ? "skipped" : "ok",
+            "last_probe_at": iso(Date().addingTimeInterval(-900)),
+            "last_probe_detail": "手机不在局域网",
         ]
     }
 

@@ -32,6 +32,9 @@ struct SettingsTab: View {
             .navigationDestination(isPresented: $store.isConnectionDetailPresented) {
                 ConnectionDetailView()
             }
+            .navigationDestination(isPresented: $store.isSigningDetailPresented) {
+                SigningDetailView()
+            }
             .navigationDestination(for: SettingsRoute.self) { route in
                 switch route {
                 case .push: PushDetailView()
@@ -186,10 +189,10 @@ struct SettingsTab: View {
     }
 
     private var signingValue: String? {
-        guard let text = store.snapshot?.resign?.expirationDate, let date = BeijingTime.parseISO(text) else {
-            return nil
-        }
-        return BeijingDay.remaining(until: date)
+        guard let resign = store.snapshot?.resign else { return nil }
+        if resign.status == "running" { return "续签中" }
+        guard let text = resign.expirationDate, let date = BeijingTime.parseISO(text) else { return nil }
+        return date > Date() ? BeijingDay.remaining(until: date) : "已过期"
     }
 }
 
@@ -444,34 +447,89 @@ private struct SchedulerDetailView: View {
     }
 }
 
-// MARK: - iOS 签名（只读，续签在 Phase 4）
+// MARK: - iOS 签名
 
 private struct SigningDetailView: View {
     @Environment(AppStore.self) private var store
+    @State private var isConfirming = false
+
+    private var resign: ResignStatus? { store.snapshot?.resign }
+
+    private var isLAN: Bool {
+        if case .online(.lan, _) = store.connection { return true }
+        return false
+    }
+
+    private var isRunning: Bool { resign?.status == "running" || store.isRequestingResign }
 
     var body: some View {
         Form {
-            if let resign = store.snapshot?.resign {
+            if let resign, let expiry = Self.date(resign.expirationDate) {
                 Section {
-                    row("到期", resign.expirationDate)
-                    row("上次签名", resign.lastSignedAt)
-                    row("上次尝试", resign.lastAttemptAt)
-                    if let error = resign.lastError, !error.isEmpty {
-                        Text(error).foregroundStyle(Palette.red)
+                    LabeledContent("到期") {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            Text(expiry > Date() ? BeijingDay.remaining(until: expiry) : "已过期")
+                                .foregroundStyle(expiry > Date() ? Color.primary : Palette.red)
+                            Text(Self.stamp(expiry)).font(.footnote).monospacedDigit()
+                                .foregroundStyle(Palette.secondary)
+                        }
+                    }
+                    if let signed = Self.date(resign.lastSignedAt) {
+                        LabeledContent("上次签名", value: Self.stamp(signed))
                     }
                 }
+                attempt(resign)
             } else {
                 ContentUnavailableView("还没有签名记录", systemImage: "checkmark.seal")
+            }
+            Section {
+                Button {
+                    isConfirming = true
+                } label: {
+                    HStack {
+                        Text(resign?.status == "running" ? "正在续签" : "立即续签")
+                        Spacer()
+                        if isRunning { ProgressView() }
+                    }
+                }
+                .disabled(!store.canWrite || !isLAN || isRunning)
+            } footer: {
+                if store.canWrite, !isLAN {
+                    Text("连上家里的 Wi-Fi 才能续签")
+                }
             }
         }
         .navigationTitle("iOS 签名")
         .navigationBarTitleDisplayMode(.inline)
+        .confirmationDialog("现在续签？", isPresented: $isConfirming, titleVisibility: .visible) {
+            Button("续签") { Task { await store.requestResign() } }
+        } message: {
+            Text("装新版时 App 会退出，几分钟后重新打开。")
+        }
     }
 
-    @ViewBuilder private func row(_ title: String, _ text: String?) -> some View {
-        if let text, let date = BeijingTime.parseISO(text) {
-            LabeledContent(title, value: "\(BeijingDay.title(date)) \(BeijingTime.clock(date))")
+    /// 上次没续上才出现：失败给原因，暂时不行给在等什么。
+    @ViewBuilder private func attempt(_ resign: ResignStatus) -> some View {
+        if resign.status == "failed", let error = resign.lastError, !error.isEmpty {
+            Section {
+                Text(error).foregroundStyle(Palette.red)
+                if let at = Self.date(resign.lastAttemptAt) {
+                    LabeledContent("上次尝试", value: Self.stamp(at))
+                }
+            }
+        } else if resign.status == "due", let detail = resign.lastProbeDetail, !detail.isEmpty {
+            Section("自动续签") {
+                LabeledContent(detail, value: Self.date(resign.lastProbeAt).map(Self.stamp) ?? "")
+            }
         }
+    }
+
+    private static func date(_ text: String?) -> Date? {
+        text.flatMap(BeijingTime.parseISO)
+    }
+
+    private static func stamp(_ date: Date) -> String {
+        "\(BeijingDay.title(date)) \(BeijingTime.clock(date))"
     }
 }
 

@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -181,7 +182,15 @@ class DaemonAPITests(unittest.TestCase):
         )
         maa_common.atomic_write_json(self.state_dir / "activity_watch.json", {"status": "idle"})
         maa_common.atomic_write_json(self.daemon_dir / "scheduler.json", {"schema_version": 1, "jobs": {}})
-        maa_common.atomic_write_json(self.daemon_dir / "resign.json", {"status": "ok", "expires_at": "2026-11-28T09:00:00+08:00"})
+        signed = maa_common.now_beijing()
+        maa_common.atomic_write_json(
+            self.daemon_dir / "resign.json",
+            {
+                "status": "running",
+                "last_signed_at": signed.isoformat(),
+                "expiration_date": (signed + timedelta(days=7)).isoformat(),
+            },
+        )
 
         with patch.object(maa_common, "run_lock_holder", return_value={"holder": "daily", "detail": "手动", "pid": 123, "run_id": run_id}), \
                 patch.object(maa_common, "load_config", return_value={"schema_version": 1}), \

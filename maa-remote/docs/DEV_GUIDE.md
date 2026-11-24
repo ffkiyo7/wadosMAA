@@ -394,9 +394,11 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
   state.lock      共享写锁
 
 ~/.wados-maa/daemon/
-  daemon.json     守护进程配置：端口、监听地址、允许的网段、局域网 IP、远程地址、通知后端、depot_enabled
+  daemon.json     守护进程配置：端口、监听地址、允许的网段、局域网 IP、远程地址、通知后端、depot_enabled、
+                  续签用的 ios_device_udid / ios_device_lan_ip / ios_resign_enabled（§13.4）
   secrets.json    Token 哈希、Bark 密钥（0600，不进仓库）
   scheduler.json  每条定时任务的上次槽位、状态和下次运行时间
+  resign.json     iOS 无线续签状态；resign.lock 是续签单实例锁（§13.4）
   tls/            自签证书和私钥（0600）；active_tls.json / tls_check.json 是当前证书和巡检结果
   *.plist、wados-maa-cloudflared.yml、rescue.html   deploy.py 渲染的 LaunchAgent、隧道配置、应急页
   reload.flag     maa_schedule 写，守护进程看到就热重载
@@ -932,5 +934,14 @@ ETA 仍按旧进度文件里**每一步**的耗时推：`index.jsonl` 只有整�
 | `POST /api/v1/copilot/{go,auto,mark}` | `copilot go`、`copilot auto`、`copilot mark-cleared` / `unmark` |
 | `POST /api/v1/schedule`、`/defaults`、`/config` | `schedule *`、`defaults set *`、`config set` / `patch` |
 | `POST /api/v1/upstream/update`、`/notify/test` | `upstream update`；发一条 Bark 测试推送 |
-| `POST /api/v1/ios/resign[?if_due=1]` | 无线续签。**还没实现**，现在固定回 501 `not_configured`（Phase 4 S4-1） |
+| `POST /api/v1/ios/resign[?if_due=1]` | 无线续签（§13.4）：没配 UDID 回 501 `not_configured`；带 `if_due` 且没到窗口回 200 `not_due`；正在续签、正在跑游戏回 409 `running` / `run_locked`；否则后台拉起 `maa_ios_resign.py run` 回 202 `started`。`full` Token 记为 App 触发，`resign_only` 记为快捷指令 |
+
+### 13.4 iOS 无线续签（`maa_ios_resign.py`）
+免费 Apple ID 的描述文件 7 天过期。状态在 `daemon/resign.json`：`last_signed_at`、`expiration_date`、`status`（`ok` / `due` / `running` / `failed`，快照里按锁现算）、`last_attempt_at`、`last_result`（`ok` / `skipped` / `failed`）、`last_error`、`last_probe_detail`、`log_summary`、`log_path`。
+
+- **窗口**：距上次签名满 120 小时，或离 `ExpirationDate` 不足 48 小时。第一次没有 `resign.json` 时按本机缓存里本 App 最新的描述文件补一份。
+- **自动**：守护进程每拍看一眼，在窗口内每 25 分钟拉起一次 `maa_ios_resign.py auto`（脱离会话的子进程）。四个守卫依次是：App 2 分钟内有 `full` Token 请求或开着 SSE（`--app-active`）、`run.lock` 被占、手机不在局域网（`ios_device_lan_ip` ping 不通且 62078 端口连不上）、`devicectl` 找不到 `ios_device_udid`。不满足就记 `last_probe_detail`，不打扰。
+- **执行**：持 `daemon/resign.lock`；构建源固定 `~/Developer/wados-maa-deploy`，必须停在 `main` 且 `ios/`、`shared/` 没有未提交改动；先把 `~/Library/Developer/Xcode/UserData/Provisioning Profiles/` 里本 App 的描述文件挪到 `logs/ios-resign/profiles-backup/`（不挪 Xcode 会复用旧文件，S0-1），再 `xcodebuild -allowProvisioningUpdates`（derivedData `~/Developer/forks/wados-maa-build/auto-resign`）。新 `embedded.mobileprovision` 的 `ExpirationDate` 必须严格晚于旧值，否则挪回旧文件、判失败、不安装。最后 `xcrun devicectl device install app` 无线覆盖安装。日志在 `logs/ios-resign/<时间>.log`，留最近 20 份。
+- **通知**（`id=ios-resign`，点开到 App 的签名页）：成功发 `passive`；手机离线、安装没成功这类暂时失败不发；第 6.5 天（或离到期不足 12 小时）还没续上、Xcode 账号要重新登录、有效期没后移、部署目录不对，发 `timeSensitive`，同一原因一天最多一次。
+- **命令**：`status` 看状态、`bootstrap` 补记录、`run --trigger cli` 立刻续签、`shortcut-token` 给快捷指令重新生成 `resign_only` Token（只显示一次，旧的作废）。快捷指令的配法见 [docs/IOS_RESIGN_SHORTCUT.md](../../docs/IOS_RESIGN_SHORTCUT.md)。
 

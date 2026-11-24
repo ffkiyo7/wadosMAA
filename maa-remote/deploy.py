@@ -241,6 +241,7 @@ SCRIPT_NAMES = (
     "maa_tls.py",
     "maa_api.py",
     "maa_daemon.py",
+    "maa_ios_resign.py",
 )
 # swiftc 编译产物：线上是二进制，`--check` 只查存在。
 COMPILED_HELPERS = ("ocrbox", "winmove", "barkcrypt")
