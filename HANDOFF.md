@@ -13,7 +13,7 @@
 
 1. **Phase 4 验收**（`docs/specs/P4_AUTO_RESIGN_AND_P2.md`「当前进度」）：代码 11-24 13:52 已部署。
    - 真机续签：11-24 23:47 手动跑通，有效期到 12-01 23:47，新版 App 已装。自动续签 11-29 23:47 窗口打开后看 `maa_ios_resign.py status`。
-   - 快捷指令：`maa_ios_resign.py shortcut-token` 拿 Token，按 `docs/IOS_RESIGN_SHORTCUT.md` 建自动化。
+   - 快捷指令：11-24 已建好，手动运行回 `not_due`。11-29 窗口打开后回家时看 `last_trigger` 是否为 `shortcut`。
    - 证书轮换演练：`rotate_tls.py --stage` → 打开 App 刷新 → `--activate` → App 不用重新配对。
    - 全部通过后勾 S4-5 清单。
 2. **抄作业导航通用化**（用户 11-24 确认要做，等放行）：
