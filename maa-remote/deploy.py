@@ -404,6 +404,10 @@ def deploy_daemon_files(target_home: Path) -> None:
     if rescue_src.is_file():
         copy_file(rescue_src, daemon_dir / "rescue.html", 0o600)
 
+    icon_src = ROOT / "daemon" / "icon.png"
+    if icon_src.is_file():
+        copy_file(icon_src, daemon_dir / "icon.png", 0o600)
+
     cf_tmpl = ROOT / "daemon" / "wados-maa-cloudflared.yml.tmpl"
     cf_yml = daemon_dir / "wados-maa-cloudflared.yml"
     if cf_tmpl.is_file():
@@ -443,6 +447,7 @@ def check_standalone(target_home: Path) -> dict[str, Any]:
         [
             target_home / "daemon" / "daemon.json",
             target_home / "daemon" / "rescue.html",
+            target_home / "daemon" / "icon.png",
             target_home / "daemon" / "wados-maa-cloudflared.yml",
             target_home / "daemon" / "io.github.ffkiyo7.wados-maa.cloudflared.plist",
         ]
@@ -452,6 +457,7 @@ def check_standalone(target_home: Path) -> dict[str, Any]:
         *script_pairs,
         *maa_config_content_checked_pairs(),
         (ROOT / "daemon" / "rescue.html", target_home / "daemon" / "rescue.html"),
+        (ROOT / "daemon" / "icon.png", target_home / "daemon" / "icon.png"),
     ]
     mismatched = content_mismatches(content_pairs)
     ok = not missing and not mismatched

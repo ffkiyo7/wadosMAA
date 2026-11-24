@@ -6,7 +6,7 @@
    （默认 5s）再执行 `do_handshake()`，慢速半开连接绝不阻塞主 `accept()` 线程与其他并发请求；
 2. 来源 IP 白名单收口：仅放行 `127.0.0.1/32`、`::1/128` 与 `192.168.50.0/24`（可配置）；
 3. 分域 Bearer Token 鉴权（常时间 SHA-256 比对）：
-   - `GET /healthz` 与 `GET /rescue` 免鉴权（不泄露任何账号/游戏数据）；
+   - `GET /healthz`、`GET /rescue` 与 `GET /icon.png`（Bark 推送头像）免鉴权（不泄露任何账号/游戏数据）；
    - `full` Token 可访问全部 `/api/v1/*`；
    - `resign_only` Token 仅允许 `POST /api/v1/ios/resign`（含 `?if_due=1`），访问其他接口一律 `403`；
 4. 全部 27+ REST/SSE 端点（SPEC §5.1 & §5.2）：
@@ -397,6 +397,7 @@ class APIContext:
     daemon_dir: Path
     secrets_path: Path
     rescue_html_path: Path
+    icon_path: Path | None = None
     python_bin: str = sys.executable
     allowed_cidrs: tuple[str, ...] = DEFAULT_ALLOWED_CIDRS
     handshake_timeout: float = DEFAULT_HANDSHAKE_TIMEOUT
@@ -462,6 +463,9 @@ class APIContext:
         rescue_deployed = daemon_dir / "rescue.html"
         rescue_repo = Path(__file__).resolve().parents[1] / "daemon" / "rescue.html"
         rescue_path = rescue_deployed if rescue_deployed.is_file() else rescue_repo
+        icon_deployed = daemon_dir / "icon.png"
+        icon_repo = Path(__file__).resolve().parents[1] / "daemon" / "icon.png"
+        icon_path = icon_deployed if icon_deployed.is_file() else icon_repo
         return cls(
             home_dir=home,
             scripts_dir=maa_common.SCRIPTS_DIR,
@@ -470,6 +474,7 @@ class APIContext:
             daemon_dir=daemon_dir,
             secrets_path=daemon_dir / "secrets.json",
             rescue_html_path=rescue_path,
+            icon_path=icon_path,
             python_bin=sys.executable,
             allowed_cidrs=tuple(allowed_cidrs),
             handshake_timeout=handshake_timeout,
@@ -1224,6 +1229,15 @@ class _APIRequestHandler(BaseHTTPRequestHandler):
                 self._send_error_json(HTTPStatus.NOT_FOUND, "not_found", "应急页面未部署。")
                 return
             self._send_bytes(HTTPStatus.OK, html_path.read_bytes(), "text/html; charset=utf-8")
+            return
+
+        if raw_path == "/icon.png":
+            # Bark 推送头像（daemon.json 的 bark_icon_url）：手机经隧道直接下载，无法带 Token。
+            icon_path = self.ctx.icon_path
+            if icon_path is None or not icon_path.is_file():
+                self._send_error_json(HTTPStatus.NOT_FOUND, "not_found", "图标未部署。")
+                return
+            self._send_bytes(HTTPStatus.OK, icon_path.read_bytes(), "image/png", cache_control="public, max-age=86400")
             return
 
         # 2. 以下全部需要 full Token

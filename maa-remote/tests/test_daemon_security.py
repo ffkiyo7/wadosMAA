@@ -1049,6 +1049,21 @@ global.fetch = async (path, opts) => {{
             finally:
                 conn.close()
 
+            # Bark 推送头像免鉴权：没配 icon_path 时 404，配了返回 PNG
+            st, missing = _tls_request(port, "GET", "/icon.png")
+            self.assertEqual(st, 404)
+            self.assertEqual(missing["code"], "not_found")
+            ctx.icon_path = ROOT / "daemon" / "icon.png"
+            conn = http.client.HTTPSConnection("127.0.0.1", port, timeout=3.0, context=cctx)
+            try:
+                conn.request("GET", "/icon.png")
+                r = conn.getresponse()
+                self.assertEqual(r.status, 200)
+                self.assertEqual(r.getheader("Content-Type"), "image/png")
+                self.assertEqual(r.read(), (ROOT / "daemon" / "icon.png").read_bytes())
+            finally:
+                conn.close()
+
             info1 = server.get_active_cert_info()
             assert info1 is not None
             self.assertFalse(info1["meta_ok"])

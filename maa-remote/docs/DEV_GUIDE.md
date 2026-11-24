@@ -915,7 +915,7 @@ ETA 仍按旧进度文件里**每一步**的耗时推：`index.jsonl` 只有整�
 - HTTPS 监听 `api_host:api_port`（线上 `0.0.0.0:18170`），自签 ECDSA P-256 证书在 `daemon/tls/`。TLS 握手放到工作线程里做、带短超时，慢速半开连接不会卡住别的请求。
 - 来源 IP 白名单 `allowed_cidrs`（默认本机和 `192.168.50.0/24`）。Cloudflare Tunnel（`maa.luxraykit.com`）从本机 cloudflared 进来，所以也放行。
 - iPhone 按 SPKI SHA-256 固定证书，App 里可存一个备用指纹。轮换：`daemon/rotate_tls.py --stage` 先出 `tls/cert.next.pem`；快照的 `tls.next_spki_sha256` 会带上它的指纹，App 下次读快照时自动记成备指纹（也可手填）。之后 `--activate` 换证书并重载 daemon 和 cloudflared，App 看到正在服务的指纹等于备指纹就把它提升为主指纹。守护进程每天巡检证书，剩 `tls_warn_days` 天时发 Bark 告警（`id=tls-cert`）。
-- Bearer Token 分两种，`secrets.json` 只存 SHA-256：`full` 能调全部 `/api/v1/*`；`resign_only` 只能调 `POST /api/v1/ios/resign`，别的一律 403。`GET /healthz`、`GET /rescue`（应急停止页）免鉴权。
+- Bearer Token 分两种，`secrets.json` 只存 SHA-256：`full` 能调全部 `/api/v1/*`；`resign_only` 只能调 `POST /api/v1/ios/resign`，别的一律 403。`GET /healthz`、`GET /rescue`（应急停止页）、`GET /icon.png`（Bark 推送头像，`daemon.json` 的 `bark_icon_url` 指向它）免鉴权。
 - 首次配对：`daemon/init_daemon.py` 在终端打印二维码（局域网地址、远程地址、SPKI 指纹、`full` Token）。Token 明文只在这时出现一次，`secrets.json` 里只有哈希。
 
 ### 13.3 接口
