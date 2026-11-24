@@ -5,12 +5,12 @@
 1. 安全前置检查：
    - 确认 `~/.hermes/state/maa/run.lock`（及 `activity_watch.lock`、`~/.wados-maa/state/maa/run.lock`）空闲；
    - 确认距下一场定时任务（早/晚场计划卡与日常、仓库对表）> 30 分钟；
-   - 按规则识别 MAA cron 与按钮，校验数量与 Spec 基线（5 活跃 MAA cron / 16 非 MAA cron / 18 MAA 按钮 / 14 非 MAA 按钮）严格一致，不一致一律拒绝并报告。
+   - 按规则识别 MAA cron 与按钮，校验数量与 Spec 基线（5 活跃 MAA cron / 17 非 MAA cron / 18 MAA 按钮 / 14 非 MAA 按钮）严格一致，不一致一律拒绝并报告。
 2. 全量前置备份至 `~/.wados-maa/backups/cutover-<YYYYMMDDTHHMMSS>/`：
    - `~/.hermes/state/maa/`、`~/.hermes/state/agent-book/buttons.json`、`~/.hermes/cron/jobs.json`、
      `~/.hermes/scripts/maa_*.py`、`~/.hermes/skills/games/maa-operator/`、`RemoteHermesHome` 原值。
 3. 单步停旧入口：
-   - 持 `cron/.jobs.lock` 暂停 5 条活跃 MAA cron（保留 16 条非 MAA cron 与既有停用项不动）；
+   - 持 `cron/.jobs.lock` 暂停 5 条活跃 MAA cron（保留 17 条非 MAA cron 与既有停用项不动）；
    - 停用 Hermes MAA skill（`SKILL.md` → `SKILL.md.disabled`）；
    - 持 `agent-book/state.lock` 原子读改写 `buttons.json`，仅删 18 条 MAA 按钮键（保留 14 条非 MAA 业务键）；
    - 将 `~/.hermes/scripts/maa_*.py` 替换为立即非零退出的拒绝桩。
@@ -50,7 +50,7 @@ import maa_daemon  # noqa: E402
 MANIFEST_SCHEMA_VERSION = 1
 
 EXPECTED_ACTIVE_MAA_CRONS = 5
-EXPECTED_NON_MAA_CRONS = 16
+EXPECTED_NON_MAA_CRONS = 17
 EXPECTED_MAA_BUTTONS = 18
 EXPECTED_NON_MAA_BUTTONS = 14
 MIN_SESSION_LEAD_MINUTES = 30
@@ -522,7 +522,7 @@ def inspect_cutover(
     if wados_locked:
         errors.append(f"新目录 run.lock 正被占用（{wados_holder or '未知持有者'}），拒绝切线。")
 
-    # 2. 识别 MAA cron 并严格校验 5 / 16
+    # 2. 识别 MAA cron 并严格校验 5 / 17
     active_maa: list[dict[str, Any]] = []
     inactive_maa: list[dict[str, Any]] = []
     non_maa: list[dict[str, Any]] = []
@@ -717,7 +717,7 @@ def run_cutover(
     paused_cron_ids = [str(item["id"]) for item in report["plan"]["crons_to_pause"]]
     removed_button_keys = list(report["plan"]["buttons_to_remove"])
 
-    # Step 3a: 持 cron/.jobs.lock 暂停 5 条活跃 MAA cron（16 条非 MAA cron 完整不动）
+    # Step 3a: 持 cron/.jobs.lock 暂停 5 条活跃 MAA cron（17 条非 MAA cron 完整不动）
     paused_at_utc = moment.astimezone(timezone.utc).isoformat()
     with _exclusive_file_lock(paths.hermes_cron_lock):
         jobs_doc, jobs = _load_jobs_doc(paths.hermes_cron_jobs)
@@ -904,7 +904,7 @@ def run_rollback(
                 restored_buttons.append(key)
         maa_common.atomic_write_json(paths.hermes_buttons, current_buttons)
 
-    # 5. 持 cron/.jobs.lock 还原 5 条 MAA cron（保留 16 条非 MAA cron 当前态）
+    # 5. 持 cron/.jobs.lock 还原 5 条 MAA cron（保留 17 条非 MAA cron 当前态）
     _backup_jobs_doc, backup_jobs = _load_jobs_doc(resolved_backup / "jobs.json")
     backup_jobs_by_id = {str(j.get("id") or ""): j for j in backup_jobs}
     paused_ids = [str(cid) for cid in (manifest.get("paused_cron_ids") or [])]
@@ -1015,7 +1015,10 @@ def _format_cutover_report(result: Mapping[str, Any]) -> str:
         for err in errors:
             lines.append(f"  [!] {err}")
     elif result.get("dry_run"):
-        lines.append("\n结论：前置检查与 5/16/18/14 数量核对全部通过，可执行切线。")
+        lines.append(
+            f"\n结论：前置检查与 {EXPECTED_ACTIVE_MAA_CRONS}/{EXPECTED_NON_MAA_CRONS}/"
+            f"{EXPECTED_MAA_BUTTONS}/{EXPECTED_NON_MAA_BUTTONS} 数量核对全部通过，可执行切线。"
+        )
     else:
         lines.append("\n结论：生产切线已完成。")
     return "\n".join(lines)

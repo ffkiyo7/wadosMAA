@@ -73,7 +73,7 @@ def _build_fixture_home(
     *,
     active_maa_crons: int = 5,
     inactive_maa_crons: int = 2,
-    non_maa_crons: int = 16,
+    non_maa_crons: int = 17,
     maa_buttons: int = 18,
     non_maa_buttons: int = 14,
 ) -> cutover.CutoverPaths:
@@ -147,7 +147,7 @@ def _build_fixture_home(
         encoding="utf-8",
     )
 
-    # 3. cron/jobs.json（按 Spec 基线：5 活跃 MAA + 2 已停 MAA + 16 非 MAA）
+    # 3. cron/jobs.json（按 Spec 基线：5 活跃 MAA + 2 已停 MAA + 17 非 MAA）
     active_specs = [
         ("03d5e98ce8d4", "MAA 计划卡·早", "maa_plan_card.py", str(paths.hermes_state_maa / "am"), "2026-11-21T23:50:00+00:00"),
         ("50cd1fb095f2", "MAA 日常·早", "maa_daily.py", str(paths.hermes_state_maa / "am"), "2026-11-22T00:00:00+00:00"),
@@ -260,7 +260,7 @@ class CutoverTests(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertTrue(res["dry_run"])
         self.assertEqual(res["counts"]["active_maa_crons"], 5)
-        self.assertEqual(res["counts"]["non_maa_crons"], 16)
+        self.assertEqual(res["counts"]["non_maa_crons"], 17)
         self.assertEqual(res["counts"]["maa_buttons"], 18)
         self.assertEqual(res["counts"]["non_maa_buttons"], 14)
 
@@ -276,7 +276,7 @@ class CutoverTests(unittest.TestCase):
         text = cutover._format_cutover_report(res)
         self.assertIn("DRY-RUN", text)
         self.assertIn("5/5", text)
-        self.assertIn("16/16", text)
+        self.assertIn("17/17", text)
         self.assertIn("18/18", text)
         self.assertIn("14/14", text)
 
@@ -303,7 +303,7 @@ class CutoverTests(unittest.TestCase):
         self.assertTrue((backup_dir / "jobs.json").is_file())
         self.assertTrue((backup_dir / "state_maa" / "last_run.json").is_file())
 
-        # 2. 校验 5 条活跃 MAA cron 已暂停，16 条非 MAA cron 完好无损
+        # 2. 校验 5 条活跃 MAA cron 已暂停，17 条非 MAA cron 完好无损
         after_jobs = json.loads(paths.hermes_cron_jobs.read_text(encoding="utf-8"))["jobs"]
         active_maa, inactive_maa, non_maa = cutover.classify_crons(after_jobs)
         self.assertEqual(len(active_maa), 0)
@@ -382,7 +382,7 @@ class CutoverTests(unittest.TestCase):
         self.assertEqual(restored_proc.returncode, 0)
         self.assertIn("LIVE maa_action.py", restored_proc.stdout)
 
-        # 校验 5 条 MAA cron 恢复活跃，16 条非 MAA 完好
+        # 校验 5 条 MAA cron 恢复活跃，17 条非 MAA 完好
         rb_jobs = json.loads(paths.hermes_cron_jobs.read_text(encoding="utf-8"))["jobs"]
         rb_active, rb_inactive, rb_non = cutover.classify_crons(rb_jobs)
         self.assertEqual(len(rb_active), 5)
@@ -408,10 +408,10 @@ class CutoverTests(unittest.TestCase):
         self.assertTrue((paths.wados_state_maa / "last_run.json").is_file())
         self.assertTrue(backup_dir.is_dir())
 
-    def test_refuses_when_counts_mismatch_spec_5_16_18_14(self) -> None:
+    def test_refuses_when_counts_mismatch_spec_5_17_18_14(self) -> None:
         cases = [
             ("active_maa_crons=4", {"active_maa_crons": 4}),
-            ("non_maa_crons=15", {"non_maa_crons": 15}),
+            ("non_maa_crons=16", {"non_maa_crons": 16}),
             ("maa_buttons=17", {"maa_buttons": 17}),
             ("non_maa_buttons=13", {"non_maa_buttons": 13}),
         ]
