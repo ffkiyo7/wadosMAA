@@ -3,6 +3,8 @@
 > 对应总 Spec：[SPEC_DECOUPLE_AND_IOS.md §3 & §8.1 & §9 Phase 1](../SPEC_DECOUPLE_AND_IOS.md)
 > 既有不变量参考：[maa-remote/docs/DEV_GUIDE.md §8 & §12](../../maa-remote/docs/DEV_GUIDE.md)
 > 硬约束：**全程只在独立分支 `feat/decouple-ios` 与独立 worktree（`~/Developer/wados-maa-decouple`）开发，`dev`/`main` 与线上 `~/.hermes` 零改动；保持纯 Python stdlib 零第三方依赖。**
+>
+> **状态（2026-11-24 补记）**：Phase 1 已完成，下面的勾选框当时没有逐项回填。代码已随 Phase 3 合入 `dev`/`main` 并上线，`feat/decouple-ios` 分支和 worktree 已删除。离线项在 11-24 复核过（913 个单测、ruff、pyright 全绿）；真机项由 Phase 3 的 S3-5 真机验收和切线后的线上首场覆盖。
 
 ---
 

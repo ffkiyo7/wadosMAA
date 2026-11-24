@@ -1,16 +1,23 @@
 # 开发指南（基于当前代码实现）
 面向要改这套东西的人。本文只讲**现在的自动化链路是怎么串起来的、改哪里会影响什么**。事故经过、排查过程和「为什么改成这样」在 [incidents/](./incidents/README.md)；手动场选关卡的方案在 [PLAN_MANUAL_RUN.md](./PLAN_MANUAL_RUN.md)；四期及更早的设计意图在[archive/](./archive/)（[archive/PLAN_PHASE4.md](./archive/PLAN_PHASE4.md) 为四期）；功能与落地状态见 [README.md](../README.md)。
 
+> **2026-11-24 生产切线之后**：线上运行根目录从 `~/.hermes` 换成 `~/.wados-maa`，调度从 Hermes cron 换成自带守护进程 `maa_daemon.py`（§1、§13），通知从 Discord 换成 Bark，操作入口是 Mac App（§12）和 iPhone App（§13）。
+> §3、§5 里关于 Discord 计划卡、按钮、子区、聊天的描述，对应的代码还在，但线上没有 Discord token，这些出口全部跳过（#63），只作理解代码用。正文里剩下的 `~/.hermes/state/maa/…` 路径，现在一律读作 `~/.wados-maa/state/maa/…`（代码里叫 `HERMES_HOME` 的常量就是这个目录）。
+
 ## 0. 心智模型：仓库 ≠ 运行时
+运行根目录（下称 `$WADOS_MAA_HOME`）按 `WADOS_MAA_HOME` → `HERMES_HOME` → `~/.wados-maa` 解析（`maa_common.resolve_home()`）。线上是 `~/.wados-maa`，开发副本是 `~/Developer/forks/maa-remote-devhome`。
+
 | 仓库里的 | 部署后运行于 | 谁负责搬运 |
 |---|---|---|
-| `scripts/*.py` | `~/.hermes/scripts/*.py` | `deploy.py` |
-| `state/*.json` | `~/.hermes/state/maa/*.json` | `deploy.py`（种子/合并，见 §7） |
+| `scripts/*.py` | `$WADOS_MAA_HOME/scripts/*.py` | `deploy.py --standalone` |
+| `scripts/*.swift`、`daemon/wados-maa-launcher.swift` | `$WADOS_MAA_HOME/scripts/{ocrbox,winmove,barkcrypt,wados-maa-launcher}`（编译产物） | `deploy.py` 编译 |
+| `state/*.json` | `$WADOS_MAA_HOME/state/maa/*.json` | `deploy.py`（种子/合并，见 §7） |
 | `config/maa-cli/**` | `~/.config/maa-cli/**` | `deploy.py` |
-| `skills/games/maa-operator/SKILL.md` | `~/.hermes/skills/games/maa-operator/SKILL.md` | `deploy.py` |
-| —（无源文件） | `~/.hermes/hermes-agent/plugins/platforms/discord/adapter.py` 等 4 处 | `deploy.py` 打补丁 |
+| `daemon/*.plist`、`*.yml.tmpl`、`rescue.html` | `$WADOS_MAA_HOME/daemon/`（渲染好的 LaunchAgent、隧道配置、应急页） | `deploy.py`；plist 装进 `~/Library/LaunchAgents/` 是人工的一次性操作 |
+| `daemon/init_daemon.py`、`rotate_tls.py`、`cutover.py` | 不部署，从仓库直接跑 | 人工 |
+| `skills/games/maa-operator/SKILL.md` | 只在旧 Hermes 模式部署，切线后不用 | — |
 
-**改了仓库不跑 `python3 deploy.py`，线上行为不会有任何变化。** 直接手改 `~/.hermes/scripts/` 不会回流仓库，下次部署会被覆盖（覆盖前有备份）。例外：`~/.config/maa-cli/tasks/daily.toml` **每场执行前都被 `maa_daily.py`整个重写**（§4 第 7 步），仓库那份只是种子和阅读参考。
+**改了仓库不部署，线上行为不会有任何变化。** 直接手改 `~/.wados-maa/scripts/` 不会回流仓库，下次部署会被覆盖（覆盖前有备份）。例外：`~/.config/maa-cli/tasks/daily.toml` **每场执行前都被 `maa_daily.py`整个重写**（§4 第 7 步），仓库那份只是种子和阅读参考。
 
 ## 0.5 设备层：PlayCover
 设备层是 PlayCover 原生明日方舟，全部在 `scripts/maa_playcover.py`（只用 stdlib）。旧文档里模拟器 / ADB / MaaTouch / `emulator_*` 的说法按这张表对应：
@@ -33,7 +40,7 @@
 
 **窗口恢复让游戏直接开在虚拟屏上**：游戏默认按「新开窗口」启动，总开在当前主屏正中，无视存着的位置（启动前挪鼠标没用）。打开 `NSQuitAlwaysKeepsWindows` 后按「恢复上次的窗口」启动，回到上次 `close_game()` 时的位置。所以 `launch_game()` 在游戏**没在跑**时先调 `ensure_window_restore()`：`defaults read` 游戏容器的偏好设置域（`game_prefs_domain()`），不是 1 就写 `-bool true`；失败只打一行 stderr。游戏在跑时不碰设置。显示器关着时的恢复还没实测。来由见 [incidents/2026-11-05-pm-screencap-failed.md](./incidents/2026-11-05-pm-screencap-failed.md)。
 
-**挪屏是兜底**：`move_to_game_display()` 用 JXA 读 `NSScreen` 找 `game_display_name`（默认 `MAA-Game`）的范围，窗口没有**整个**落在里面就调 `~/.hermes/scripts/winmove <pid> <x> <y>`（`scripts/winmove.swift`，`deploy.py` 编译，AX `kAXPositionAttribute`）挪过去居中。winmove 要调用方有**辅助功能**权限（旧线上是 Hermes gateway 那个 Python，新后端是 `wados-maa-launcher`，要在系统设置里单独授权），没有就退出码 3、只记警告。System Events / JXA 直接设 AX 位置都不行（前者要自动化权限，后者 `AXValueCreate` 回 -25200）。
+**挪屏是兜底**：`move_to_game_display()` 用 JXA 读 `NSScreen` 找 `game_display_name`（默认 `MAA-Game`）的范围，窗口没有**整个**落在里面就调 `$WADOS_MAA_HOME/scripts/winmove <pid> <x> <y>`（`scripts/winmove.swift`，`deploy.py` 编译，AX `kAXPositionAttribute`）挪过去居中。winmove 要调用方有**辅助功能**权限（旧线上是 Hermes gateway 那个 Python，新后端是 `wados-maa-launcher`，要在系统设置里单独授权），没有就退出码 3、只记警告。System Events / JXA 直接设 AX 位置都不行（前者要自动化权限，后者 `AXValueCreate` 回 -25200）。
 
 **侧边栏缩略图**：台前调度把窗口缩成约 144×149 的缩略图时 `kCGWindowIsOnscreen` 仍是真，`SCRN` 却回 0 字节；进程另挂着几条不在屏的 1920×30 横条和一个 500×500 空窗口。`game_window()` 只滤两边都 < 100 的横条；`window_shelved()`（在屏且宽 < `MIN_GAME_WIDTH`）认缩略图；`window_usable()` = 在屏且不是缩略图。`settle_game_window()` 不挪缩略图，激活后每 0.5 秒看一次、最多 5 秒，一回到屏上就马上挪到虚拟屏并居中；摆不回来时告警里带窗口尺寸、位置、状态和各块屏的位置（`describe_window()`）。
 
@@ -55,40 +62,34 @@
 
 ## 1. 全链路总图
 ```
-        Hermes gateway（LaunchAgent ai.hermes.gateway，唯一常驻进程）
-        ├── cron 调度器（UTC）                    ├── Discord 适配器（网关连接）
-   ┌────┴──────────────────────────────┐      ┌────┴─────────────────────────┐
-   │ */15 * * * * maa_activity_watch  │      │ 组件交互 hermes:btn:maa:*    │
-   │ 30 20 * * *  maa_depot.py         │      │   → buttons.json 查登记      │
-   │ (京 04:30；到期才开游戏)         │      │   → exec 白名单校验          │
-   │ 50 23 * * *  maa_plan_card.py am  │      │   → maa_action.py（≤20s）    │
-   │ (京 07:50, workdir=…/maa/am)      │      │                              │
-   │ 50 13 * * *  maa_plan_card.py pm  │      │ 自然语言（免 @ 频道）        │
-   │ (京 21:50, workdir=…/maa/pm)      │      │   → maa-operator 技能        │
-   │  0  0 * * *  maa_daily.py  am     │      │   → terminal 调 maa_action.py│
-   │ (京 08:00, workdir=…/maa/am)      │      └────┬─────────────────────────┘
-   │  0 14 * * *  maa_daily.py  pm     │           │ 只写 plan.json / 派发
-   │ (京 22:00, workdir=…/maa/pm)      │           │
-   └───────────────────────────────────┘           ▼
-   ~/.hermes/state/maa/{config,defaults,plan,last_run}.json + run.lock + runs/
+   wados-maa-daemon（LaunchAgent io.github.ffkiyo7.wados-maa.daemon，经 wados-maa-launcher 启动）
+   ├── 内置调度器（北京时间，每 10 秒一 tick）          ├── HTTPS + SSE API（:18170，§13）
+   │   activity_watch  每 15 分钟 maa_activity_watch.py │     iPhone App：局域网直连 / Cloudflare Tunnel
+   │   depot           04:30 maa_depot.py（默认关）      │     /rescue 应急停止页
+   │   plan_card_am/pm 场前 10 分钟 maa_plan_card.py <场>│     写操作 → 子进程 maa_action.py
+   │   daily_am/pm     开跑时刻 maa_daily.py <场>        │
+   └── 证书到期巡检（Bark 告警）                          └── Mac App：直接子进程调 maa_action.py（§12）
+                        │                                        │ 只写 plan.json / defaults.json / config.json / 派发
+                        ▼                                        ▼
+   ~/.wados-maa/state/maa/{config,defaults,plan,last_run}.json + run.lock + runs/
                         │  effective_plan(at, phase) = defaults ⊕ 当天 sessions.<场次>
                         ▼
-   maa_daily.py ── flock ── 探游戏进程 ── 快照 runs/<date>-<phase>.json ── 开游戏
-        └─ 渲染 daily.toml ─ maa run daily ─ 5s 一次编辑子区消息
-                                 └─ 截图 ─ MaaTools TERM / pkill ─ 战报 embed
+   maa_daily.py ── flock ── 探游戏进程 ── 快照 runs/<run_id>.json ── 开游戏
+        └─ 渲染 daily.toml ─ maa run daily ─ 写 runs/<run_id>.progress.json
+                                 └─ 截图 ─ MaaTools TERM / pkill ─ 战报 runs/<run_id>-report.json ─ Bark
 ```
 
-六条 cron 全是 `--no-agent --deliver local` 的**短命进程**；stdout 不投递，消息由脚本自己用 Discord REST API 发。
+定时任务全是守护进程拉起的**短命子进程**（`start_new_session=True`），重启守护进程不会杀掉正在跑的场次。补跑、超时、热重载的规则见 `maa_daemon.py` 开头的说明和 §13。
 
 ## 2. 组件清单
 | 文件 | 角色 | 触发方式 | 典型耗时 |
 |---|---|---|---|
 | `scripts/maa_common.py` | 公共层：时区、三把锁、原子写、Discord REST/multipart、清理、`prune_button_registry`、场次级计划求值（`plan_sessions` / `effective_plan`）、「你在玩」跳过的统一出口 `report_game_busy` | 被 import | — |
-| `scripts/maa_plan_card.py` | 早晚两张计划卡 + 抄作业卡的渲染；早场卡先跟上游更新；刷新活动关；写按钮登记；清理旧子区/卡片/产物 | cron 京 07:50 / 21:50；抄作业卡由 `maa_action.py` 调 | 早场数秒～5 分钟，晚场数秒 |
-| `scripts/maa_depot.py` | 每周仓库对表；只接纳 `done=true` 的完整 Depot，算掉落增量与消耗率；森空岛不可用时顺手跑 `OperBox` | cron 京 04:30，满 7 天才执行 | 到期数分钟；未到期不开游戏 |
-| `scripts/maa_activity_watch.py` | 轮询活动；排目标集合、按理智排一轮 `(关, 模式)`、发「已排程」卡、到点派 `run-batch` | cron 每 15 分钟 | 通常 <1s；现搜作业每关 5~20s（每 tick ≤6 关） |
-| `scripts/maa_daily.py` | 执行主体：开游戏 → maa-cli → 流式进度 → 截图 → 关游戏 → 战报 | cron 京 08:00 / 22:00；`now <token>` | 10～50 分钟 |
-| `scripts/maa_action.py` | **唯一**状态变更与派发入口（按钮、下拉、聊天、GUI） | Discord 组件；terminal；GUI | < 1s（硬性要求） |
+| `scripts/maa_plan_card.py` | 早晚两张计划卡 + 抄作业卡的渲染；早场卡先跟上游更新；刷新活动关；写按钮登记；清理旧子区/卡片/产物 | 调度器，早晚场前 10 分钟；抄作业卡由 `maa_action.py` 调 | 早场数秒～5 分钟，晚场数秒 |
+| `scripts/maa_depot.py` | 每周仓库对表；只接纳 `done=true` 的完整 Depot，算掉落增量与消耗率；森空岛不可用时顺手跑 `OperBox` | 调度器 04:30（`depot_enabled`，默认关），满 7 天才执行 | 到期数分钟；未到期不开游戏 |
+| `scripts/maa_activity_watch.py` | 轮询活动；排目标集合、按理智排一轮 `(关, 模式)`、发「已排程」卡、到点派 `run-batch` | 调度器每 15 分钟 | 通常 <1s；现搜作业每关 5~20s（每 tick ≤6 关） |
+| `scripts/maa_daily.py` | 执行主体：开游戏 → maa-cli → 流式进度 → 截图 → 关游戏 → 战报 | 调度器，早晚场开跑时刻；`now <token>` | 10～50 分钟 |
+| `scripts/maa_action.py` | **唯一**状态变更与派发入口（Mac App、iPhone App 经 API、终端；旧时还有 Discord 按钮和聊天） | Mac App 子进程；`maa_api` 子进程；终端 | < 1s（硬性要求） |
 | `scripts/maa_copilot.py` | 抄作业领域层：关卡索引、prts 客户端、匹配打分、目标集合、本地记账、已排程卡 | 被 import | — |
 | `scripts/maa_copilot_worker.py` | 抄作业后台：`search <token>` 搜一关并排程；`run-batch <token>` 串行连抄一轮 | 仅由 `maa_action` / watcher 派发 | 搜索 5~20s；一关 8~15 分钟 |
 | `scripts/maa_farming.py` | 素材权重领域层：一图流 / 企鹅抓取（缓存 `state/maa/farming/`）+ 三项加权分 + 候选关集合（D5）+ `stage_ap_cost()` | 被 plan_card / watcher import | 有缓存 <0.5s；冷缓存 3~10s |
@@ -96,24 +97,30 @@
 | `scripts/maa_gamedata.py` | ArknightsGameData 地形（解锁链、区域名、EX 理智），一天抓一次，缓存 `copilot/gamedata.json` | watcher 刷新 | — |
 | `scripts/maa_skland.py` | 森空岛：HMAC 签名、grant→cred、练度与理智、`link`（stdin 收 token）、每日体检 | 本机终端；见 §5.5 | 秒级 |
 | `scripts/maa_upstream.py` | **上游更新的唯一实现**（#60）：持 `run.lock` 跑 maa-cli / MaaCore / MaaResource 三步，写 `upstream.json`；离线判定和开跑前硬拒 | 早场计划卡；`upstream update` 的 worker | 更新几分钟；`status` < 2s |
-| `scripts/maa_schedule.py` | 早晚场时间 ↔ Hermes cron：认出四个场次任务，用 `hermes cron edit/pause/resume` 对齐（K6） | `maa_action schedule *` | < 20s |
+| `scripts/maa_schedule.py` | 早晚场时间、Depot 开关 ↔ 内置调度器：改 `session_schedule` / `daemon.json` 后发 `SIGHUP` + 写 `daemon/reload.flag` 让守护进程热重载；`schedule_report()` 合并 `daemon/scheduler.json` 给 App 看（K6） | `maa_action schedule *` | < 1s |
+| `scripts/maa_daemon.py` | **唯一常驻进程**：6 条内置定时任务（补跑、超时、防重入）、起 HTTPS API、证书到期巡检（§13） | LaunchAgent `io.github.ffkiyo7.wados-maa.daemon` | 常驻 |
+| `scripts/maa_api.py` | HTTPS + SSE 接口：Bearer Token 分域鉴权、来源 IP 白名单、快照 / 历史 / 截图 / 日志，写操作转调 `maa_action.py`（§13） | 被 `maa_daemon` import | 读 < 1s |
+| `scripts/maa_tls.py` | 自签证书（OpenSSL 3 ECDSA P-256）、SPKI 指纹、Token 哈希、到期巡检、终端二维码 | 被 daemon / `daemon/*.py` import | — |
+| `scripts/maa_notify.py` | 统一通知出口：Bark + `barkcrypt` AES-GCM 加密；缺配置、失败一律只记日志（#63） | 被日常 / 抄作业 / 活动监控 / 证书巡检调 | 秒级 |
 | `scripts/maa_settings.py` | 可从外面改的配置项白名单和校验（`FIELDS`，K3 / K5） | `maa_action config *` | < 1s |
 | `scripts/maa_playcover.py` | **设备层**（§0.5） | 被日常 / Depot / 抄作业 import | — |
-| `scripts/ocrbox.swift` / `winmove.swift` | Vision OCR（watchdog、主页校验）/ AX 挪窗口，`deploy.py` 编译到 `~/.hermes/scripts/` | 被调用 | <1s |
-| `deploy.py` | 幂等部署 + 给 Hermes 打补丁 + 备份 + 编译 | 人工 | 秒级 |
-| `skills/games/maa-operator/SKILL.md` | 约束 LLM 只能走 `maa_action.py` 的护栏 | gateway 按频道绑定加载 | — |
+| `scripts/ocrbox.swift` / `winmove.swift` / `barkcrypt.swift` | Vision OCR（watchdog、主页校验）/ AX 挪窗口 / Bark 加密，`deploy.py` 编译到 `$WADOS_MAA_HOME/scripts/` | 被调用 | <1s |
+| `daemon/wados-maa-launcher.swift` | 守护进程的固定签名入口，辅助功能权限授给它（S0-4 方案 B） | LaunchAgent 的 `ProgramArguments[0]` | — |
+| `daemon/init_daemon.py` / `rotate_tls.py` / `cutover.py` | 一次性运维：生成证书、Token、配对二维码 / 证书轮换（`--stage` 预生成、`--activate` 切换并重载）/ 生产切线与 `--rollback` | 人工，从仓库直接跑 | 秒级 |
+| `deploy.py` | 幂等部署 + 备份 + 编译；`--standalone` 部署到 `~/.wados-maa`（现行），不带时是旧 Hermes 模式（§7） | 人工 | 秒级 |
+| `skills/games/maa-operator/SKILL.md` | 旧 Hermes 时期约束 LLM 只能走 `maa_action.py` 的护栏；切线后不部署 | — | — |
 | `tests/test_*.py` | stdlib 单测，按领域分文件；共用桩 `tests/_helpers.py`，隔离层 `tests/_isolation.py`（§9） | 人工 / CI | 约 6s |
 | `.github/workflows/tests.yml` | CI：macOS 上 3.11 / 3.12 × 两种 HOME 跑单测 + ruff + pyright（§9） | push / PR | 几分钟 |
 
-## 3. 链路一：两张计划卡（`maa_plan_card.py`，京 07:50 早场 / 21:50 晚场）
-**一天两张卡，一张管一场**（D1）。场次来自 **workdir 名**（`~/.hermes/state/maa/{am,pm}`），也接受 argv；都没有时按小时兜底（`select_phase()`，`< 14 点` → `am`）。Hermes 的 `--script` 不支持 argv，所以 cron 用 workdir。`main(argv)` 严格按顺序：
+## 3. 链路一：两张计划卡（`maa_plan_card.py`，早晚场前 10 分钟，默认 07:50 / 21:50）
+**一天两张卡，一张管一场**（D1）。场次来自 argv（守护进程传 `am` / `pm`），也认工作目录名（旧 Hermes cron 用 `--workdir …/maa/{am,pm}` 传）；都没有时按小时兜底（`select_phase()`，`< 14 点` → `am`）。切线后没有 Discord，「发卡」那几步跳过，定关、上游更新、活动探测、清理照做（#40）。`main(argv)` 严格按顺序：
 
 1. **`check_and_update_upstream()`，只有早场卡跑**：调 `maa_upstream.run_update(config, "plan_card")`，计划卡只管失败时发红卡（#60，GUI 的「更新」按钮走同一个函数）。
    - 持 `run.lock`（持有者 `update`）。抢不到记「跳过：<谁>正在用 maa-cli」，不发红卡；拖过 08:00 时日常会等它（K17，上限 `update_wait_minutes`，默认 15）。
    - 三步：`brew outdated --json=v2` / `brew upgrade` 跟随 maa-cli；`maa update --batch`；`maa hot-update --batch`（超时 180s / 300s / 300s）。
      **brew 只看 JSON，不看退出码**（点名查一个 formula 时有新版退出码就是 1，K19）。hot-update 只在 Core 那步成功后跑（[incidents/2026-08-26-maaresource-out-of-sync.md](./incidents/2026-08-26-maaresource-out-of-sync.md)）。
    - **必须保留本机代理**（`maa_subprocess_env(..., keep_proxy=True)`）；环境里没代理时用 `config.upstream_proxy` 补，PATH 补 `/opt/homebrew/bin`。hot-update 认不认代理取决于 `cli.toml` 的 `backend`（必须是 `git`，§11 第 18 条）。
-   - 分步结果写 `state/maa/upstream.json`（§12.3），版本写回 `config.json`，摘要进早场卡「上游更新」字段。失败发红色 Embed，`main()` 末尾 `raise` 让 cron 记失败。
+   - 分步结果写 `state/maa/upstream.json`（§12.3），版本写回 `config.json`，摘要进早场卡「上游更新」字段。失败发红色 Embed，`main()` 末尾 `raise`，调度器把这次记成失败。
    - **晚场卡整步跳过**（`update is None`），所以末尾的 `raise` 要判 `update is not None`（#40）。
 2. **`refresh_activity_stages()`**：跑 `maa activity Official`，解析 `TO-9` 形的活动关写回 `config.json`；公告里有「资源收集」则置 `all_supply_stages_open=true`。
 3. **重新 `load_config()`**：卡片从落盘后的真值渲染。
@@ -183,7 +190,7 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
         dispatch_blocker()  到点？blackout？Depot 窗口？时间预算？run.lock？游戏在跑？
 ```
 
-`copilot/gamedata.json` 也是抄作业页和手动抄作业判「能不能导航」的依据，所以**活动监控 cron 要一直开着**；不想让它开游戏用「暂停自动作业」（`copilot auto off`），不要暂停 cron。暂停时换活动的通知会写明不会自动排轮。
+`copilot/gamedata.json` 也是抄作业页和手动抄作业判「能不能导航」的依据，所以**活动监控要一直开着**；不想让它开游戏用「暂停自动作业」（`copilot auto off`），不要停掉这条定时任务。暂停时换活动的通知会写明不会自动排轮。
 
 **「空窗」还是「格式变了」只有一个判据** `is_side_story_heading()`（闸门与 `parse_activity_events()` 共用，#19）：有活动关分区标题行 → 正常解析；没有标题行但有其它认识的 `Opening …` 分区 → 查询成功的空窗；标题文本出现却不是完整一行、或一个认识的分区都没有 → 格式已变，抛异常。
 
@@ -209,9 +216,9 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
 ## 4. 链路二：执行一场日常（`maa_daily.py`）
 `execute(phase)`：
 
-0. **通知出口** — `discord_outlet(config)` 取 `(token, channel_id)`：没配频道、读不到 `.env` 都返回两个空串、打一行日志，**不抛**。Discord 只是出口之一，下面所有发帖都走 `notify()` / `open_thread()`：没有出口就跳过，网络 / HTTP / token 失效只记一行 stderr，一场照常跑完（#63）。开发副本（没有 `.env`）的 `run local` 因此也能跑。
+0. **通知出口** — `discord_outlet(config)` 取 `(token, channel_id)`：没配频道、读不到 `.env` 都返回两个空串、打一行日志，**不抛**。Discord 只是出口之一，下面所有发帖都走 `notify()` / `open_thread()`：没有出口就跳过，网络 / HTTP / token 失效只记一行 stderr，一场照常跑完（#63）。开发副本（没有 `.env`）的 `run local` 因此也能跑。现在线上真正的出口是 Bark：开跑、结束、告警各处另调 `maa_notify.notify()`，同样永不抛。
 
-1. **定场次** — `select_phase()`：argv（`am|pm|now`）> 工作目录名（`--workdir ~/.hermes/state/maa/am` → `am`）> 按北京时间小时猜。
+1. **定场次** — `select_phase()`：argv（`am|pm|now`）> 工作目录名（旧 Hermes cron 的 `--workdir …/maa/am` → `am`）> 按北京时间小时猜。守护进程总是传 argv。
 2. **抢锁** — `run_lock(blocking=False)`。持有者是 `update` 时先等（上限 `update_wait_minutes`，等掉的时间从 `maa_run_timeout` 里扣，K17）；否则不碰持锁任务的顶层状态，只追加 `last_lock_conflict_*`，发红色告警（写明谁占着）并返回失败（#23）。
 3. 清理 >14 天产物；把**本场实际使用的计划**快照到 `runs/<date>-<phase>.json`（之后改 `plan.json` 不影响本场，#10）；`last_run.json` 用 `merge_last_run(..., new_run=True)` 置 `status=running` 并清掉上一场的字段（§6）。
 4. `plan.skip` 为真**且 `phase != "now"`** → 灰色「已跳过」Embed，`status=skipped`，不开游戏。skip 按场次（D2，#5d）；手动场照跑。
@@ -256,7 +263,9 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
 ### CLI 输出 → 中文
 `progress_content()` 和 `extract_summary()` 是纯函数：CLI 行数组 → Discord 文本。**原始 CLI 文本从不进 Discord**，只落 `runs/*.log`（#9）。靠 `TASK_STEPS` + 一组正则识别任务状态、理智、连战次数、临期药、掉落、设施、公招。maa-cli / MaaCore 输出格式变了通常只改这两个函数，用 `test_progress_and_summary_translate_cli_events` 验证。
 
-## 5. 链路三：Discord 交互（`maa_action.py`）
+## 5. 链路三：Discord 交互（`maa_action.py`，切线后停用）
+> 2026-11-24 起线上不走 Discord：没有按钮登记、没有技能、没有聊天入口。`dispatch()` 里的命令照样能从终端和 App 调，下面的 adapter 约束只对旧 Hermes 环境有意义。
+
 ```
 按钮/下拉 ─ adapter 查 buttons.json ─┐
                                      ├─→ python3 ~/.hermes/scripts/maa_action.py <argv>
@@ -351,11 +360,11 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
 三期的通关队列（`clearing.json`、手动打一次出口、EX 开放闸门、编队界面理智 OCR、日常收尾派发）已在四期整体删除（D15），只保留领域函数。
 
 ## 5.7 链路五：肉鸽（已移除）
-2026-11-06 起 maa-remote 的肉鸽整套删除（K16）：`maa_roguelike.py`、worker、`roguelike *` 命令、Discord 肉鸽卡和 `hermes:btn:maa-roguelike:` 前缀、`roguelike.json`、原不变量 #46–#50。改用 Wado's MAA 里的上游肉鸽（它照样先抢 `run.lock`，§12）。
+2026-11-06 起 maa-remote 的肉鸽整套删除（K16）：`maa_roguelike.py`、worker、`roguelike *` 命令、Discord 肉鸽卡和 `hermes:btn:maa-roguelike:` 前缀、`roguelike.json`、原不变量 #46–#50。Mac App 里的上游肉鸽也已在 2026-11-09 随上游代码删掉；以后要用，先在 maa-remote 加命令。
 
 ## 6. 状态模型
 ```
-~/.hermes/state/maa/
+~/.wados-maa/state/maa/        （旧线上是 ~/.hermes/state/maa/，切线时整体复制过来）
   config.json     环境与阈值（§6.2）                                  ← 计划卡会改写
   defaults.json   持久默认：stage="1-7" / medicine=expiring / tasks 全开
   plan.json       今日覆盖（按场次）：{date, sessions: {am: {stage, stage_source, skip, fight, source, updated_at, farming_drops, farming_fallback_stage}, pm: {…}}, updated_at}
@@ -376,13 +385,21 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
   run.lock        flock 独占锁（执行）；持有者标记 {holder: daily|copilot|depot|update, detail, pid, since}（K15，§12.2）
   last_run.lock   flock（保护 last_run.json 的跨进程 read-modify-write）
   stage_manager.json 台前调度原状态 {enabled: true, saved_at}：只在「原本开着、被跑场临时关掉」期间存在，还原后删（#62）
-  am/ pm/         空目录，只给 cron 传场次
-  runs/<date>-<phase>.{json,log,png}   快照 / 日志 / 截图（14 天）；`<date>-<phase>.progress.json` 本场进度（§12.3）；同天同场次文件名复用，多次 run now 会覆盖 <date>-now.*
+  am/ pm/         空目录，旧 Hermes cron 用来传场次，现在没用
+  runs/<run_id>.{json,log,png,progress.json}、<run_id>-report.json   快照 / 日志 / 截图 / 本场进度（§12.3）/ 战报（14 天）。`run_id` = `<date>-<phase>-<HHMMSS>`（`make_run_id()`），同天多场不再互相覆盖；切线前的旧场是 `<date>-<phase>.*`，按 `resolve_run_artifact()` 兼容
   runs/index.jsonl  场次索引：每场结束追加一行（#66，§12.3）；超过 600 行裁到最近 500 行，不跟 14 天清理走；`runs/index.lock` 是它的写锁
 
-~/.hermes/state/agent-book/
+~/.hermes/state/agent-book/    （只在旧 Hermes 环境存在，切线时已删掉 MAA 的键）
   buttons.json    全局共享按钮登记表（MAA 只碰自己的前缀）
   state.lock      共享写锁
+
+~/.wados-maa/daemon/
+  daemon.json     守护进程配置：端口、监听地址、允许的网段、局域网 IP、远程地址、通知后端、depot_enabled
+  secrets.json    Token 哈希、Bark 密钥（0600，不进仓库）
+  scheduler.json  每条定时任务的上次槽位、状态和下次运行时间
+  tls/            自签证书和私钥（0600）；active_tls.json / tls_check.json 是当前证书和巡检结果
+  *.plist、wados-maa-cloudflared.yml、rescue.html   deploy.py 渲染的 LaunchAgent、隧道配置、应急页
+  reload.flag     maa_schedule 写，守护进程看到就热重载
 ```
 
 **计划的求值**（`effective_plan(at, phase)`）：`normalize_plan(defaults)`，若 `plan.date == 今天` 只叠 `sessions[phase]` 的`stage / stage_source / skip / farming_drops / farming_fallback_stage`，再 `normalize_plan` 一次（#39）。
@@ -417,12 +434,12 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
 | 键 | 默认 | 含义 |
 |---|---|---|
 | `channel_id` | 占位符 | 部署时由 `MAA_CHANNEL_ID` 或本机已有配置解析，**不入库** |
-| `session_schedule` | `{am: {time: "08:00", enabled: true}, pm: {time: "22:00", enabled: true}}` | 早晚场时间（北京时间）和开关（K6）。早场限 05:00–11:59，晚场限 12:00–23:59（`SESSION_WINDOWS`）；计划卡固定提前 10 分钟；手动场 / 抄作业 blackout、`min_lead` 都按它算，关掉的场次不算。改它走 `maa_action schedule *`，同步 `hermes cron`；一场写坏只退回那一场的默认 |
+| `session_schedule` | `{am: {time: "08:00", enabled: true}, pm: {time: "22:00", enabled: true}}` | 早晚场时间（北京时间）和开关（K6）。早场限 05:00–11:59，晚场限 12:00–23:59（`SESSION_WINDOWS`）；计划卡固定提前 10 分钟；手动场 / 抄作业 blackout、`min_lead` 都按它算，关掉的场次不算。改它走 `maa_action schedule *`，内置调度器热重载；一场写坏只退回那一场的默认 |
 | （可改的键） | — | **只有 `maa_settings.FIELDS` 里的能从外面改**（`config set/patch`）：逐项校验、全部合规才写；物品名 / 材料名与渲染器共用 `SAFE_MALL_ITEM_RE`（#51）。路径、可执行文件、MaaTools 地址、运行时缓存、突袭开关不在表里；降级开关永远不许进表（`test_no_downgrade_switch_is_ever_editable`） |
 | `config_meta` | 不在种子里 | `{键: {source: gui\|discord, updated_at}}`（K3）。**记过的键 `deploy.py` 保留线上值** |
 | `game_bundle_id` / `playcover_app_path` / `maatools_address` / `game_display_name` | `com.hypergryph.arknights` / `~/Library/Containers/io.playcover.PlayCover/Applications/com.hypergryph.arknights.app` / `127.0.0.1:1717` / `MAA-Game` | `App Settings/<bundle id>.plist` 的文件名；`open -a` 拉起；`pgrep` / `pkill -f` 用里面可执行文件的完整路径；只接受回环；与 PlayCover、maa-cli profile 三处一致；游戏窗口常驻的虚拟屏名；空串 = 不管 |
 | `disable_stage_manager_during_run` | `true` | 日常和抄作业动游戏期间临时关掉台前调度、跑完还原（#62，§4「恢复策略」）；GUI 标签「跑的时候临时关掉台前调度」 |
-| `game_launch_timeout` / `game_quit_timeout` / `game_probe_timeout` / `maa_run_timeout` | `120` / `30` / `5` / `3000` | 等 MaaTools / 等 `TERM` 后退出 / 「你在玩」探测预算（`0` 关闭探测）；为 Hermes 外层 1 小时上限预留清理时间；重开与补跑共用 |
+| `game_launch_timeout` / `game_quit_timeout` / `game_probe_timeout` / `maa_run_timeout` | `120` / `30` / `5` / `3000` | 等 MaaTools / 等 `TERM` 后退出 / 「你在玩」探测预算（`0` 关闭探测）；为守护进程 1 小时硬超时（§13.1）预留清理时间；重开与补跑共用 |
 | `connect_retry_limit` / `connect_retry_delay` / `offline_retry_limit` / `offline_retry_delays` / `proxy_failure_limit` / `proxy_failure_salvage` / `proxy_failure_salvage_min_seconds` / `fight_fallback_on_error` / `fight_fallback_min_seconds` / `update_wait_minutes` | `2` / `8` / `2` / `[120, 300]` / `2` / `true` / `300` / `true` / `300` / `15` | 连接阶段失败的重开次数与间隔；没登录上时重启重跑的次数和第 n 次前等几秒（不够长用最后一个值）；代理失误熔断与补跑；主关空跑失败改刷后备关；日常等上游更新放锁的上限 |
 | `medicine_expire_days` | `2` | 只吃这个窗口内将过期的理智药 |
 | `fight_times` | `2147483647` | 生产值，配 `series = 0` 打到理智不足（有限 `times` 下 Beta MaaCore 改倍率偶发多起一批）。真机验链不想耗理智时临时设 `0`，验完务必改回 |
@@ -445,42 +462,48 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
 `defaults.json` 写入口是 `maa_action defaults set stage <关>` / `defaults set task <环节> <on|off>`（只给 GUI，写时带 `source` / `updated_at`）；`plan.json` 是带日期戳的今日覆盖；`medicine` / `stone` 不在可变状态里，由 runner 硬编码。
 
 ## 7. 部署链路（`deploy.py`）
+现行是**独立模式**（`--standalone`，或只设了 `WADOS_MAA_HOME`、没设 `HERMES_HOME`），目标默认 `~/.wados-maa`，可用 `--target-home` 改。**不带 `--standalone` 且没设 `WADOS_MAA_HOME` 时走旧 Hermes 模式、写 `~/.hermes`，切线后不要这样跑。**
+
 ```bash
-python3 -m unittest discover -s tests -v   # 必须在 maa-remote/ 里跑
-python3 deploy.py                          # 幂等；输出 {"ok":true,"changed":[…],"backup":"…"}
-python3 deploy.py --check                  # 只读体检
+python3 -m unittest discover -s tests -v       # 必须在 maa-remote/ 里跑
+python3 deploy.py --standalone                 # 幂等；输出 {"ok":true,"mode":"standalone","changed":[…],"backup":"…"}
+python3 deploy.py --standalone --check         # 只读体检
+launchctl kickstart -k gui/$(id -u)/io.github.ffkiyo7.wados-maa.daemon   # 让常驻进程加载新代码
 ```
 
-`--check` **只读**（`DeployCheckTests` 用目录快照守着），一行 JSON，`ok` 为假退出码 1：
+线上从 `~/Developer/wados-maa-deploy`（固定在 `main`）部署，流程见仓库根 `AGENTS.md`。定时任务每次都起新进程，部署后下一次就用新脚本；但守护进程本身 import 了 `maa_api` → `maa_action` / `maa_common` 等大部分模块，API 和调度逻辑要重启才换。重启不杀正在跑的场次（子进程 `start_new_session=True`，plist 里 `AbandonProcessGroup`）。
+
+独立模式 `--check` **只读**，一行 JSON，`ok` 为假退出码 1：
 
 | 键 | 内容 | 影响 `ok` |
 | --- | --- | --- |
-| `missing` | 不存在的：`deploy.SCRIPT_NAMES` 的全部脚本、`ocrbox` / `winmove`、`SKILL.md`、全部 maa-cli 配置 | 非空即假 |
-| `mismatched` | 与仓库字节不同的：脚本、`SKILL.md`、maa-cli 配置（`tasks/daily.toml` 豁免）。`ocrbox` / `winmove` 只查存在 | 非空即假 |
-| `adapter` | 线上 adapter 在内存里跑 `patch_adapter_source()`：`patched` / `needs_patch` / `anchor_mismatch: <异常>` / `missing` | 非 `patched` 即假 |
-| `gateway_python` | `{plist, program, version, expected, matches}`：LaunchAgent plist 的 `ProgramArguments[0]` vs `deploy.HERMES_VENV_PYTHON`；路径字符串相同算一致，否则要求文件 realpath **且**所在目录 realpath 都相同。读不出记 `error`，不抛 | `matches` 假或取不到 `version` 即假 |
-| `venvs` | `hermes-agent/venv` 与 `.venv` 的版本 | 不影响 |
-| `versions` | `{组件: {installed, verified, match}}`（`CHECKED_COMPONENTS`，§7.1） | 不影响 |
-| `warnings` | 两个 venv 并存；版本漂移；取不到版本；版本记录不可用 | 不影响 |
+| `missing` | 不存在的：`deploy.SCRIPT_NAMES` 的全部脚本、`ocrbox` / `winmove` / `barkcrypt` / `wados-maa-launcher`、全部 maa-cli 配置、`daemon/` 下的 `daemon.json` / `rescue.html` / 隧道配置 / 隧道 plist | 非空即假 |
+| `mismatched` | 与仓库字节不同的：脚本、maa-cli 配置（`tasks/daily.toml` 豁免）、`rescue.html`。编译产物只查存在 | 非空即假 |
 
 脚本名单只在 `deploy.SCRIPT_NAMES` 一处，新增脚本要加进去（`test_script_names_match_the_repository_scripts`）。
 
+**独立模式做的事**（`deploy_standalone()`）：拷脚本 → 合并状态（下文）→ maa-cli 配置 → 有 `SKLAND_HG_TOKEN` 就写森空岛 token → 编译 `ocrbox` / `winmove` / `barkcrypt` → 编译并用 Apple Development 身份签名 `wados-maa-launcher` → 渲染 `daemon/`：`daemon.json` 只在不存在时写默认值（`notify_backend: none`、`depot_enabled: false`），守护进程 plist、隧道 yml 和 plist 每次按当前配置重渲染，`rescue.html` 照拷。**不碰 `~/Library/LaunchAgents/`、不碰 `~/.hermes`**。
+
+**新机器第一次装**：部署 → `python3 daemon/init_daemon.py`（生成证书、`full` / `resign_only` 两个 Token、配对二维码，改 `daemon.json` 的网络配置）→ 手动在 `daemon/secrets.json` 填 `bark_device_key` / `bark_aes_key`（没有命令写它们）、`daemon.json` 改 `notify_backend: bark` → 把 `~/.wados-maa/daemon/` 下两个 plist 拷进 `~/Library/LaunchAgents/` 并 `launchctl bootstrap gui/$(id -u) <plist>` → 系统设置里给 `wados-maa-launcher` 开辅助功能 → iPhone 扫码配对。证书轮换用 `daemon/rotate_tls.py`（§13）。
+
 ### 7.1 版本记录（`config/verified_versions.json`）
+> 版本比对目前只在旧 Hermes 模式的 `--check` 里做（`versions` / `warnings`）；独立模式的 `--check` 还没接上，要看漂移暂时手动 `maa version` 对照。
+
 记**最后一次真机跑通**时各组件的版本（`schema_version: 1`，每项 `version` + `verified_at` + `source`），只用于漂移检测：不一致只进 `warnings`，不让 `ok` 变假。不部署。
 
 本机取值：`maa-cli` / `MaaCore` 由 `probe_maa_versions()` 跑 `maa version`（复用 `maa_plan_card.read_maa_versions()` / `parse_maa_versions()`）；`PlayCover` 取 `/Applications/PlayCover.app/Contents/Info.plist` 的 `CFBundleShortVersionString`（形如 `4.0.0.maa`，记录另有 `branch: "maa"`）；`Hermes` 取 `git -C ~/.hermes/hermes-agent rev-parse HEAD`（记录可以是 ≥7 位短 hash，按前缀比）；`BetterDisplay` / `Arknights` 取各自 `Info.plist`；`MaaTools` **只记录、不进 `--check`**（VERN 要游戏在跑才读得到，`checked_by_deploy: false`）。
 
 **更新流程**（每次真机跑通一场之后）：① `--check` 看哪些 `match: false`；② 确认后把 `version` 改成 `installed`、`verified_at` 改成当天；③ 游戏开着时看`maatools_ready(config)` 的 `MaaTools v<N> 就绪`；④ 单独提交。真的锁版本（`brew pin`、关自动更新、不跑 `hermes update`）会改系统状态，由用户决定。
 
-### 部署做的事
-1. **备份**：将被修改的文件先复制到 `~/.hermes/backups/maa-setup/<YYYYMMDDTHHMMSS>/`。
+### 两种模式共用的部署步骤
+1. **备份**：将被修改的文件先复制到 `<目标根目录>/backups/maa-setup/<YYYYMMDDTHHMMSS>/`（线上是 `~/.wados-maa/backups/maa-setup/`）。
 2. **幂等写**：`write_bytes()` 内容一致就跳过，否则 `mkstemp + fsync + os.replace`，权限 0600/0700。
    **`tasks/daily.toml` 是唯一的内容比对豁免**（`RUNTIME_REWRITTEN_MAA_CONFIGS`，每场被 `render_daily_toml()` 重写），仍照常部署、查存在。其余一律比内容，尤其 `resource/tasks/tasks.json`（没有运行时逻辑重写它，漂移就是事故）。豁免名单加项必须说明「谁在运行时重写它」（#4）。
 3. **状态**（`deploy_state()`）：
    - `config.json` **逐键合并**，仓库覆盖同名键、本地新增保留；例外是 `PRESERVED_RUNTIME_CACHE_KEYS`（`maa_core_version` / `maa_cli_version` / `activity_stages`）和 `config_meta` 里记过的键——线上有值一律保留，种子只在首次部署兜底（#25，[incidents/2026-09-02-deploy-overwrote-activity-stages.md](./incidents/2026-09-02-deploy-overwrote-activity-stages.md)）。丢掉退役键（`RETIRED_CONFIG_KEYS`）。
-   - `channel_id`：仓库存占位符 `REPLACE_WITH_DISCORD_CHANNEL_ID`，`resolve_channel_id()` 按 `MAA_CHANNEL_ID` → 本机已部署 config 解析，都拿不到报错终止。新机器首次部署：`MAA_CHANNEL_ID=<频道数字ID> python3 deploy.py`。
+   - `channel_id`：仓库存占位符 `REPLACE_WITH_DISCORD_CHANNEL_ID`。独立模式按 `MAA_CHANNEL_ID` → 已部署 config 取，取不到就留空（不发 Discord）；旧 Hermes 模式由 `resolve_channel_id()` 解析，取不到报错终止。
    - `defaults.json` / `plan.json` / `last_run.json`：**只在不存在时**复制种子，之后强制 `defaults.stage="1-7"`、`medicine="expiring"`、`stone=0`，剥掉 `plan.json` 残留的 `medicine`/`stone`。
-4. **给 Hermes 打 4 处补丁**：
+4. **只有旧 Hermes 模式**：给 Hermes 打 4 处补丁、部署 `SKILL.md`。下面这些到「cron」为止都只是旧环境的记录：
 
 | 目标 | 改动 |
 |---|---|
@@ -494,7 +517,7 @@ python3 deploy.py --check                  # 只读体检
 
 **什么时候必须 `hermes gateway restart`**：改 `adapter.py`、`.env`、`config.yaml`、`SKILL.md`（技能在会话初始化时加载）时要；`scripts/*.py`、`state/*.json`、`config/maa-cli/**` 不用。
 
-cron 只在首次创建时注册（表达式是 **UTC**，`config.yaml: timezone: Etc/UTC`；脚本内部一律 `Asia/Shanghai`）：
+旧环境的 cron 只在首次创建时注册（切线时已全部停用；表达式是 **UTC**，`config.yaml: timezone: Etc/UTC`；脚本内部一律 `Asia/Shanghai`）：
 
 ```bash
 hermes cron create "*/15 * * * *" --name "MAA 活动作业监控" --script maa_activity_watch.py --no-agent --deliver local
@@ -505,7 +528,7 @@ hermes cron create "0 0 * * *"   --name "MAA 日常·早" --script maa_daily.py 
 hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py --no-agent --deliver local --workdir ~/.hermes/state/maa/pm
 ```
 
-早晚场时间之后由 `maa_schedule.py` 对齐，不手改。在册：`3ba48fb85d0b`（活动作业监控）、`b2f15f13589f`（仓库对表）、`03d5e98ce8d4`（计划卡·早，**没有 workdir**，待 `hermes cron update` 补 `--workdir ~/.hermes/state/maa/am` 或重建；不改也能按小时兜底成 `am`）、`50cd1fb095f2`（日常早）、`4f48cf619d9f`（日常晚）。以 `hermes cron list` 为准。
+当时由 `maa_schedule.py` 对齐早晚场时间。当时在册：`3ba48fb85d0b`（活动作业监控）、`b2f15f13589f`（仓库对表）、`03d5e98ce8d4`（计划卡·早，**没有 workdir**，待 `hermes cron update` 补 `--workdir ~/.hermes/state/maa/am` 或重建；不改也能按小时兜底成 `am`）、`50cd1fb095f2`（日常早）、`4f48cf619d9f`（日常晚）。以 `hermes cron list` 为准。
 
 ## 8. 不可破坏的不变量
 改任何代码前先读这张表；每一条都有单测，改坏会红。**编号固定**（代码、测试、GUI 和其他文档按编号引用），删掉的编号不复用。来由在 [incidents/](./incidents/README.md)，表里标「来由」的那一列。
@@ -553,7 +576,7 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | # | 不变量 | 落点 | 来由 |
 |---|---|---|---|
 | 13 | 抄作业与日常互斥（`run.lock`），场次前 `copilot_blackout_minutes` 内拒绝派发。闸门只有一份 `dispatch_blocker()`，三处各查一次：`start_copilot_search()`（被挡什么都不写）、`cmd_search()`（被挡改 `scheduled` 写原因）、`cmd_run_batch()`（抢到锁后只查三条时间闸门） | `dispatch_blocker()` + worker `run_lock(blocking=False)` + `test_the_gate_has_exactly_one_implementation` / `ManualCopilotPathTests` | — |
-| 23 | Depot 不在计划卡链路内跑，独立 cron 只做 7 天到期检查；日常抢锁失败必须写 `last_lock_conflict_*`、发 Discord、返回失败；`merge_last_run()` 必须持专用锁 | `maa_depot.main()` / `report_lock_conflict()` / `last_run_lock()` | — |
+| 23 | Depot 不在计划卡链路内跑，独立定时任务只做 7 天到期检查；日常抢锁失败必须写 `last_lock_conflict_*`、发 Discord、返回失败；`merge_last_run()` 必须持专用锁 | `maa_depot.main()` / `report_lock_conflict()` / `last_run_lock()` | — |
 | 24 | 每条自动链路在拿到锁之后、`launch_game()` 之前探测游戏进程，在跑就跳过并发 Discord、写 `last_run`（日常 `skipped`/`game_busy`；Depot `skipped_busy` 不动 `snapshot_at`；抄作业放回 `scheduled`）。`now` 永不跳过。探测永不抛、预算 `game_probe_timeout`，不复用 `wait_for_game()` / `settle_game_window()`，实现只有一份 | `game_is_online()` + `report_game_busy()` + `AUTO_PHASES` + `test_there_is_exactly_one_probe_implementation` | — |
 | 36 | 每开新一关前查距下一场是否够 `auto_copilot_min_lead_minutes`；三条时间闸门（blackout / Depot 窗口 / 时间预算）只有一份，在 `maa_action.py` | `min_lead_reason()` / `_copilot_blackout_reason()` / `depot_window_reason()` + `CopilotTimeBudgetTests` | — |
 | 60 | 上游更新只有一份（`maa_upstream.run_update()`），全库只有它调 `maa update` / `hot-update` / `brew upgrade`，期间持 `run.lock`。开跑前 `hard_block()` 只在钉住项被改、或上次更新不自洽时拒跑；开发副本只检查不更新 | `run_update()` / `hard_block()` / `update_gate()` + `tests/test_upstream.py` | [2026-08-26](./incidents/2026-08-26-maaresource-out-of-sync.md)、[2026-09-07](./incidents/2026-09-07-hot-update-libgit2-proxy.md) |
@@ -614,17 +637,24 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 ```bash
 python3 -m unittest discover -s tests -v              # 必须在 maa-remote/ 里
 uvx ruff@0.17.3 check && uvx pyright@1.1.414          # 两条都必须 0 报错
-python3 deploy.py                                     # 部署（自动备份）；动了 adapter/config.yaml/.env/SKILL.md 再 hermes gateway restart
-hermes cron run 03d5e98ce8d4                          # 真机：早场计划卡（下一个调度 tick 才触发）
-python3 ~/.hermes/scripts/maa_action.py plan show
-hermes cron run 50cd1fb095f2                          # 完整早场（真的开游戏、耗理智）
+swift test --package-path ../shared                   # 动了 shared/ 的模型时
 ```
 
-调试期间避免定时任务插进来：`hermes cron pause <id>` / `resume <id>`。单测不能替代真机：图像识别、连战倍率、基建排班只有实机能验；`config/maa-cli/tasks/infrast-smoke.toml` 是单独验七类设施排班的诊断任务。
+开发副本 `~/Developer/forks/maa-remote-devhome` 的 `scripts` 软链到本工作区，改完不用部署。对它跑命令要显式带根目录，**否则默认落到线上 `~/.wados-maa`**：
+
+```bash
+export WADOS_MAA_HOME=~/Developer/forks/maa-remote-devhome
+python3 scripts/maa_action.py plan today              # 只读
+python3 scripts/maa_plan_card.py am                   # 真机：早场计划卡（会跑上游更新）
+python3 scripts/maa_daily.py am                       # 完整早场（真的开游戏、耗理智）
+python3 scripts/maa_daemon.py --once                  # 调度器只走一个 tick：到期的任务会真的派发
+```
+
+动游戏前先确认线上 `~/.wados-maa/state/maa/run.lock` 空闲、离早晚场和活动监控的整刻足够远：两边共用同一个游戏和 `~/.config/maa-cli`，开发副本自己的 `run.lock` 挡不住线上。开发副本的守护进程和线上抢同一个 18170 端口，线上在跑时只能用 `--once` / `--no-api`。不想让线上定时场插进来：`python3 ~/.wados-maa/scripts/maa_action.py schedule disable am|pm`，用完 `enable`。单测不能替代真机：图像识别、连战倍率、基建排班只有实机能验；`config/maa-cli/tasks/infrast-smoke.toml` 是单独验七类设施排班的诊断任务。
 
 ### 单测必须离线可跑
 - **整套单测不许碰网络**。prts 网络层由 `tests/test_copilot.py: prts_http_stub()` 桩掉（[incidents/2026-09-02-unit-test-hit-prts.md](./incidents/2026-09-02-unit-test-hit-prts.md)）。
-- 一图流 / 企鹅出口在每个模块的 `setUpModule()` 里封死（`_helpers.start_module_patches()` patch `maa_farming._http_json`，`maa_gamedata._fetch` / `load_layout` 同理）——抓取层默认写**线上** `~/.hermes/state/maa/farming/`，吞掉异常只降级，漏桩不会变红，所以这道模块级闸门是唯一防线。要造响应的用例在`with patch.object(maa_farming, "_http_json", …)` 里覆盖，其余传 `data=`。`_cache_age()` 把未来的 `fetched_at` 当不新鲜。
+- 一图流 / 企鹅出口在每个模块的 `setUpModule()` 里封死（`_helpers.start_module_patches()` patch `maa_farming._http_json`，`maa_gamedata._fetch` / `load_layout` 同理）——抓取层默认写**线上** `~/.wados-maa/state/maa/farming/`，吞掉异常只降级，漏桩不会变红，所以这道模块级闸门是唯一防线。要造响应的用例在`with patch.object(maa_farming, "_http_json", …)` 里覆盖，其余传 `data=`。`_cache_age()` 把未来的 `fetched_at` 当不新鲜。
 - `tests/_isolation.py` 装常驻审计钩子（`sys.addaudithook`）：解析或连接非回环地址抛 `RealNetworkTouched`（BaseException）；回环放行（`test_playcover.py` 的假 MaaTools 服务端）。
 - 线上契约冒烟（默认跳过、不进 CI）：`MAA_LIVE_TESTS=1 python3 -m unittest tests.test_copilot -k LiveContract -v`，验 prts.plus 的信封与字段（`id` / `content` / `available` / `rating_ratio` / `views`、`content.stage_name`）。改了桩数据就跑一次。
 
@@ -634,10 +664,10 @@ hermes cron run 50cd1fb095f2                          # 完整早场（真的开
 ### 单测必须和线上状态隔离
 每个测试文件**第一个** import `_isolation`（先于任何 `scripts/` 模块，它们 import 时就按 HOME 算路径常量）：
 
-- `HOME` / `HERMES_HOME` / `MAA_CONFIG_DIR` 换成进程级临时目录，清掉 `MAA_CHANNEL_ID` / `SKLAND_HG_TOKEN`；设 `PYTHONDONTWRITEBYTECODE=1`。
-- 审计钩子守住真实 home 下的 `.hermes` / `.config/maa-cli` / `Library`：打开、列目录、建删改名、chmod 一律抛 `RealHomeTouched`。
+- `HOME` / `WADOS_MAA_HOME` / `HERMES_HOME` / `MAA_CONFIG_DIR` 换成进程级临时目录，清掉 `MAA_CHANNEL_ID` / `SKLAND_HG_TOKEN`；设 `PYTHONDONTWRITEBYTECODE=1`。
+- 审计钩子守住真实 home 下的 `.hermes` / `.wados-maa` / `.config/maa-cli` / `Library`：打开、列目录、建删改名、chmod 一律抛 `RealHomeTouched`。
 - 没有 PyYAML 时 deploy 的 YAML 用例借 Hermes venv 的解释器只做解析，都没有就跳过（`needs_yaml`）；要 `tomllib` 的在 3.11 以下跳过（`needs_tomllib`）。
-- **整套共用一个临时 HOME**（几十个路径常量 import 时算死，每用例换 HOME 不划算）。所以新用例的状态文件写进自己的 `tempfile.TemporaryDirectory()`（patch 对应常量，如 `maa_copilot.STAGE_INDEX_PATH`、`maa_common.PLAN_PATH`；`maa_daily.execute()` 的用例在 `setUp` 调 `isolate_stage_index(self)`）。每个模块的 `tearDownModule()` 调 `_isolation.assert_shared_home_clean()`（`test_isolation.py` 查每个文件都调了）：共享 HOME 里出现 `SHARED_HOME_ALLOWED`以外的文件（白名单只有两个空锁文件 `state/maa/run.lock`、`state/agent-book/state.lock`）就报错并列路径；看的是整个 HOME，前一个模块漏下的会在下一个模块收尾时抓到。
+- **整套共用一个临时 HOME**（几十个路径常量 import 时算死，每用例换 HOME 不划算）。所以新用例的状态文件写进自己的 `tempfile.TemporaryDirectory()`（patch 对应常量，如 `maa_copilot.STAGE_INDEX_PATH`、`maa_common.PLAN_PATH`；`maa_daily.execute()` 的用例在 `setUp` 调 `isolate_stage_index(self)`）。每个模块的 `tearDownModule()` 调 `_isolation.assert_shared_home_clean()`（`test_isolation.py` 查每个文件都调了）：共享 HOME 里出现 `SHARED_HOME_ALLOWED`以外的文件（白名单只有几个空锁文件：`.wados-maa/state/maa/{run,state}.lock`，以及过渡期旧路径 `.hermes/state/maa/run.lock`、`.hermes/state/agent-book/state.lock`）就报错并列路径；看的是整个 HOME，前一个模块漏下的会在下一个模块收尾时抓到。
 
 验收（干净 HOME 结果必须和真实 HOME 一致；系统 3.9 也要跑，且要在没设 `PYTHONDONTWRITEBYTECODE` 的 shell 里）：`HOME="$(mktemp -d)" python3 -m unittest discover -s tests`；`env -u PYTHONDONTWRITEBYTECODE /usr/bin/python3 -m unittest discover -s tests`。
 
@@ -645,7 +675,7 @@ hermes cron run 50cd1fb095f2                          # 完整早场（真的开
 
 **测试文件布局**：按领域一个文件。新模块照抄任一 `test_*.py` 开头：`sys.path` 加 `scripts/` 和 `tests/` → **第一个** `import _isolation` → `import _helpers`和 scripts 模块；`setUpModule()` 里 `guard_devices()` + `start_module_patches()`，`tearDownModule()` 反过来 `stop_patches()`、停设备桩、最后 `assert_shared_home_clean()`。两个以上模块用到的桩放 `_helpers.py`（`SR_INDEX` / `SR_LAYOUT` / `_nav_patch()` / `_offline_market()` / `needs_yaml` 等），只有一个用的留在原模块。跑单个文件：`python3 -m unittest discover -s tests -p test_daily.py`。
 
-**脚本暂不拆**（2026-11-04 定）：入口文件名是对外契约（cron 按文件名跑，按钮白名单精确到 `maa_action.py`，worker 按路径 spawn，`deploy.py` 只拷不删）。真要拆有两条路：(B) 按接缝抽平铺模块，入口名不变、新文件进 `SCRIPT_NAMES`，测试里的 `patch.object` 目标跟着搬；(C) 包目录 `~/.hermes/scripts/maa_remote/`、入口仍平铺，最干净但 `deploy.py` 要学会删旧文件、`--check` 要跟着改。
+**脚本暂不拆**（2026-11-04 定）：入口文件名是对外契约（调度器按文件名跑，按钮白名单精确到 `maa_action.py`，worker 按路径 spawn，`deploy.py` 只拷不删）。真要拆有两条路：(B) 按接缝抽平铺模块，入口名不变、新文件进 `SCRIPT_NAMES`，测试里的 `patch.object` 目标跟着搬；(C) 包目录 `~/.hermes/scripts/maa_remote/`、入口仍平铺，最干净但 `deploy.py` 要学会删旧文件、`--check` 要跟着改。
 
 ### 静态检查（ruff + pyright）
 运行脚本仍是纯标准库。配置在 `maa-remote/pyproject.toml`（只有 `[tool.ruff]` / `[tool.pyright]`），版本钉死、`uvx` 现下现跑；范围 `scripts/*.py`、`deploy.py`、`tests/*.py`。两条都必须 **0 报错**。升级版本号时连同本节和 CI 一起改。
@@ -661,7 +691,7 @@ hermes cron run 50cd1fb095f2                          # 完整早场（真的开
 ## 10. 排障：症状 → 看哪里
 | 症状 | 先看 |
 |---|---|
-| 到点什么都没发生 | `run.lock` 被占 → `pgrep -fl com.hypergryph.arknights.app`；或 cron 被 pause |
+| 到点什么都没发生 | `launchctl print gui/$(id -u)/io.github.ffkiyo7.wados-maa.daemon` 看守护进程在不在；`daemon/scheduler.json` 看那条任务的状态（`missed` = 错过且超过 2 小时补跑窗）；`~/.wados-maa/logs/daemon.log`；`run.lock` 被占 → `pgrep -fl com.hypergryph.arknights.app`；`schedule show` 看那场是不是关着 |
 | 不到 1 秒 `return_code=1`、`runs/` 没 `.log` | `require_executable()`（`config.maa_bin`）或 `verify_game_installed()`（MaaTools 被关 / 端口改了） |
 | 有开跑消息，子区进度不动 | `runs/<date>-<phase>.log` 尾部；多半卡在更新 / 登录页，50 分钟后 124 终止 |
 | 很快就红，一串 `ScreencapFailed` / `ConnectFailed` | 窗口不在台前或 MaaTools 没开（§0.5）。`BetterDisplay get -nameLike=MAA -connected`；`last_run.connect_retries`；日志「摆回台前」那行的 `[窗口 …；屏：…]` |
@@ -672,12 +702,12 @@ hermes cron run 50cd1fb095f2                          # 完整早场（真的开
 | 卡片没有「活动截止」 | 设计：`StageActivityV2.json` 读不出来就不显示。跑一次 `maa activity Official` |
 | 抄作业卡下拉是空的 | 一览全是「⛔ 上游无导航」（#37） |
 | 报「明日方舟正在运行」 | 探测命中（#24）。看是不是残留进程；日常想强行跑就说「现在跑」 |
-| 卡片写「⚠️ 降级：… 抓取失败」 | `ls -l ~/.hermes/state/maa/farming/`；`curl -sI https://cos.yituliu.cn/arknights/stage-drop/matrix.json`、`curl -sS -X POST https://backend.yituliu.cn/item/v7/value -H 'Content-Type: application/json' -d '{}' \| head -c 200`。不会让卡片消失 |
+| 卡片写「⚠️ 降级：… 抓取失败」 | `ls -l ~/.wados-maa/state/maa/farming/`；`curl -sI https://cos.yituliu.cn/arknights/stage-drop/matrix.json`、`curl -sS -X POST https://backend.yituliu.cn/item/v7/value -H 'Content-Type: application/json' -d '{}' \| head -c 200`。不会让卡片消失 |
 | 活动期卡片说资源本「不在本场候选集里」 | 设计（D5 / #42），手动选不受限 |
 | 一场只看到一个 Fight 段 / 「刷理智·续」永远未执行 | `runs/<date>-<phase>.json` 的 `plan.farming_drops` 是空的就不渲染第二块（#44）；或第一块没打到上限理智就耗完，正常 |
 | EX 关排不进自动轮 | 理智算不出（#28）。一图流也不收 EX 关（spike B §1），已知缺口 |
 | 下拉里没有活动关 | `maa activity Official` 输出变了 → `activity_snapshot()` / `parse_activity_events()` |
-| 新活动上线后没有「已排程」卡 | `hermes cron list` 看活动作业监控；`activity_watch.json`：`done` 看 `excluded`，`waiting` 排不出条目，`scheduled` 闸门没过 |
+| 新活动上线后没有自动排程 | `daemon/scheduler.json` 的 `activity_watch`；`activity_watch.json`：`done` 看 `excluded`，`waiting` 排不出条目，`scheduled` 闸门没过 |
 | 「已排程」卡一直不开跑 | 按 `dispatch_blocker()` 顺序：没到 `scheduled_at` / blackout / Depot 窗口 / `run.lock` / 游戏在跑 |
 | 某关一直不被自动抄 | 抄作业卡一览：⛔ 无导航、🚫 练度不满足、✅ 已通。`copilot/ledger.json` 是记账真值 |
 | 战报某关 ❓ 未确认 | `copilot_outcome()` 返回 `unknown`，不记通关、下一轮重打。上游改措辞就改 `COPILOT_VICTORY_MARKERS` |
@@ -702,15 +732,17 @@ hermes cron run 50cd1fb095f2                          # 完整早场（真的开
 | 截图挂着「是否花费 1 纯源石兑换 180 合成玉」 | 点击落进顶栏触控区；看 `asst.log` 那次 `Click with scaled coordinates`（[2026-11-05](./incidents/2026-11-05-originite-exchange-popup.md)） |
 | 基建停在「撤下宿舍锁定位置的干员」 | profile 的 `user_resource = true`、`~/.config/maa-cli/resource/tasks/tasks.json` 是否部署；诊断任务应出现 `InfrastDormDoubleConfirmed` 后到 `Infrast Completed` |
 | 计划卡红「上游更新失败」，detail 是 `SecureTransport error … class=Net (12)` | 失败的是 `maa hot-update`（detail 里没有「MaaCore 更新失败，未更新热更新资源」）；查 `cli.toml` 的 `backend` 是否 `git`（§11 第 18 条）。复现：`MAA_CONFIG_DIR=~/.config/maa-cli maa hot-update --batch -vv` |
-| `deploy.py` 报 “no longer matches baseline” | Hermes 升级动了 adapter → 按 §7 更新补丁串 |
+| `deploy.py` 报 “no longer matches baseline” | 忘了带 `--standalone`，跑成了旧 Hermes 模式（§7） |
+| iPhone 连不上 | 局域网：`curl -k https://127.0.0.1:18170/healthz`；在外：`logs/cloudflared.log`、`launchctl print gui/$(id -u)/io.github.ffkiyo7.wados-maa.cloudflared`；指纹不对看 `daemon/active_tls.json`（§13） |
+| 收不到 Bark | `daemon.json` 的 `notify_backend` 是不是 `bark`；`secrets.json` 有没有两把密钥；`scripts/barkcrypt` 在不在；脚本 stderr 里的 notify 行（#63 只记日志不报错）。可调 `POST /api/v1/notify/test` |
 
-现场常用：`cat ~/.hermes/state/maa/last_run.json`、`ls -lt ~/.hermes/state/maa/runs/ | head`、`tail -100 ~/.hermes/state/maa/runs/<date>-<phase>.log`、`python3 -c "import json;print(json.load(open('$HOME/.hermes/state/agent-book/buttons.json')).keys())"`。
+现场常用：`cat ~/.wados-maa/state/maa/last_run.json`、`ls -lt ~/.wados-maa/state/maa/runs/ | head`、`tail -100 ~/.wados-maa/state/maa/runs/<run_id>.log`、`tail -50 ~/.wados-maa/logs/daemon.log`、`cat ~/.wados-maa/daemon/scheduler.json`。
 
 ## 11. 已知坑
 编号固定（代码和其他文档按 `§11.N` 引用）。
 
 1. **游戏需要活跃图形会话和在线的 MAA-Game 虚拟屏**：注销、切换用户、BetterDisplay 没开都会失败（§0.5）。
-2. **`hermes update` 会覆盖 adapter 补丁**：升级后必须重跑 `deploy.py` 并复验按钮。
+2. （Hermes 时期）**`hermes update` 会覆盖 adapter 补丁**：升级后必须重跑 `deploy.py` 并复验按钮。
 3. **Beta MaaCore 的连战重识别**：有限 `times` 下改倍率偶发识别不到、多起一批；生产用 `times=2147483647` + `series=0` 规避（README「本机落地状态」）。
 4. （模拟器时期）ADB 路径不能带空格，见 [incidents/2026-11-03-adb-landship-path.md](./incidents/2026-11-03-adb-landship-path.md)。
 5. **macOS 上 maa-cli 默认配置目录是 `~/Library/Application Support/com.loong.maa/config`**，所以子进程一律用 `maa_subprocess_env()` 注入 `MAA_CONFIG_DIR`，不要裸 `subprocess.run`（#11）。
@@ -725,15 +757,15 @@ hermes cron run 50cd1fb095f2                          # 完整早场（真的开
 14. （模拟器时期）MaaTouch 握手超时 → SIGSEGV；**maa-cli 不看 `Controller::connect` 的返回值**，连不上照样跑。见 [incidents/2026-08-08-maatouch-sigsegv.md](./incidents/2026-08-08-maatouch-sigsegv.md)。
 15. （模拟器时期）BlueStacks 更新弹窗卡死启动，见 [incidents/2026-08-26-bluestacks-upgrade-popup.md](./incidents/2026-08-26-bluestacks-upgrade-popup.md)。
 16. **MaaCore 包与 MaaResource 热更新层必须同步更新**：MaaCore 启动时用 MaaResource 覆盖包内资源，只跑 `maa update` 可能留下引用已改名模板的旧资源、连设备前就退出。所以 Core 更新成功后紧接 `maa hot-update`，任一步失败都红卡，`hard_block()` 拒跑半更新状态（#60，[incidents](./incidents/2026-08-26-maaresource-out-of-sync.md)）。
-17. **不许拿相邻顶层键当 config.yaml 锚点**：写坏会让 Hermes 静默回退默认配置、cron 全提前 8 小时。判断是否中招：`hermes cron list` 的 `Next run` 带 `+08:00`而不是 `+00:00`（§7，[incidents/2026-09-03-config-yaml-anchor-cron-8h.md](./incidents/2026-09-03-config-yaml-anchor-cron-8h.md)）。
+17. （Hermes 时期）**不许拿相邻顶层键当 config.yaml 锚点**：写坏会让 Hermes 静默回退默认配置、cron 全提前 8 小时。判断是否中招：`hermes cron list` 的 `Next run` 带 `+08:00`而不是 `+00:00`（§7，[incidents/2026-09-03-config-yaml-anchor-cron-8h.md](./incidents/2026-09-03-config-yaml-anchor-cron-8h.md)）。
     - 17b. **Hermes 会把频道提示词重排成无引号、折行的 plain scalar**，比对和替换都要按解析值（§7，[incidents/2026-09-09-config-yaml-folded-prompt.md](./incidents/2026-09-09-config-yaml-folded-prompt.md)）。
 18. **`maa hot-update` 的 libgit2 后端无视 `HTTP_PROXY` / `HTTPS_PROXY`**：`maa update` 走 reqwest 认代理；hot-update 走 `cli.toml` 的 `[resource] backend`。`config/maa-cli/cli.toml` 的 `backend` 必须是 `"git"`（合法值只有 `git` / `libgit2`，填别的 maa-cli 直接 panic；`git` 找不到时自己回落 libgit2）。改完必须`python3 deploy.py`（`cli.toml` 被 `--check` 逐字节守着）。见 [incidents/2026-09-07-hot-update-libgit2-proxy.md](./incidents/2026-09-07-hot-update-libgit2-proxy.md)。
 
-## 12. 外部消费者契约（Wado's MAA）
-Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东西**和 maa-remote 打交道。这里列出的字段、路径、命令和格式改了，GUI 就会坏：要改，就同一天在 fork 里改，并在两边的提交说明里写明。
+## 12. 外部消费者契约（Mac App）
+Mac App（同仓库 `gui/`）**只通过下面这些东西**和 maa-remote 打交道；iPhone App 走 §13 的 HTTP API，API 又是把同一套命令和状态文件包了一层。这里列出的字段、路径、命令和格式改了，两个 App 都可能坏：要改，就在同一个提交里改后端、`shared/` 和 App，并一起验证。
 
 ### 12.1 怎么调
-- **入口**：`python3 $HERMES_HOME/scripts/maa_action.py <命令…>`。stdout 是一行回执 JSON（#67）：
+- **入口**：`python3 $WADOS_MAA_HOME/scripts/maa_action.py <命令…>`（Mac App 同时设 `WADOS_MAA_HOME` 和 `HERMES_HOME`）。stdout 是一行回执 JSON（#67）：
 
   | 字段 | 含义 |
   |---|---|
@@ -776,7 +808,7 @@ Wado's MAA（同仓库 `gui/`，MaaMacGui 的 fork）**只通过下面这些东�
 实现细节：`run local` 不发选关卡，关卡白名单 → 开关校验（`fight/infrast/recruit/mall/award/annihilation`，只认真布尔，五项全关拒绝）→ 锁 → 拒绝窗（`--force` 只跳过这一条，锁冲突永远不能强行）→ 预检 → 收掉 Discord 上没选的选关卡（`superseded`）→ 写 `manual_run.json`（`dispatched` + `tasks` / `annihilation` / `source` / `forced`）→ `Popen maa_daily.py now <token>`；`maa_daily.apply_local_switches()` 只把开关叠到这一场，不进 `plan.json`（M4）。`copilot preview` 要 5～20 秒、不走 Discord 的 20 秒路径（#6）：持 `copilot_search.lock`、森空岛刷新失败直接报错、绕过 12h 缓存搜全部候选，返回每份是否完全满足（`maa_copilot.is_perfect()`，与 `pick_perfect_candidate()` 同一判据）、缺什么，自动选中第一份完全满足的，存 `copilot/previews/<token>.json`（30 分钟，不在 `searches/` 下）。`copilot go` 被挡什么都不写，否则发「已排程」卡 → 写 `searches/<新 token>.json` 为 `queued` → `dispatch_batch()`；同一次预览只能派一次。
 
 ### 12.2 锁
-- **路径**：`$HERMES_HOME/state/maa/run.lock`，用 `flock(LOCK_EX | LOCK_NB)`。GUI 只读它看谁在用游戏，自己不抢（2026-11-09 起 GUI 是纯前端，动游戏都走 maa-remote 的命令）。
+- **路径**：`$WADOS_MAA_HOME/state/maa/run.lock`，用 `flock(LOCK_EX | LOCK_NB)`。GUI 只读它看谁在用游戏，自己不抢（2026-11-09 起 GUI 是纯前端，动游戏都走 maa-remote 的命令）。
 - **持有者标记**（K15）：拿到锁后，把锁文件内容整个换成一行 JSON：`{"holder": 种类, "detail": 补充, "pid": 进程号, "since": ISO 时间, "run_id": 唯一场次ID}`。放锁前清空。
   - 种类：`daily` / `copilot` / `depot` / `update`。`gui` 是旧版 GUI 在进程内跑上游功能时写的，现在没有来源；`LOCK_HOLDER_LABELS` 里留着只为兼容。
   - 标记只在锁**确实被占着**时可信（`maa_common.run_lock_holder()`）。
@@ -866,3 +898,39 @@ ETA 仍按旧进度文件里**每一步**的耗时推：`index.jsonl` 只有整�
 - **不碎石、不吃药、不借助战**。`config get` 里本来就没有这几项（`SettingsTableTests` 守着）。
 - **日常和抄作业只走 maa-remote 子进程**，GUI 不自己拼 maa-cli 的任务。
 - **更新只调 `upstream update`**。GUI 自己不跑 brew / git / 下载。
+
+## 13. 守护进程与 HTTP API（iPhone App）
+`maa_daemon.py` 是唯一常驻进程，由 LaunchAgent `io.github.ffkiyo7.wados-maa.daemon` 经 `wados-maa-launcher` 拉起（`KeepAlive`）。配置在 `daemon/daemon.json`，密钥在 `daemon/secrets.json`（§6）。字段级契约见 [SPEC_DECOUPLE_AND_IOS.md §5](../../docs/SPEC_DECOUPLE_AND_IOS.md)，对不上时以 `maa_api.py` 为准。
+
+### 13.1 调度器
+- 6 条任务、北京时间：`plan_card_am` / `daily_am` / `plan_card_pm` / `daily_pm`（场前 10 分钟和开跑时刻，跟 `session_schedule`）、`depot`（04:30，`depot_enabled`）、`activity_watch`（每 15 分钟整刻）。
+- 错过的一次性槽位，同一北京自然日、2 小时内、且不在另一场的 `manual_run_blackout_minutes` 保护窗里才补跑；同场先计划卡后日常。`activity_watch` 只跑当前槽位。
+- 日常（含手动 `now`）1 小时硬超时：先 `SIGINT` 走 #64 的收尾，90 秒后才 `SIGKILL`；抄作业不设超时。防重入看 `run.lock` / `activity_watch.lock`。
+- `SIGHUP` 或 `daemon/reload.flag` 热重载；`maa_schedule.py` 改完时间会自动发。状态写 `daemon/scheduler.json`，`schedule show` 读它。
+- 调试：`--once` 只走一个 tick，`--no-api` 只跑调度器不起 API。
+
+### 13.2 传输与鉴权
+- HTTPS 监听 `api_host:api_port`（线上 `0.0.0.0:18170`），自签 ECDSA P-256 证书在 `daemon/tls/`。TLS 握手放到工作线程里做、带短超时，慢速半开连接不会卡住别的请求。
+- 来源 IP 白名单 `allowed_cidrs`（默认本机和 `192.168.50.0/24`）。Cloudflare Tunnel（`maa.luxraykit.com`）从本机 cloudflared 进来，所以也放行。
+- iPhone 按 SPKI SHA-256 固定证书，App 里可存一个备用指纹。轮换：`daemon/rotate_tls.py --stage` 先出新证书和新指纹，填进 App 的备用槽，再 `--activate` 换证书并重载 daemon 和 cloudflared。守护进程每天巡检证书，剩 `tls_warn_days` 天时发 Bark 告警。
+- Bearer Token 分两种，`secrets.json` 只存 SHA-256：`full` 能调全部 `/api/v1/*`；`resign_only` 只能调 `POST /api/v1/ios/resign`，别的一律 403。`GET /healthz`、`GET /rescue`（应急停止页）免鉴权。
+- 首次配对：`daemon/init_daemon.py` 在终端打印二维码（局域网地址、远程地址、SPKI 指纹、`full` Token）。Token 明文只在这时出现一次，`secrets.json` 里只有哈希。
+
+### 13.3 接口
+回执和 §12.1 一样是 `{ok, code, message, detail?, data?}`。写操作一律转成受控 argv 调 `maa_action.py`，注入 `MAA_ACTION_SOURCE=ios`。
+
+| 方法与路径 | 对应 |
+|---|---|
+| `GET /api/v1/snapshot` | 首屏聚合：锁、`last_run`、进度、今天两场、时间表、上游、自动抄作业开关、活动、调度器、续签 |
+| `GET /api/v1/events` | SSE：`progress` / `lock` / `last_run` / `today_plan` / `schedule` / `upstream` / `resign`，`sse_keepalive_seconds`（25）秒一次心跳，防 Cloudflare 100 秒断连 |
+| `GET /api/v1/choices`、`/copilot/stages`、`/config`、`/defaults` | `run choices`、`copilot stages`、`config get`、`defaults show` 的 `data` |
+| `GET /api/v1/history?limit&offset&kind` | 倒序读 `runs/index.jsonl` |
+| `GET /api/v1/runs/<run_id>/{report,screenshot,log}` | 战报、截图（`?thumb=1` 出 JPEG 缩略图）、日志尾部（`?tail=200`）；按 `resolve_run_artifact()` 兼容旧命名 |
+| `POST /api/v1/plan/{stage,skip,fight}` | `plan set-stage` / `plan auto-stage`、`plan skip-today`、`plan fight` |
+| `POST /api/v1/run/local`、`/run/cancel` | `run local`；`run cancel --run-id`（body 必须带 `run_id`，对不上回 `run_changed`） |
+| `POST /api/v1/copilot/preview`、`DELETE /api/v1/copilot/preview/<request_id>` | `copilot preview`，App 自带 `request_id`，可中途取消搜索子进程 |
+| `POST /api/v1/copilot/{go,auto,mark}` | `copilot go`、`copilot auto`、`copilot mark-cleared` / `unmark` |
+| `POST /api/v1/schedule`、`/defaults`、`/config` | `schedule *`、`defaults set *`、`config set` / `patch` |
+| `POST /api/v1/upstream/update`、`/notify/test` | `upstream update`；发一条 Bark 测试推送 |
+| `POST /api/v1/ios/resign[?if_due=1]` | 无线续签。**还没实现**，现在固定回 501 `not_configured`（Phase 4 S4-1） |
+

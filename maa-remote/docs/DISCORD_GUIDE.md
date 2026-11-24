@@ -1,5 +1,7 @@
 # Discord 使用手册
 
+> **已停用（2026-11-24）**：生产切线后 MAA 不再走 Discord。计划卡、按钮、聊天指令都没有了，战报改由 Bark 推送，操作改在 Mac App 和 iPhone App 上。本文只作切线前的历史记录。
+
 这份文档只讲一件事：**在 Discord 那个频道里，会自动发生什么，以及你能做什么。**
 不涉及部署和代码，那些看 [README.md](../README.md) 和 [DEV_GUIDE.md](./DEV_GUIDE.md)。
 
