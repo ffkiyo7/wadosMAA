@@ -3,7 +3,7 @@
 > 上游总规划：[SPEC_DECOUPLE_AND_IOS.md](../SPEC_DECOUPLE_AND_IOS.md)（二轮复核定稿，2026-11-21）
 > 后端既有不变量与外部契约：[maa-remote/docs/DEV_GUIDE.md](../../maa-remote/docs/DEV_GUIDE.md)
 > 说明：本目录将总 Spec 按**执行顺序、门禁（Gate）与可并行边界**拆分为 5 个阶段、25 个可执行子 Spec，每个子 Spec 均自带依赖声明、修改范围、接口/契约细节与勾选式验收清单。
-> **当前进度（2026-11-23）**：S3-5 真机验收完成，Gate 3 通过但附 1 条遗留；下一步是 S3-6 模拟切线演练，尚未开始。详见 [P3 当前进度](./P3_IOS_APP_AND_CUTOVER.md#当前进度)。
+> **当前进度（2026-11-24）**：Gate 3 与 S3-6 模拟切线演练均已完成通过，进入 S3-7 分支合入与单步生产切线。详见 [P3 当前进度](./P3_IOS_APP_AND_CUTOVER.md#当前进度)。
 
 ---
 

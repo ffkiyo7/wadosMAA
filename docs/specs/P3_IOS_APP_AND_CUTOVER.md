@@ -8,13 +8,13 @@
 
 ## 当前进度
 
-更新于 2026-11-23 23:45（北京时间）。
+更新于 2026-11-24 09:43（北京时间）。
 
-- **S3-5**：已在 iPhone Air + `devhome` 完成三轮真机验收和回归，发现的缺陷和 UX 问题已修复并复测通过。
-- **Gate 3**：通过，附 1 条遗留。
-- **遗留**：抄作业逐关推进的实时进度还没有真机验证。OS-EX-1 卡在前置剧情关 OS-ST-1：跳过按钮匹配分数约 0.715，一直没触发，根因未查清。它还被教学关 OS-TR-1 挡着，需要手动打一次。修好并补验前，线上自动抄作业保持暂停。
-- **下一步**：S3-6 模拟 HOME 切线演练（未开始）→ S3-7 合并和生产切线（需用户单独放行）。
-- **环境**：开发服务已停，Mac GUI 指向 `~/.hermes`。`devhome/scripts` 目前是真实目录，不是软链。提交都在本地 `feat/decouple-ios`，未 push。
+- **S3-1 / S3-2 / S3-3 / S3-4a~d**：已全部完成并确认。
+- **S3-5**：已在 iPhone Air + `devhome` 完成全链路真机验收（含 `2026-11-24-copilot-3524e07dfa1e-000816` 跑通 `OS-EX-1` 普通 + 突袭逐关进度与战报，以及冷启动缓存/断连置灰 UX 修复）。
+- **Gate 3**：完整通过，无遗留阻塞。
+- **S3-6**：已完成模拟 HOME 全流程演练（`--dry-run` → 切线 → 旧脚本置桩拒跑 → 非 MAA 数据无损 → `--rollback` 还原）及线上 `5/17/18/14` 只读预检通过。
+- **下一步**：执行 S3-7 分支合入与单步生产切线。
 
 ---
 
@@ -56,8 +56,8 @@
   3. 高频操作（手动开跑、换关、停止、确认开打）≥44pt 触控热区，优先下沉单手拇指区；高危/动游戏操作全部配系统二次确认；
   4. 明确 4 Tab、全局悬浮实时运行胶囊、连接异常横幅、空态/骨架/弱网/跨轨切换态、以及深浅色 + Dynamic Type 规范。
 - **验收清单**：
-  - [ ] 覆盖 §6.3 全部页面与状态，无违背不变量的降级开关入口
-  - [ ] 经用户确认后作为 S3-4a ~ S3-4d 实现依据
+  - [x] 覆盖 §6.3 全部页面与状态，无违背不变量的降级开关入口
+  - [x] 经用户确认后作为 S3-4a ~ S3-4d 实现依据
 
 ---
 
@@ -75,8 +75,8 @@
     - 补齐 `Snapshot`、`CopilotProgress`、`SchedulerStatus`、`ResignStatus` 等 §5.1 API 模型；
   - `gui/MeoAsstMac.xcodeproj` 添加本地 Package `../shared`，保留 `LocalProcessTransport` 与本地磁盘适配器。
 - **验收清单**：
-  - [ ] `swift test --package-path shared` 通过（含 `ScheduleReport`、`ChangeMeta(source="ios")`、`RunProgress` 日常/抄作业解析单测）
-  - [ ] `gui/` Release 构建通过，在 `devhome` 运行行为与抽离前一致
+  - [x] `swift test --package-path shared` 通过（含 `ScheduleReport`、`ChangeMeta(source="ios")`、`RunProgress` 日常/抄作业解析单测）
+  - [x] `gui/` Release 构建通过，在 `devhome` 运行行为与抽离前一致
 
 ---
 
@@ -154,7 +154,7 @@
   2. **全量备份**至 `~/.wados-maa/backups/cutover-<YYYYMMDDTHHMMSS>/`：
      - `~/.hermes/state/maa/`、`~/.hermes/state/agent-book/buttons.json`、`~/.hermes/cron/jobs.json`、`~/.hermes/scripts/maa_*.py`、`defaults read io.github.ffkiyo7.MaaRemoteGui RemoteHermesHome` 原值；
   3. **单步停旧入口**：
-     - 暂停 Hermes 中 **5 条在跑 MAA cron**（保留 **16 条非 MAA cron** 完整不动）；停用 Hermes MAA skill；
+     - 暂停 Hermes 中 **5 条在跑 MAA cron**（保留 **17 条非 MAA cron** 完整不动）；停用 Hermes MAA skill；
      - **持 `~/.hermes/state/agent-book/state.lock`** 原子读改写 `buttons.json`，**仅删 18 条 MAA 按钮键**（保留 **14 条非 MAA 业务键**）；
      - 将 `~/.hermes/scripts/maa_*.py` 替换为立即非零退出的拒绝桩（打印已迁移至 `~/.wados-maa`）；
   4. **状态与绝对路径迁移**：
@@ -164,7 +164,7 @@
   5. **切换 Mac GUI 偏好**：改写 `defaults write io.github.ffkiyo7.MaaRemoteGui RemoteHermesHome '~/.wados-maa'`；
   6. **一键回滚（`--rollback`）**：停新 LaunchAgent（核对无持锁）→ 从备份还原旧脚本、持 `agent-book/state.lock` 还原 `buttons.json`、恢复 5 条 MAA cron 与 `RemoteHermesHome='~/.hermes'` → 保留 `~/.wados-maa` 原样绝不删除。
 - **验收清单**：
-  - [ ] 在临时模拟 HOME 下完整演练「切线 → 校验非 MAA 数据完好 → 校验旧脚本拒执行 → 回滚还原」全部通过
+  - [x] 在临时模拟 HOME 下完整演练「切线 → 校验非 MAA 数据完好 → 校验旧脚本拒执行 → 回滚还原」全部通过
 
 ---
 
@@ -174,8 +174,7 @@
 - **并行性**：🔴 严格串行（Gate 3 门禁）
 - **验收清单**：
   - [x] Wi-Fi 与 5G 无感切轨，模拟伪造 `192.168.50.2` 被 SPKI Pinning 拦截
-  - [ ] 首页实时进度（日常 + 抄作业）、换关/跳过、手动开跑与带 `run_id` 取消、截图缩放与尾部日志全部真机跑通
-    - 只差抄作业逐关推进的实时进度，其余已通过（见「当前进度」的遗留）
+  - [x] 首页实时进度（日常 + 抄作业）、换关/跳过、手动开跑与带 `run_id` 取消、截图缩放与尾部日志全部真机跑通（`2026-11-24-copilot-3524e07dfa1e-000816` 已完成 `OS-EX-1` 普通 + 突袭逐关进度与战报真机闭环）
   - [x] 抄作业搜索/取消预览/确认开打/标记通关真机跑通
   - [x] 日常配置与时间表在 iOS 与 Mac GUI 双向同步一致
   - [x] 收到 AES-GCM 加密 Bark 推送并经 Deep Link 精准跳转对应页面
@@ -197,6 +196,6 @@
 - **切线验收清单**：
   - [ ] iOS App 与 Mac GUI 均正常读写 `~/.wados-maa`，Mac GUI 拒绝旧 `~/.hermes`
   - [ ] 线上跑通首场日常并收到加密 Bark 战报
-  - [ ] `~/.hermes` 其余 16 条非 MAA cron、14 条非 MAA 按钮与 Discord webhook 无损运行
+  - [ ] `~/.hermes` 其余 17 条非 MAA cron、14 条非 MAA 按钮与 Discord webhook 无损运行
   - [ ] 手动尝试执行旧 `~/.hermes/scripts/maa_action.py` 被拒绝桩拦截
   - [ ] 回滚备份目录完整可核验
