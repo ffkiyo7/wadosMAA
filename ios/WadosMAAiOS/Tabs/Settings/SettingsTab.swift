@@ -41,7 +41,7 @@ struct SettingsTab: View {
                 case .resources: ResourceDetailView()
                 case .scheduler: SchedulerDetailView()
                 case .signing: SigningDetailView()
-                case .advanced: AdvancedPlaceholderView()
+                case .advanced: AdvancedSettingsView()
                 }
             }
         }
@@ -399,40 +399,52 @@ private struct ResourceDetailView: View {
     }
 }
 
-// MARK: - 调度器（只读，启停在 Phase 4）
+// MARK: - 调度器
 
 private struct SchedulerDetailView: View {
     @Environment(AppStore.self) private var store
+    @State private var depotOverride: Bool?
 
     private static let names: [String: String] = [
         "plan_card_am": "早场计划", "daily_am": "早场日常", "plan_card_pm": "晚场计划", "daily_pm": "晚场日常",
         "activity_watch": "活动监控", "depot": "仓库对表",
     ]
-    private static let order = ["plan_card_am", "daily_am", "plan_card_pm", "daily_pm", "activity_watch", "depot"]
+    private static let order = ["plan_card_am", "daily_am", "plan_card_pm", "daily_pm", "activity_watch"]
+
+    private var values: [String: ScheduleReport.ScheduledJob] {
+        store.snapshot?.schedule?.jobs ?? [:]
+    }
 
     private var jobs: [ScheduleReport.ScheduledJob] {
-        let values = store.snapshot?.schedule?.jobs ?? [:]
         let known = Self.order.compactMap { values[$0] }
-        let others = values.values.filter { !Self.order.contains($0.id) }.sorted { $0.id < $1.id }
+        let others = values.values.filter { !Self.order.contains($0.id) && $0.id != "depot" }.sorted { $0.id < $1.id }
         return known + others
+    }
+
+    private var depotEnabled: Bool {
+        depotOverride ?? store.snapshot?.schedule?.depotEnabled ?? values["depot"]?.enabled ?? false
     }
 
     var body: some View {
         Form {
-            if jobs.isEmpty {
+            if values.isEmpty {
                 ContentUnavailableView("读不到调度器", systemImage: "clock")
             } else {
                 Section {
                     ForEach(jobs, id: \.id) { job in
-                        HStack {
-                            Text(Self.names[job.id] ?? job.id)
-                                .foregroundStyle(job.enabled ? Color.primary : Palette.secondary)
-                            Spacer()
-                            Text(nextText(job))
-                                .monospacedDigit()
-                                .foregroundStyle(Palette.secondary)
+                        JobRow(title: Self.names[job.id] ?? job.id, job: job)
+                    }
+                }
+                Section {
+                    Toggle(isOn: Binding(get: { depotEnabled }, set: setDepot)) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("仓库对表")
+                            if depotEnabled, let job = values["depot"] {
+                                JobStatusLine(job: job)
+                            }
                         }
                     }
+                    .disabled(!store.canWrite)
                 }
             }
         }
@@ -440,10 +452,60 @@ private struct SchedulerDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
     }
 
-    private func nextText(_ job: ScheduleReport.ScheduledJob) -> String {
-        guard job.enabled else { return "关闭" }
+    private func setDepot(_ value: Bool) {
+        depotOverride = value
+        Task {
+            await store.setDepotEnabled(value)
+            depotOverride = nil
+        }
+    }
+}
+
+private struct JobRow: View {
+    let title: String
+    let job: ScheduleReport.ScheduledJob
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text(title).foregroundStyle(job.enabled ? Color.primary : Palette.secondary)
+                Spacer()
+                Text(job.enabled ? JobStatusLine.next(job) : "关闭")
+                    .monospacedDigit()
+                    .foregroundStyle(Palette.secondary)
+            }
+            JobStatusLine(job: job, showsNext: false)
+        }
+    }
+}
+
+/// 上次没正常跑完才出现；正常的不占地方。
+private struct JobStatusLine: View {
+    let job: ScheduleReport.ScheduledJob
+    var showsNext = true
+
+    var body: some View {
+        if let text = Self.problem(job) {
+            Text(text).font(.footnote).foregroundStyle(job.lastStatus == "running" ? Palette.blue : Palette.red)
+        } else if showsNext {
+            Text(Self.next(job)).font(.footnote).monospacedDigit().foregroundStyle(Palette.secondary)
+        }
+    }
+
+    static func next(_ job: ScheduleReport.ScheduledJob) -> String {
         guard let text = job.nextRunAt, let date = BeijingTime.parseISO(text) else { return "—" }
         return "\(BeijingDay.title(date)) \(BeijingTime.clock(date))"
+    }
+
+    static func problem(_ job: ScheduleReport.ScheduledJob) -> String? {
+        let detail = job.lastDetail.flatMap { $0.isEmpty ? nil : $0 }
+        switch job.lastStatus {
+        case "running": return "运行中"
+        case "failed": return detail.map { "上次失败：\($0)" } ?? "上次失败"
+        case "missed": return detail ?? "上次错过了"
+        case "timeout", "timeout_stopping", "timeout_killed": return "上次超时"
+        default: return nil
+        }
     }
 }
 
@@ -530,15 +592,5 @@ private struct SigningDetailView: View {
 
     private static func stamp(_ date: Date) -> String {
         "\(BeijingDay.title(date)) \(BeijingTime.clock(date))"
-    }
-}
-
-// MARK: - 高级（占位，Phase 4）
-
-private struct AdvancedPlaceholderView: View {
-    var body: some View {
-        ContentUnavailableView("高级设置", systemImage: "gearshape")
-            .navigationTitle("高级")
-            .navigationBarTitleDisplayMode(.inline)
     }
 }

@@ -285,13 +285,14 @@ extension AppStore {
         if configOverrides[key] == value { configOverrides[key] = nil }
     }
 
-    private static func sendable(_ value: JSONValue) -> any Sendable {
+    static func sendable(_ value: JSONValue) -> any Sendable {
         switch value {
         case let .bool(item): item
-        case let .number(item): item.rounded() == item ? Int(item) : item
+        case let .number(item): item.rounded() == item && abs(item) < 1e15 ? Int(item) : item
         case let .string(item): item
-        case let .array(items): items.compactMap(\.string)
-        case .object, .null: ""
+        case let .array(items): items.map(sendable)
+        case let .object(items): items.mapValues(sendable)
+        case .null: ""
         }
     }
 
@@ -340,6 +341,12 @@ extension AppStore {
 
     func setSessionEnabled(phase: String, enabled: Bool) async {
         await writeAndRefresh("/api/v1/schedule", body: ["phase": phase, "enabled": enabled])
+    }
+
+    // MARK: - 调度器
+
+    func setDepotEnabled(_ enabled: Bool) async {
+        await writeAndRefresh("/api/v1/schedule", body: ["action": "depot", "enabled": enabled])
     }
 
     // MARK: - iOS 签名

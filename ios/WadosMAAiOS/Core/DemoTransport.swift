@@ -99,7 +99,17 @@ actor DemoTransport: BackendTransport {
         "mall_reserve_max_credit": true, "mall_only_buy_discount": false, "manual_run_blackout_minutes": 30,
         "copilot_blackout_minutes": 25, "auto_copilot_min_lead_minutes": 40, "activity_search_retry_minutes": 30,
         "auto_copilot_max_attempts_per_day": 2,
+        "proxy_failure_limit": 2, "proxy_failure_salvage": true,
+        "farming_weights": ["scarcity": 0.5, "gap": 0.3, "efficiency": 0.2], "farming_min_samples": 300,
+        "farming_target_days": 30, "farming_activity_edge": 1.3, "farming_rerun_days": 378,
+        "farming_scarcity_horizon_days": 400, "farming_stage_table": ["固源岩组": "1-7"],
+        "farming_manual_weights": [String: Any](), "skland_roster_refresh_days": 7,
+        "game_display_name": "MAA-Game", "disable_stage_manager_during_run": true,
+        "game_launch_timeout": 120, "game_quit_timeout": 30, "game_probe_timeout": 5, "maa_run_timeout": 3000,
+        "update_wait_minutes": 15, "connect_retry_limit": 2, "offline_retry_limit": 2, "retention_days": 14,
+        "resource_update_timeout": 300, "maa_cli_update_timeout": 180,
     ]
+    private var depotEnabled = false
     private var resignFinishesAt: Date?
     private var resignSignedAt = Date().addingTimeInterval(-5.4 * 86400)
     private var configMeta: [String: [String: String]] = [:]
@@ -298,6 +308,10 @@ actor DemoTransport: BackendTransport {
     }
 
     private func setSchedule(_ body: [String: any Sendable]?) -> RemoteReceipt {
+        if body?["action"] as? String == "depot", let enabled = body?["enabled"] as? Bool {
+            depotEnabled = enabled
+            return ok("schedule_saved", enabled ? "仓库对表已打开" : "仓库对表已关闭")
+        }
         guard let phase = body?["phase"] as? String else {
             return RemoteReceipt(ok: false, code: "bad_args", message: "参数不对", detail: nil, data: nil)
         }
@@ -549,7 +563,7 @@ actor DemoTransport: BackendTransport {
             ["time": time, "enabled": enabled, "plan_card_time": time, "daily_time": time, "cron": [String: Any]()]
         }
         return [
-            "backend": "daemon", "timezone": "Asia/Shanghai", "depot_enabled": false,
+            "backend": "daemon", "timezone": "Asia/Shanghai", "depot_enabled": depotEnabled,
             "scheduler_path": "scheduler.json", "jobs_path": "scheduler.json",
             "sessions": ["am": session(amTime, amEnabled), "pm": session(pmTime, pmEnabled)],
             "jobs": [
@@ -558,7 +572,7 @@ actor DemoTransport: BackendTransport {
                 "plan_card_pm": job("plan_card_pm", "21:50", enabled: pmEnabled),
                 "daily_pm": job("daily_pm", pmTime, enabled: pmEnabled),
                 "activity_watch": job("activity_watch", "23:45", enabled: true),
-                "depot": job("depot", "04:30", enabled: false),
+                "depot": job("depot", "04:30", enabled: depotEnabled),
             ],
         ]
     }
@@ -726,12 +740,16 @@ actor DemoTransport: BackendTransport {
     // MARK: 配置
 
     private func configObject() -> [String: Any] {
-        func field(_ key: String, _ label: String, _ kind: String, _ low: Int? = nil, _ high: Int? = nil) -> [String: Any] {
+        func field(
+            _ key: String, _ label: String, _ kind: String, _ low: Double? = nil, _ high: Double? = nil,
+            help: String? = nil
+        ) -> [String: Any] {
             var item: [String: Any] = [
                 "key": key, "group": "日常", "label": label, "kind": kind, "default": values[key] ?? NSNull(),
             ]
             if let low { item["min"] = low }
             if let high { item["max"] = high }
+            if let help { item["help"] = help }
             return item
         }
         return [
@@ -754,6 +772,29 @@ actor DemoTransport: BackendTransport {
                 field("auto_copilot_min_lead_minutes", "离早晚场不到多久就不再开新的一关（分钟）", "int", 0, 240),
                 field("activity_search_retry_minutes", "练度不够 / 没作业时多久再找（分钟）", "int", 5, 1440),
                 field("auto_copilot_max_attempts_per_day", "同一关每天最多自动尝试几次", "int", 0, 20),
+                field("proxy_failure_limit", "代理指挥连续失败几次就停下（次）", "int", 1, 10),
+                field("proxy_failure_salvage", "代理指挥停下后，其余任务照常做完", "bool", help: "基建、公招、商店、领奖照做，只是不再刷理智"),
+                field("farming_weights", "选关时看重什么：稀缺 / 缺口 / 效率", "weights", help: "三项按比例算，加起来不用等于 1"),
+                field("farming_min_samples", "掉率至少要统计多少次才可信（次）", "int", 0, 100000),
+                field("farming_target_days", "缺口按多少天的用量算（天）", "int", 1, 365),
+                field("farming_activity_edge", "活动关要便宜多少倍才算明显更优", "float", 1, 10),
+                field("farming_rerun_days", "预计多久复刻一次（天）", "int", 30, 1000),
+                field("farming_scarcity_horizon_days", "算稀缺时往后看多少天（天）", "int", 30, 2000),
+                field("farming_stage_table", "指定材料去哪一关刷", "stage_table", help: "只填主线和资源本；活动关会自动跟上"),
+                field("farming_manual_weights", "调高某些材料的优先级", "number_table"),
+                field("skland_roster_refresh_days", "干员练度多久强制刷新一次（天）", "int", 1, 60),
+                field("game_display_name", "游戏窗口常驻的显示器名", "text", help: "系统设置里显示器的名字；留空 = 不挪窗口"),
+                field("disable_stage_manager_during_run", "日常和抄作业期间临时关掉台前调度", "bool", help: "做完恢复原样；本来就关着的不动"),
+                field("game_launch_timeout", "等游戏启动好（秒）", "int", 30, 600),
+                field("game_quit_timeout", "等游戏退出（秒）", "int", 5, 120),
+                field("game_probe_timeout", "开始前看看你是不是在玩（秒）", "int", 0, 30, help: "0 = 不看，直接开始"),
+                field("maa_run_timeout", "一次日常最长多久（秒）", "int", 600, 3300, help: "整次最多 1 小时，要留出收尾的时间"),
+                field("update_wait_minutes", "日常最多等游戏资源更新多久（分钟）", "int", 0, 30),
+                field("connect_retry_limit", "游戏连接失败时重试几次（次）", "int", 0, 5),
+                field("offline_retry_limit", "没登录上时重启游戏几次（次）", "int", 0, 5),
+                field("retention_days", "本地日志 / 截图保留几天（天）", "int", 1, 90),
+                field("resource_update_timeout", "游戏资源更新最多等多久（秒）", "int", 60, 1800),
+                field("maa_cli_update_timeout", "MAA 升级最多等多久（秒）", "int", 60, 1800),
             ],
             "values": values,
             "meta": configMeta,
