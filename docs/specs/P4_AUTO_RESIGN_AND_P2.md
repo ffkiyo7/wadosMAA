@@ -14,7 +14,8 @@
   - S4-4：快照带 `tls` 块，App 自动把预备证书指纹存为备用、换证后升为主指纹。到期告警与 `rotate_tls.py --stage` / `--activate` 沿用已有实现。
 - **真机续签已通过**（11-24 23:47，手动 `run --trigger cli`）：第一次因工程没写开发团队构建失败（edeb531 修复）；第二次挪走旧描述文件 → 重建 → `ExpirationDate` 由 11-30 21:34 后移到 12-01 23:47 → 无线安装成功，新版 App 已在手机上。后台 25 分钟巡检的自动触发等 11-29 23:47 窗口打开后看结果。
 - **快捷指令已建好**（11-24）：`resign_only` Token 已生成，手动运行自动化回 `not_due`。窗口内「回家连 Wi-Fi 即续签」等 11-29 后看 `last_trigger` 是否为 `shortcut`。
-- **等用户验收**：证书轮换演练、真机走查设置页 P2，即 S4-5 剩余清单。
+- **证书轮换演练已通过**（11-25 00:00）：`--stage` 后快照带出新指纹 `yWhS…QFBs=`，App 刷新后存为备指纹；`--activate` 后守护进程热重载、cloudflared 重启，App 局域网和流量下都直接连上、主指纹换新、备指纹清空，无需重新配对。旧证书备份在 `daemon/tls/backup-20261125T000055`。
+- **还剩**：后台巡检在真实窗口里自动续签、快捷指令回家触发（都等 11-29 23:47 窗口）；真机走查设置页 P2（白名单配置、仓库对表开关）；60 天到期告警只有单测，要等证书临近到期或手动造一张短期证书才能实测。
 
 ---
 
@@ -60,8 +61,8 @@ S3-7 切线稳定
      - 暂时失败（锁屏/离线超时）：记日志静默等待下个周期；
      - **第 6.5 天仍未成功**、识别到 Xcode Apple ID 过期、或 `ExpirationDate` 未后移：发 `timeSensitive` Bark 告警。
 - **验收清单**：
-  - [ ] 状态机、4 条件守卫、锁死 `main` 路径、`ExpirationDate` 核验与告警阈值离线单测全绿
-  - [ ] `POST /api/v1/ios/resign?if_due=1` 同时支持 `full` 与 `resign_only` Token
+  - [x] 状态机、4 条件守卫、锁死 `main` 路径、`ExpirationDate` 核验与告警阈值离线单测全绿
+  - [x] `POST /api/v1/ios/resign?if_due=1` 同时支持 `full` 与 `resign_only` Token
 
 ---
 
@@ -74,7 +75,7 @@ S3-7 切线稳定
     - 触发器：个人自动化 → 接入家庭 Wi-Fi（`Alice3u3` / `Aliceuwu`）→ 立即运行（关闭运行前询问）；
     - 动作：`获取 URL 内容` → `POST https://maa.luxraykit.com/api/v1/ios/resign?if_due=1` → Header `Authorization: Bearer <resign_only_token>`（公网标准 HTTPS 证书，避免快捷指令拒绝自签证书）。
 - **验收清单**：
-  - [ ] 未满 5 天连 Wi-Fi 静默返回 `not_due` 无打扰
+  - [x] 未满 5 天连 Wi-Fi 静默返回 `not_due` 无打扰
   - [ ] 模拟 `due` 状态连 Wi-Fi 触发自动续签成功
 
 ---
@@ -110,7 +111,7 @@ S3-7 切线稳定
   4. 确认 iOS App 在局域网与 5G 两条链路下均无报错无缝继续工作，再将新指纹提升为主指纹。
 - **验收清单**：
   - [ ] 60 天到期告警触发正常
-  - [ ] 双指纹零中断轮换演练全程无断链报错
+  - [x] 双指纹零中断轮换演练全程无断链报错
 
 ---
 
@@ -122,4 +123,4 @@ S3-7 切线稳定
   - [ ] 将 `resign.json` 模拟为满 5 天，验证后台 25 分钟巡检自动完成从 `main` worktree 重签 + 无线安装 + `ExpirationDate` 后移 + 静默 Bark 回执
   - [ ] 快捷指令归家自动触发链路实测通过
   - [ ] 全部白名单配置、`depot_enabled` 开关与双指纹轮换验收完毕
-  - [ ] 合并 Phase 4 代码至 `dev` → `main` 并部署，确认线上 `deploy.py --check` 全绿
+  - [x] 合并 Phase 4 代码至 `dev` → `main` 并部署，确认线上 `deploy.py --check` 全绿
