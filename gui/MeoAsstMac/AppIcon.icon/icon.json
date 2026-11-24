@@ -3,14 +3,19 @@
     {
       "value" : {
         "linear-gradient" : [
-          "srgb:0.70180,0.87345,1.00000,1.00000",
-          "srgb:0.79728,0.72912,0.63566,1.00000"
+          "srgb:0.35294,0.66275,1.00000,1.00000",
+          "srgb:0.03922,0.30588,0.65882,1.00000"
         ]
       }
     },
     {
       "appearance" : "dark",
-      "value" : "system-dark"
+      "value" : {
+        "linear-gradient" : [
+          "srgb:0.17255,0.36863,0.61961,1.00000",
+          "srgb:0.03922,0.13725,0.31373,1.00000"
+        ]
+      }
     }
   ],
   "groups" : [
@@ -23,6 +28,13 @@
           "glass" : true,
           "image-name" : "pallas.png",
           "name" : "pallas"
+        },
+        {
+          "blend-mode" : "normal",
+          "fill" : "none",
+          "glass" : true,
+          "image-name" : "sparkles.png",
+          "name" : "sparkles"
         },
         {
           "blend-mode" : "normal",
