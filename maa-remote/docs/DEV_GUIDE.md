@@ -395,7 +395,7 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
 
 ~/.wados-maa/daemon/
   daemon.json     守护进程配置：端口、监听地址、允许的网段、局域网 IP、远程地址、通知后端、depot_enabled、
-                  续签用的 ios_device_udid / ios_device_lan_ip / ios_resign_enabled（§13.4）
+                  续签用的 ios_device_udid / ios_device_lan_ip / ios_resign_enabled / ios_team_id（§13.4）
   secrets.json    Token 哈希、Bark 密钥（0600，不进仓库）
   scheduler.json  每条定时任务的上次槽位、状态和下次运行时间
   resign.json     iOS 无线续签状态；resign.lock 是续签单实例锁（§13.4）
@@ -941,7 +941,7 @@ ETA 仍按旧进度文件里**每一步**的耗时推：`index.jsonl` 只有整�
 
 - **窗口**：距上次签名满 120 小时，或离 `ExpirationDate` 不足 48 小时。第一次没有 `resign.json` 时按本机缓存里本 App 最新的描述文件补一份。
 - **自动**：守护进程每拍看一眼，在窗口内每 25 分钟拉起一次 `maa_ios_resign.py auto`（脱离会话的子进程）。四个守卫依次是：App 2 分钟内有 `full` Token 请求或开着 SSE（`--app-active`）、`run.lock` 被占、手机不在局域网（`ios_device_lan_ip` ping 不通且 62078 端口连不上）、`devicectl` 找不到 `ios_device_udid`。不满足就记 `last_probe_detail`，不打扰。
-- **执行**：持 `daemon/resign.lock`；构建源固定 `~/Developer/wados-maa-deploy`，必须停在 `main` 且 `ios/`、`shared/` 没有未提交改动；先把 `~/Library/Developer/Xcode/UserData/Provisioning Profiles/` 里本 App 的描述文件挪到 `logs/ios-resign/profiles-backup/`（不挪 Xcode 会复用旧文件，S0-1），再 `xcodebuild -allowProvisioningUpdates`（derivedData `~/Developer/forks/wados-maa-build/auto-resign`）。新 `embedded.mobileprovision` 的 `ExpirationDate` 必须严格晚于旧值，否则挪回旧文件、判失败、不安装。最后 `xcrun devicectl device install app` 无线覆盖安装。日志在 `logs/ios-resign/<时间>.log`，留最近 20 份。
+- **执行**：持 `daemon/resign.lock`；构建源固定 `~/Developer/wados-maa-deploy`，必须停在 `main` 且 `ios/`、`shared/` 没有未提交改动；先把 `~/Library/Developer/Xcode/UserData/Provisioning Profiles/` 里本 App 的描述文件挪到 `logs/ios-resign/profiles-backup/`（不挪 Xcode 会复用旧文件，S0-1），再 `xcodebuild -allowProvisioningUpdates DEVELOPMENT_TEAM=<团队>`（工程里不写团队：取 `ios_team_id`，没配就用旧描述文件的 `TeamIdentifier`，记进 `resign.json` 的 `team_id`；derivedData `~/Developer/forks/wados-maa-build/auto-resign`）。新 `embedded.mobileprovision` 的 `ExpirationDate` 必须严格晚于旧值，否则挪回旧文件、判失败、不安装。最后 `xcrun devicectl device install app` 无线覆盖安装。日志在 `logs/ios-resign/<时间>.log`，留最近 20 份。
 - **通知**（`id=ios-resign`，点开到 App 的签名页）：成功发 `passive`；手机离线、安装没成功这类暂时失败不发；第 6.5 天（或离到期不足 12 小时）还没续上、Xcode 账号要重新登录、有效期没后移、部署目录不对，发 `timeSensitive`，同一原因一天最多一次。
 - **命令**：`status` 看状态、`bootstrap` 补记录、`run --trigger cli` 立刻续签、`shortcut-token` 给快捷指令重新生成 `resign_only` Token（只显示一次，旧的作废）。快捷指令的配法见 [docs/IOS_RESIGN_SHORTCUT.md](../../docs/IOS_RESIGN_SHORTCUT.md)。
 

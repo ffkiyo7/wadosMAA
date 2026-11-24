@@ -50,7 +50,7 @@
 - 构建和装到真机：
 
   ```bash
-  xcodebuild -project ios/WadosMAAiOS.xcodeproj -scheme WadosMAAiOS -configuration Release -destination 'generic/platform=iOS' -derivedDataPath ~/Developer/forks/wados-maa-build/<名字> -allowProvisioningUpdates build
+  xcodebuild -project ios/WadosMAAiOS.xcodeproj -scheme WadosMAAiOS -configuration Release -destination 'generic/platform=iOS' -derivedDataPath ~/Developer/forks/wados-maa-build/<名字> -allowProvisioningUpdates DEVELOPMENT_TEAM=DY725KK25V build
   ```
 
   ```bash

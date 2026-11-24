@@ -32,8 +32,9 @@ def tearDownModule() -> None:
     _isolation.assert_shared_home_clean()
 
 
-def profile_xml(uuid: str, expires: datetime, *, app_id: str = APP_ID) -> str:
+def profile_xml(uuid: str, expires: datetime, *, app_id: str = APP_ID, team: str = "TEAM123") -> str:
     doc = {
+        "TeamIdentifier": [team],
         "UUID": uuid,
         "CreationDate": (expires - timedelta(days=7)).astimezone(timezone.utc).replace(tzinfo=None),
         "ExpirationDate": expires.astimezone(timezone.utc).replace(tzinfo=None),
@@ -315,6 +316,7 @@ class BuildTests(ResignTestCase):
         self.assertFalse(self.old.exists(), "旧描述文件要先挪走再构建")
         build = next(c for c in self.runner.calls if c[0] == "/usr/bin/xcodebuild")
         self.assertIn("-allowProvisioningUpdates", build)
+        self.assertIn("DEVELOPMENT_TEAM=TEAM123", build, "工程里没写团队，要从描述文件带过去")
         self.assertEqual(build[build.index("-project") + 1], str(self.worktree / "ios" / "WadosMAAiOS.xcodeproj"))
         install = next(c for c in self.runner.calls if c[:2] == ["/usr/bin/xcrun", "devicectl"])
         self.assertEqual(install[install.index("--device") + 1], UDID)
@@ -325,6 +327,20 @@ class BuildTests(ResignTestCase):
         self.assertEqual(resign._parse_time(st["expiration_date"]), new_exp)
         self.assertEqual(resign._parse_time(st["last_signed_at"]), NOW)
         self.assertEqual(self.notes, [("iOS App 已自动续签", "有效期至 12-05 22:00", "passive")])
+
+    def test_team_from_config_wins(self) -> None:
+        self.write_config(UDID, ios_team_id="CFGTEAM")
+        self.runner.new_profile = profile_xml("new-uuid", NOW + timedelta(days=7))
+        resign.perform(self.env(), trigger="cli")
+        build = next(c for c in self.runner.calls if c[0] == "/usr/bin/xcodebuild")
+        self.assertIn("DEVELOPMENT_TEAM=CFGTEAM", build)
+
+    def test_no_team_anywhere_fails_without_touching_profiles(self) -> None:
+        self.old.unlink()
+        self.runner.calls.clear()
+        res = resign.perform(self.env(), trigger="cli", force=True)
+        self.assertEqual(res["code"], "no_team")
+        self.assertFalse(self.runner.ran("/usr/bin/xcodebuild"))
 
     def test_expiration_must_move_later(self) -> None:
         self.runner.new_profile = profile_xml("same", NOW + timedelta(days=1.5))

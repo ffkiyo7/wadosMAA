@@ -124,6 +124,7 @@ def load_resign_config(path: Path | None = None) -> dict[str, Any]:
         "enabled": bool(raw.get("ios_resign_enabled", True)),
         "udid": str(raw.get("ios_device_udid") or "").strip(),
         "lan_ip": str(raw.get("ios_device_lan_ip") or "").strip(),
+        "team_id": str(raw.get("ios_team_id") or "").strip(),
     }
 
 
@@ -199,6 +200,7 @@ class Profile:
     app_id: str
     created: datetime | None
     expires: datetime | None
+    team: str = ""
 
 
 def parse_profile(path: Path, runner: Runner = run_command) -> Profile | None:
@@ -229,7 +231,16 @@ def parse_profile(path: Path, runner: Runner = run_command) -> Profile | None:
         app_id=str(ents.get("application-identifier") or ""),
         created=_dt(doc.get("CreationDate")),
         expires=_dt(doc.get("ExpirationDate")),
+        team=_team(doc, ents),
     )
+
+
+def _team(doc: Mapping[str, Any], ents: Mapping[str, Any]) -> str:
+    teams = doc.get("TeamIdentifier")
+    if isinstance(teams, list) and teams and isinstance(teams[0], str):
+        return teams[0]
+    team = ents.get("com.apple.developer.team-identifier")
+    return team if isinstance(team, str) else ""
 
 
 def cached_profiles(
@@ -269,6 +280,7 @@ def bootstrap_state(
             "last_signed_at": newest.created.isoformat() if newest.created else None,
             "expiration_date": newest.expires.isoformat() if newest.expires else None,
             "profile_uuid": newest.uuid,
+            "team_id": newest.team,
             "last_result": "ok",
             "last_trigger": "bootstrap",
         }
@@ -555,6 +567,13 @@ def _build_and_install(
             old_expiry_candidates.append(recorded)
         old_expiry = max(old_expiry_candidates) if old_expiry_candidates else None
 
+        # 工程里不写开发团队；用配置的，没配就沿用上一份描述文件的。
+        newest = max(old_profiles, key=lambda p: p.expires or now, default=None)
+        team = cfg.get("team_id") or (newest.team if newest else "") or str(state.get("team_id") or "")
+        if not team:
+            return finish("no_team", "不知道用哪个开发团队签名，在 daemon.json 配 ios_team_id", ok=False, alert=True)
+        state["team_id"] = team
+
         backup_dir = env.log_dir / "profiles-backup" / now.strftime("%Y%m%d-%H%M%S")
         for prof in old_profiles:
             ensure_private_dir(backup_dir)
@@ -572,6 +591,7 @@ def _build_and_install(
             "-destination", "generic/platform=iOS",
             "-derivedDataPath", str(env.derived_data),
             "-allowProvisioningUpdates",
+            f"DEVELOPMENT_TEAM={team}",
             "build",
         ]
         log.write("$ " + " ".join(build_argv))
