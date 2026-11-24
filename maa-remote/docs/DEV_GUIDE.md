@@ -248,17 +248,18 @@ maa activity Official ── activity_snapshot() ── activity_target() ──
 11. **判定与上报** — `ok = (return_code == 0 and not cleanup_errors and home_verified is not False)`。有子区就最后编辑一次子区消息。战报两个出口：**一定**写 `runs/<date>-<phase>-report.json`（战报 Embed 原文，路径记进 `last_run.report`）；开始干活之后（启动失败已直报）再往频道发战报 Embed + `attachment://shot.png`，多段上传失败降级成「无图 Embed + `hermes send MEDIA:`」，整个发送失败只记日志。最后写 `last_run.json`（#63）。
 
 ### 恢复策略
-所有重开、补跑共用同一个 `maa_run_timeout` 预算；124/125/130 是我们自己的返回码，一律不重试。
+所有重开、补跑共用同一个 `maa_run_timeout` 预算；124/125/126/130 是我们自己的返回码，`connect_failed()` 和 `never_logged_in()` 一律不拿它们重试（126 走下面「游戏中途退出」那一行）。
 
 | 情况 | 判据 | 动作 |
 |---|---|---|
 | 连接阶段就失败 | `CONNECT_FAILURE_MARKERS`（含 `ScreencapFailed`）且**一条任务链都没 Completed**；整份日志只有 `never_saw_the_game()` 白名单里的行（截图失败、任务起止、收尾汇总、`SCREENCAP_SETTLE_NOTE`）时 `AllTasksCompleted` 也不算跑过 | 等 `connect_retry_delay`（8s）→ `settle_game_window(allow_restart=True)` → `wait_for_game()` → 重开，最多 `connect_retry_limit`（2）次，日志**追加**进同一文件。放弃时说明带 `CONNECT_GAVE_UP`，`execute()` 跳过所有补跑，只记 `SCREEN_LOST_SKIP_NOTE` |
 | 游戏没登录上（「获取网络配置失败」） | `never_logged_in()` 三条全满足：StartUp 段撞过 `GameOffline`、紧接的任务链也撞上、没有任何作战 / 掉落 / 基建 / 公招进展 | 等 `offline_retry_delays`（120s、300s）→ 写一行 `conf_probe()` 连通性探测 → `restart_game()` → 摆窗 → 整场重跑，最多 `offline_retry_limit`（2）次。死掉那趟的输出不交给战报。放弃时带 `OFFLINE_GAVE_UP`，补跑跳过（`OFFLINE_SKIP_NOTE`）。登录后才掉线的不重开，只如实报红；撞上 `GameOffline` 的任务一律「❌ 未完成（游戏掉线）」（`offline_tasks()`，#61） |
+| 游戏中途退出 | `run_maa()` 拉起时用 `GameExitWatch` 记下游戏进程，每 `PROGRESS_INTERVAL_SECONDS` 查一次 `probe_game_pids()`：进程没了、或和基线没有交集（换了一个）。查不出来（pgrep 超时 / 出错）不算 | 立刻 terminate maa run，返回 `GAME_EXITED_CODE = 126`，日志写一行 `游戏中途退出（时刻 发现，旧 / 新 PID）` 和本场之后的崩溃报告路径（`crash_reports_since()`，只记路径）。这一步排在摆窗救场**之前**：游戏不在了就不再 `open -a`。`run_maa_resilient()` 接着 `restart_game()` → 摆窗 → 按 `game_exit_plan()` 改写 `daily.toml`（汇总里 Completed 的基建 / 公招 / 商店 / 领奖去掉；刷理智两块都跑完才去掉；StartUp 之外开过头就不再进剿灭）后接着跑，最多 `game_exit_retry_limit`（1）次。几趟输出拼在一起交给战报，同一块刷理智的次数和掉落按段相加。放弃时带 `GAME_EXIT_GAVE_UP`，补跑跳过（`GAME_EXIT_SKIP_NOTE`），`failure = game_exited`。熔断补跑、后备关补跑也盯进程，退出就停、不再重开（#68） |
 | 代理指挥失误 | 掉落项里出现「理智」（`SANITY_REFUND_ITEM`，游戏把返还的理智画成道具）= 失误批次 | `_drop_pairs()` 剔掉「理智」；`fight_wiped_out()`（有失误且零真掉落）时 Fight 翻红、写「实际完成 0 次」、整场 ❌、备注提示手动重打三星刷新录像。**熔断**：`run_maa()` 每 `PROGRESS_INTERVAL_SECONDS` 看末尾**连续**失误批次，达 `proxy_failure_limit`（2）就终止，返回 `PROXY_BREAK_CODE = 125`（中间有真掉落就清零）。**补跑**：`_salvage_run()` 用去掉 Fight 的 `daily.toml` 再跑一趟捞回基建 / 公招 / 商店 / 奖励，剩余预算不足 `proxy_failure_salvage_min_seconds`（300）就跳过，`proxy_failure_salvage: false` 关掉，日志 `runs/<date>-<phase>-salvage.log`。「StartUp 能否从结算页带回主界面」未真机验收 |
 | 主关空跑失败 | `return_code != 0` 且 `fight_failed_dry()`（段里没有 `Fight <关> n times`、没有掉落、`[刷理智·续]` 没跑过） | `_fallback_fight_run()`：`fallback_fight_plan()` 只留 Fight、`annihilation = False`、块名 `FARMING_TASK_NAMES[1]`，剩余不足 `fight_fallback_min_seconds`（300）跳过，`fight_fallback_on_error: false` 关掉，日志 `runs/<date>-<phase>-fallback.log`（复用 `last_run.salvage_log`）。打了几批才 Error 的不补 |
 | 台前调度把游戏收进侧边栏（预防，不是事后救） | 每场都做：拿到 `run.lock` 后、`launch_game()` 前 `pause_stage_manager()` 读 `com.apple.WindowManager GloballyEnabled` | 开着就先把原状态写进 `state/maa/stage_manager.json` 再 `defaults write … -bool false`；`finally` 里关完游戏后 `restore_stage_manager()` 写回开、删文件（成功 / 失败 / `KeyboardInterrupt` 都走）。原本关着不动也不还原；文件是上一场中途被杀留下的就以它为准、本场结束时一并还原；`disable_stage_manager_during_run: false` 时只还原遗留、不关。读写失败只打一行 stderr，不影响跑场（#62）。旧的摆窗救法（§0.5）照留，真机确认有效后再删 |
 
-来由：[2026-08-07](./incidents/2026-08-07-proxy-failure-sanity-refund.md)、[2026-08-08](./incidents/2026-08-08-maatouch-sigsegv.md)、[2026-09-09 早场](./incidents/2026-09-09-am-fight-dry-fallback.md)、[2026-11-08](./incidents/2026-11-08-am-window-shelved.md)、[2026-11-09](./incidents/2026-11-09-am-game-offline.md)；方案见 `PLAN_GAME_OFFLINE.md`。
+来由：[2026-08-07](./incidents/2026-08-07-proxy-failure-sanity-refund.md)、[2026-08-08](./incidents/2026-08-08-maatouch-sigsegv.md)、[2026-09-09 早场](./incidents/2026-09-09-am-fight-dry-fallback.md)、[2026-11-08](./incidents/2026-11-08-am-window-shelved.md)、[2026-11-09](./incidents/2026-11-09-am-game-offline.md)、[2026-11-25](./incidents/2026-11-25-now-game-exited.md)；方案见 `PLAN_GAME_OFFLINE.md`、`PLAN_GAME_EXITED_MIDRUN.md`。
 
 ### CLI 输出 → 中文
 `progress_content()` 和 `extract_summary()` 是纯函数：CLI 行数组 → Discord 文本。**原始 CLI 文本从不进 Discord**，只落 `runs/*.log`（#9）。靠 `TASK_STEPS` + 一组正则识别任务状态、理智、连战次数、临期药、掉落、设施、公招。maa-cli / MaaCore 输出格式变了通常只改这两个函数，用 `test_progress_and_summary_translate_cli_events` 验证。
@@ -442,7 +443,7 @@ D11。判据只有一条：**估算理智 < 默认关的 `apCost` → `plan["far
 | `game_bundle_id` / `playcover_app_path` / `maatools_address` / `game_display_name` | `com.hypergryph.arknights` / `~/Library/Containers/io.playcover.PlayCover/Applications/com.hypergryph.arknights.app` / `127.0.0.1:1717` / `MAA-Game` | `App Settings/<bundle id>.plist` 的文件名；`open -a` 拉起；`pgrep` / `pkill -f` 用里面可执行文件的完整路径；只接受回环；与 PlayCover、maa-cli profile 三处一致；游戏窗口常驻的虚拟屏名；空串 = 不管 |
 | `disable_stage_manager_during_run` | `true` | 日常和抄作业动游戏期间临时关掉台前调度、跑完还原（#62，§4「恢复策略」）；GUI 标签「跑的时候临时关掉台前调度」 |
 | `game_launch_timeout` / `game_quit_timeout` / `game_probe_timeout` / `maa_run_timeout` | `120` / `30` / `5` / `3000` | 等 MaaTools / 等 `TERM` 后退出 / 「你在玩」探测预算（`0` 关闭探测）；为守护进程 1 小时硬超时（§13.1）预留清理时间；重开与补跑共用 |
-| `connect_retry_limit` / `connect_retry_delay` / `offline_retry_limit` / `offline_retry_delays` / `proxy_failure_limit` / `proxy_failure_salvage` / `proxy_failure_salvage_min_seconds` / `fight_fallback_on_error` / `fight_fallback_min_seconds` / `update_wait_minutes` | `2` / `8` / `2` / `[120, 300]` / `2` / `true` / `300` / `true` / `300` / `15` | 连接阶段失败的重开次数与间隔；没登录上时重启重跑的次数和第 n 次前等几秒（不够长用最后一个值）；代理失误熔断与补跑；主关空跑失败改刷后备关；日常等上游更新放锁的上限 |
+| `connect_retry_limit` / `connect_retry_delay` / `offline_retry_limit` / `offline_retry_delays` / `game_exit_retry_limit` / `proxy_failure_limit` / `proxy_failure_salvage` / `proxy_failure_salvage_min_seconds` / `fight_fallback_on_error` / `fight_fallback_min_seconds` / `update_wait_minutes` | `2` / `8` / `2` / `[120, 300]` / `1` / `2` / `true` / `300` / `true` / `300` / `15` | 连接阶段失败的重开次数与间隔；没登录上时重启重跑的次数和第 n 次前等几秒（不够长用最后一个值）；游戏中途退出后重启接着跑的次数；代理失误熔断与补跑；主关空跑失败改刷后备关；日常等上游更新放锁的上限 |
 | `medicine_expire_days` | `2` | 只吃这个窗口内将过期的理智药 |
 | `fight_times` | `2147483647` | 生产值，配 `series = 0` 打到理智不足（有限 `times` 下 Beta MaaCore 改倍率偶发多起一批）。真机验链不想耗理智时临时设 `0`，验完务必改回 |
 | `maa_activity_cache` | 不在种子里 | 覆盖 `StageActivityV2.json` 路径 |
@@ -553,6 +554,7 @@ hermes cron create "0 14 * * *"  --name "MAA 日常·晚" --script maa_daily.py 
 | 51 | 配置里的字符串列表写进任务文件前必须过白名单（`SAFE_MALL_ITEM_RE`，不合规静默丢弃不抛）；布尔走 `_toml_bool()`。渲染器不接受没校验过的外部字符串 | `_mall_item_list()` / `_toml_bool()` + `AwardAndMallOptionTests` | — |
 | 59 | 主页入口永不切界面主题，纯源石兑换弹窗只点 ✗：9 个 `<入口>-Entry` 的 `onErrorNext` 不含 `SwitchTheme`；`OriginiteExchangeCancel` 的 `specificRect` 整个在 x ≤ 940；`<入口>Sanrio` 带 `rectMove` 把点击收进模板中间、离边 ≥ 1/5（终端离上沿 ≥ 25px） | `config/maa-cli/resource/tasks/tasks.json` + `test_sanrio_theme_entries_never_switch_theme_and_ship_their_templates` / `test_originite_exchange_popup_is_only_ever_cancelled` | [2026-11-02](./incidents/2026-11-02-home-theme-template.md)、[2026-11-05](./incidents/2026-11-05-originite-exchange-popup.md)、[2026-11-10](./incidents/2026-11-10-sanrio-home-layout-shift.md) |
 | 61 | 掉线后的自动重启只在 `never_logged_in()` 三条全满足时做；登录后才掉线只报红。撞上 `GameOffline` 的任务不得判完成；死掉那趟输出不交给战报；重启只有 `restart_game()` 一份 | `never_logged_in()` / `offline_tasks()` / `run_maa_resilient()` + `GameOfflineTests` / `OfflineRetryTests` / `OfflineExecuteTests` / `test_there_is_exactly_one_restart_implementation` | [2026-11-09](./incidents/2026-11-09-am-game-offline.md) |
+| 68 | 游戏中途退出只由 `GameExitWatch`（`probe_game_pids()`）认：进程没了或换了一个；查不出来一律不算、永不抛。认出后立刻停掉 maa run、返回 `GAME_EXITED_CODE`，判进程排在摆窗救场之前（游戏不在就不 `open -a`）；日常每处真跑 maa run 的地方（`run_maa_resilient()` / `_salvage_run()` / `_fallback_fight_run()`）都带看门狗；重开只在 `run_maa_resilient()` 里做、只走 `restart_game()`，次数受 `game_exit_retry_limit` 管，接着跑的计划只由 `game_exit_plan()` 决定（只认汇总的 Completed，剿灭开过头不再进），不动快照；抄作业认出退出就停这一轮（`exited`）、不自动重开 | `GameExitWatch` / `probe_game_pids()` / `run_maa()` / `run_maa_resilient()` / `game_exit_plan()` / `_run_copilot_with_watchdog()` + `tests/test_game_exit.py` | [2026-11-25](./incidents/2026-11-25-now-game-exited.md) |
 
 ### 8.2 计划与场次
 | # | 不变量 | 落点 | 来由 |
@@ -697,6 +699,7 @@ python3 scripts/maa_daemon.py --once                  # 调度器只走一个 ti
 | 不到 1 秒 `return_code=1`、`runs/` 没 `.log` | `require_executable()`（`config.maa_bin`）或 `verify_game_installed()`（MaaTools 被关 / 端口改了） |
 | 有开跑消息，子区进度不动 | `runs/<date>-<phase>.log` 尾部；多半卡在更新 / 登录页，50 分钟后 124 终止 |
 | 很快就红，一串 `ScreencapFailed` / `ConnectFailed` | 窗口不在台前或 MaaTools 没开（§0.5）。`BetterDisplay get -nameLike=MAA -connected`；`last_run.connect_retries`；日志「摆回台前」那行的 `[窗口 …；屏：…]` |
+| 一串 `ScreencapFailed`，`asst.log` 里是 `Broken pipe` / `Connection reset by peer`；日志有「游戏中途退出」 | 游戏进程中途退了，MaaCore 连着旧进程不会重连（§4 恢复策略，#68）。看日志那一行的退出时刻、PID 和崩溃报告路径；`last_run.game_exits`。退出原因还没查明（[2026-11-25](./incidents/2026-11-25-now-game-exited.md)） |
 | 很快就红，一串 `GameOffline`，截图停在「获取网络配置失败」 | 没登录上（§4 恢复策略）。`last_run.offline_retries`、日志「连通性探测」行；`~/Library/Application Support/sparkle/logs/core-<日期>.log` 看连 `game-config` / `ak-conf` / `as.hypergryph.com` 的线路（正常登录会连到 `as`）。重启到底都没恢复多半是鹰角短时故障 |
 | 战报 ❌ 但任务都是 ✅ | `cleanup_errors` 非空也判失败 |
 | 点按钮 / 下拉没反应或报未登记 | 卡片过期（21:50 后早场卡必然点不动）；gateway 没重启；`buttons.json` 被别人覆盖 |
@@ -859,9 +862,10 @@ ETA 仍按旧进度文件里**每一步**的耗时推：`index.jsonl` 只有整�
 | `stage` | 日常：本场要刷的关（不刷理智是空串）；抄作业：这一轮的第一关 |
 | `started_at` / `finished_at` / `duration_seconds` | 起止时间（ISO）和整场耗时（秒） |
 | `status` | `success` / `failed` / `cancelled` / `skipped`。成功率只算 `success` 和 `failed` |
-| `failure` | 只在 `failed` 时有值，按先后取第一条：日常 `startup`（游戏没打开）/ `upstream`（上游状态不对，没开游戏）/ `offline` / `screen_lost` / `timeout` / `proxy` / `task_failed` / `not_home` / `cleanup` / `inventory` / `unknown`；抄作业 `prefight` / `stopped` / `cleanup` / `stage_failed` |
+| `failure` | 只在 `failed` 时有值，按先后取第一条：日常 `startup`（游戏没打开）/ `upstream`（上游状态不对，没开游戏）/ `offline` / `game_exited`（游戏中途退出，重开后没能跑完）/ `screen_lost` / `timeout` / `proxy` / `task_failed` / `not_home` / `cleanup` / `inventory` / `unknown`；抄作业 `prefight` / `stopped` / `cleanup` / `stage_failed` |
 | `skip_reason` | 只在 `skipped` 时有值：`plan`（计划里跳过）/ `game_busy`（你在玩） |
 | `retries` / `restarts` / `window_fixes` | 日常：拿不到画面重开 maa run 的次数 / 没登录上重启游戏的次数 / 画面丢了把窗口摆回来的次数；停在主流程外的那种停下是 `null`。抄作业没有这些计数，都是 `null` |
+| `game_exits` | 日常：游戏中途退出、被停掉 maa run 的次数（#68）；跳过的场和抄作业是 `null`，旧行没有这个字段 |
 | `rescue` | 日常：`salvage`（代理失误后补跑基建等）/ `fallback`（改刷后备关）/ `null` |
 | `won` / `total` | 只有抄作业：通过几项 / 一共几项 |
 | `report` / `progress` / `log` | 战报文件、进度文件、maa-cli 日志的路径（没有就是 `null`；抄作业另有 `snapshot`） |

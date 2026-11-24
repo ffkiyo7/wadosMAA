@@ -342,6 +342,7 @@ class LastRun(TypedDict, total=False):
     proxy_failure_sanity_refunded: int
     connect_retries: int
     offline_retries: int
+    game_exits: int
     inventory_error: str | None
     report: str | None
     progress: str | None
@@ -377,7 +378,7 @@ RUN_SCOPED_LAST_RUN_KEYS: frozenset[str] = frozenset({
     "screenshot_error", "startup_error", "summary", "skip_reason", "game_probe",
     "emulator_probe", "home_verified", "home_verify_detail", "cleanup_errors",
     "proxy_failure_batches", "proxy_failure_sanity_refunded", "connect_retries",
-    "offline_retries", "inventory_error", "thread_id", "report", "progress",
+    "offline_retries", "game_exits", "inventory_error", "thread_id", "report", "progress",
 })
 
 

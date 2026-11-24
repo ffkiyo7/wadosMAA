@@ -155,6 +155,82 @@ def game_pids(config: Config, timeout: float = 2.0) -> list[int]:
     return [int(line) for line in found.stdout.split() if line.strip().isdigit()]
 
 
+def probe_game_pids(config: Config, timeout: float = 2.0) -> list[int] | None:
+    """游戏进程 PID；查不出来（pgrep 超时、出错、配置非法）返回 None。永不抛。
+
+    和 `game_pids()` 的区别：`[]` 只表示 pgrep 确认没有游戏进程（返回码 1），
+    别的失败一律是「不知道」，`GameExitWatch` 不会把它当成游戏退出。
+    """
+    try:
+        found = subprocess.run(
+            ["pgrep", "-f", process_pattern(config)],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=max(0.1, timeout),
+        )
+    except (OSError, subprocess.SubprocessError, RuntimeError, ValueError):
+        return None
+    if found.returncode == 1:
+        return []
+    if found.returncode != 0:
+        return None
+    return [int(line) for line in found.stdout.split() if line.strip().isdigit()]
+
+
+class GameExitWatch:
+    """盯住 `maa run` 连上的那个游戏进程，认出它中途退出或换了一个（不变量 #68）。
+
+    MaaCore 连的是游戏进程里的 MaaTools；进程一换，旧连接就断了（`Broken pipe`），
+    MaaCore 不会重连，只会一直报 `ScreencapFailed`（2026-11-25 手动场）。
+    `check()` 第一次看到游戏进程时记作基线；之后进程没了、或者和基线没有交集，就返回
+    一句说明。查不出来一律当「没事」，永不抛。
+    """
+
+    def __init__(self, config: Config, probe: Any = None) -> None:
+        self._config = config
+        self._probe = probe or probe_game_pids
+        self.baseline: list[int] = []
+
+    def check(self) -> str:
+        """空串 = 游戏还是原来那个进程（或查不出来）；否则是退出说明。"""
+        try:
+            pids = self._probe(self._config)
+        except Exception:  # noqa: BLE001 — (c) 盯进程是尽力而为，查不出来当没事
+            return ""
+        if pids is None:
+            return ""
+        if not self.baseline:
+            self.baseline = sorted(pids)
+            return ""
+        old = "、".join(str(pid) for pid in self.baseline)
+        if not pids:
+            return f"游戏进程 {old} 退出了"
+        if not set(pids) & set(self.baseline):
+            new = "、".join(str(pid) for pid in sorted(pids))
+            return f"游戏进程从 {old} 换成了 {new}"
+        return ""
+
+
+CRASH_REPORT_DIR = Path("~/Library/Logs/DiagnosticReports")
+
+
+def crash_reports_since(config: Config, since: float, directory: Path | None = None) -> list[str]:
+    """`since`（epoch 秒）之后生成的游戏崩溃报告路径，最新的在前。只看文件名和修改时间，
+    不读内容；目录读不了返回空列表。永不抛。"""
+    try:
+        name = executable_path(config).name
+        root = (directory or CRASH_REPORT_DIR).expanduser()
+        found = [
+            (path.stat().st_mtime, str(path))
+            for path in root.glob(f"{name}*.ips")
+            if path.is_file()
+        ]
+    except (OSError, RuntimeError, ValueError):
+        return []
+    return [path for mtime, path in sorted(found, reverse=True) if mtime >= since]
+
+
 # ---------------------------------------------------------------------------
 # MaaTools 客户端
 # ---------------------------------------------------------------------------

@@ -187,8 +187,16 @@ RESTART_ALLOWANCE_SECONDS = 90
 # 只当排障线索写进运行日志，不当闸门。
 CONF_PROBE_URL = "https://ak-conf.hypergryph.com/"
 CONF_PROBE_TIMEOUT = 5
+# 跑到一半游戏进程退出或换了一个（不变量 #68）：MaaCore 连的旧进程没了、不会重连，
+# 我们停掉 maa run 时写这个返回码。
+GAME_EXITED_CODE = 126
+# 停掉那一趟时写进日志的说明开头；战报、失败原因和次数统计都按它认。
+GAME_EXITED_NOTE = "游戏中途退出"
+# `run_maa_resilient()` 放弃「游戏中途退出」重开时说明里的固定词，调用方据此跳过补跑。
+GAME_EXIT_GAVE_UP = "不再重开"
+GAME_EXIT_SKIP_NOTE = "游戏中途退出、没能接着跑完，补跑跳过。"
 # 这几个返回码是本脚本自己写上去的，不是「没连上」——重开一趟只会重复同一件事。
-SELF_ASSIGNED_CODES = (124, PROXY_BREAK_CODE, 130)
+SELF_ASSIGNED_CODES = (124, PROXY_BREAK_CODE, GAME_EXITED_CODE, 130)
 # 进度消息的编辑节流，同时也是熔断的采样间隔——扫一遍全部日志行不便宜，
 # 不能放进 0.25 秒的主循环里跑。
 PROGRESS_INTERVAL_SECONDS = 5
@@ -640,7 +648,8 @@ def farming_sections(lines: list[str]) -> list[str]:
     """两个刷理智块的 maa-cli 汇总段拼在一起（掉落要合并统计，四期步骤 3b）。"""
     section: list[str] = []
     for name in FARMING_TASK_NAMES:
-        section += _named_task_section(lines, name)
+        for part in _named_task_sections(lines, name):
+            section += part
     return section
 
 
@@ -679,17 +688,29 @@ def _last_match(lines: list[str], pattern: str) -> re.Match[str] | None:
     return result
 
 
+def _named_task_sections(lines: list[str], label: str) -> list[list[str]]:
+    """每一趟 maa-cli 收尾汇总里 `[label]` 那一段（不含后面的任务）。
+
+    游戏中途退出后接着跑（#68）时同一条链会在两趟汇总里各出现一次，次数和掉落要合起来算。
+    一段到下一个 `[名字]` 行或 maa-cli 的分隔线为止。
+    """
+    sections: list[list[str]] = []
+    current: list[str] | None = None
+    for line in lines:
+        if current is not None and (re.match(r"^\[[^]]+\]", line) or re.fullmatch(r"-{3,}", line.strip())):
+            current = None
+        if current is None and f"[{label}]" in line:
+            current = []
+            sections.append(current)
+        if current is not None:
+            current.append(line)
+    return sections
+
+
 def _named_task_section(lines: list[str], label: str) -> list[str]:
-    """Return one maa-cli final-summary section, excluding later tasks."""
-    start = next((index for index, line in enumerate(lines) if f"[{label}]" in line), None)
-    if start is None:
-        return []
-    section: list[str] = []
-    for line in lines[start:]:
-        if section and re.match(r"^\[[^]]+\]", line):
-            break
-        section.append(line)
-    return section
+    """Return the first maa-cli final-summary section, excluding later tasks."""
+    sections = _named_task_sections(lines, label)
+    return sections[0] if sections else []
 
 
 def _fight_times(lines: list[str]) -> int:
@@ -818,6 +839,11 @@ def fight_wiped_out(lines: list[str]) -> tuple[int, int]:
     if failed and not _drop_pairs(lines):
         return failed, refunded
     return 0, 0
+
+
+def game_exit_count(lines: list[str]) -> int:
+    """`run_maa()` 认出游戏中途退出、停掉 maa run 的次数（每次写一行 `GAME_EXITED_NOTE（…`）。"""
+    return sum(1 for line in lines if line.strip().startswith(f"{GAME_EXITED_NOTE}（"))
 
 
 def never_saw_the_game(lines: list[str]) -> bool:
@@ -1028,6 +1054,8 @@ PROGRESS_NOTES = {
     "connect_gave_up": "游戏画面一直拿不到，不再重试",
     "offline_retry": "游戏没登录上，{wait}后重启（{n}/{limit}）",
     "offline_gave_up": "游戏一直没登录上，不再重启",
+    "game_exited": "游戏中途退出了，重开后接着跑（{n}/{limit}）",
+    "game_exit_gave_up": "游戏又退出了，不再重开",
     "proxy_break": "代理指挥连着失误 {n} 次，先停下刷理智",
     "salvage": "补跑基建、公招、商店和领奖",
     "fallback": "{stage} 没打成，改刷后备关 {spare}",
@@ -1388,10 +1416,13 @@ def extract_summary(
         if key == "StartUp" and state != "completed" and key not in offline:
             # 「启动游戏 ❌ 中断」看着像游戏那头的事，其实多半是 MaaTools 没连上或截图
             # 拿不到（窗口被台前调度收走）。把 MaaCore 的原始标记摊开，省得去翻 asst.log。
+            # 游戏进程中途换了的那种，截图失败只是后果，直接说游戏退出了（#68）。
             marker = next(
                 (m for m in CONNECT_FAILURE_MARKERS if any(m in line for line in lines)), ""
             )
-            if marker:
+            if game_exit_count(lines):
+                details.append(GAME_EXITED_NOTE)
+            elif marker:
                 details.append(f"没连上游戏（{marker}），检查 MaaTools 与 MAA-Game 虚拟屏")
         elif key == "Annihilation":
             annihilation_lines = []
@@ -1407,17 +1438,24 @@ def extract_summary(
                 else f"代理卡全权委托；满 {ANNIHILATION_WEEKLY_ORUNDUM} 合成玉/周后停止"
             )
         elif key in ("Fight", "Fight2"):
+            # 游戏中途退出后接着跑（#68）时同一块在两趟汇总里各有一段，次数按段加起来。
             if key == "Fight":
-                fight_lines = _named_task_section(lines, FARMING_TASK_NAMES[0]) or lines
+                sections = _named_task_sections(lines, FARMING_TASK_NAMES[0])
+                fight_lines = [line for part in sections for line in part] or lines
                 stage_label = plan_stage_label(plan or {})
             else:
                 # 第二块**不退回整份日志**：那会把第一块的掉落和次数重复算一遍。
-                fight_lines = _named_task_section(lines, FARMING_TASK_NAMES[1])
+                sections = _named_task_sections(lines, FARMING_TASK_NAMES[1])
+                fight_lines = [line for part in sections for line in part]
                 stage_label = str((plan or {}).get("farming_fallback_stage") or "第二个关")
             details.append(f"关卡 {stage_label}")
             proxy_batches, refunded, _streak = proxy_failures(fight_lines)
             wiped_batches, _wiped_refund = fight_wiped_out(fight_lines)
-            count = _fight_times(fight_lines)
+            count = (
+                sum(_fight_times(part) for part in sections)
+                if len(sections) > 1
+                else _fight_times(fight_lines)
+            )
             if wiped_batches:
                 # MaaCore 会把「一批都没打成」也判成 Fight Completed，而 count 数的是
                 # 发起的连战批次，不是真打完的次数。这里直接翻红，别让战报骗人。
@@ -1435,7 +1473,11 @@ def extract_summary(
                 )
             if proxy_batches:
                 details.append(f"代理指挥失误 {proxy_batches} 批，理智已返还 ×{refunded}")
-            medicine = _expiring_medicine_used(fight_lines)
+            medicine = (
+                sum(_expiring_medicine_used(part) for part in sections)
+                if len(sections) > 1
+                else _expiring_medicine_used(fight_lines)
+            )
             if medicine:
                 details.append(f"临期理智药 ×{medicine}")
             sanity = _last_match(lines, r"Current sanity:\s*(\d+)\s*/\s*(\d+)")
@@ -1748,7 +1790,13 @@ def run_maa(
     carry_lines: list[str] | None = None,
     append: bool = False,
     progress: RunProgressFile | None = None,
+    game_watch: maa_playcover.GameExitWatch | None = None,
 ) -> tuple[int, list[str], list[str]]:
+    """跑一趟 `maa run daily`，把两路输出写进日志并更新进度。
+
+    `game_watch` 不为 None 时，拉起后先记下游戏进程，之后每 `PROGRESS_INTERVAL_SECONDS`
+    查一次；游戏中途退出就停掉 maa run、返回 `GAME_EXITED_CODE`（不变量 #68）。
+    """
     maa = str(config.get("maa_bin", "/opt/homebrew/bin/maa"))
     # maa-cli 0.7.5's --log-file redirects logs away from stderr.  Capture the
     # live streams ourselves and tee both to disk so Discord progress remains
@@ -1800,8 +1848,14 @@ def run_maa(
         timed_out = False
         interrupted = False
         proxy_tripped = 0
+        game_exited = ""
+        # 拉起 maa run 时游戏已经在跑（开跑前等过 MaaTools），这一次只是记下基线进程。
+        started_wall = time.time()
+        if game_watch is not None:
+            game_watch.check()
         # 跑到一半 SCRN 回空（游戏窗口被台前调度收进侧边栏）时 MaaCore 会报
-        # ScreencapFailed 并自己重连；重连前把窗口摆回 MAA-Game 台前才救得回来。
+        # ScreencapFailed，连接还在，把窗口摆回 MAA-Game 台前就能接着截。游戏进程换了
+        # 就不是这回事：旧连接断了、MaaCore 不会重连，所以摆窗之前先判进程（#68）。
         # 节流 30 秒，免得 MaaCore 连着报错时一直 `open -a`。
         screencap_failures = 0
         last_settle = 0.0
@@ -1819,6 +1873,15 @@ def run_maa(
                     break
                 if now >= next_update:
                     live = list(stdout_lines) + list(stderr_lines)
+                    game_exited = game_watch.check() if game_watch is not None else ""
+                    if game_exited:
+                        process.terminate()
+                        try:
+                            process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.wait(timeout=5)
+                        break
                     if proxy_limit:
                         streak = proxy_failures(live)[2]
                         if streak >= proxy_limit:
@@ -1907,6 +1970,17 @@ def run_maa(
         with log_path.open("a", encoding="utf-8") as log_handle:
             log_handle.write(break_message + "\n")
         return_code = PROXY_BREAK_CODE
+    elif game_exited:
+        reports = maa_playcover.crash_reports_since(config, started_wall)
+        exit_message = (
+            f"{GAME_EXITED_NOTE}（{now_beijing():%H:%M:%S} 发现，{game_exited}），"
+            "MaaCore 不会重连，已停掉 maa run。"
+            + (f"崩溃报告：{reports[0]}" if reports else "没有崩溃报告。")
+        )
+        stderr_lines.append(exit_message)
+        with log_path.open("a", encoding="utf-8") as log_handle:
+            log_handle.write(exit_message + "\n")
+        return_code = GAME_EXITED_CODE
     return return_code, stdout_lines, stderr_lines
 
 
@@ -1922,6 +1996,7 @@ def run_maa_resilient(
     carry_lines: list[str] | None = None,
     log_preamble: list[str] | None = None,
     progress: RunProgressFile | None = None,
+    task_path: Path | None = None,
 ) -> tuple[int, list[str], list[str], int, int]:
     """跑 maa run；一个键都没点成的两类失败上重开。末两位是（连接重开, 掉线重开）次数。
 
@@ -1932,10 +2007,15 @@ def run_maa_resilient(
        点确认救不回来。等 `offline_retry_delays` 里对应的秒数给故障留时间恢复，然后
        **一律重启游戏**、摆窗、整场重跑。死掉那一趟的输出**不交回去**（它的 Mall /
        Award 会假报 Completed），只留我们自己写的说明；完整现场在日志文件里。
+    3. **游戏中途退出**（`run_maa()` 返回 `GAME_EXITED_CODE`，2026-11-25 手动场，#68）：
+       MaaCore 不会重连新进程。重启游戏、摆窗，按 `game_exit_plan()` 去掉已经跑完的
+       任务链后接着跑，最多 `game_exit_retry_limit` 次。给了 `task_path` 才改写任务文件，
+       否则按原计划重跑。几趟的输出拼在一起交回去（战报按任务链取任一趟的 Completed）。
 
     所有重开共用同一个超时预算，绝不额外撑长 Hermes 那一小时；日志追加进同一个文件，
     不覆盖上一趟的现场。`log_preamble` 先写进日志开头（开跑前的摆窗留痕）。
-    放弃时的说明里一定带 `CONNECT_GAVE_UP` / `OFFLINE_GAVE_UP`，调用方据此跳过补跑。
+    放弃时的说明里一定带 `CONNECT_GAVE_UP` / `OFFLINE_GAVE_UP` / `GAME_EXIT_GAVE_UP`，
+    调用方据此跳过补跑。
     """
     if log_preamble:
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1945,6 +2025,7 @@ def run_maa_resilient(
     delay = max(0, int(config.get("connect_retry_delay", 8)))
     offline_limit = max(0, int(config.get("offline_retry_limit", 2)))
     offline_delays = offline_retry_delays(config)
+    exit_limit = max(0, int(config.get("game_exit_retry_limit", 1)))
     started = time.monotonic()
     stdout_all: list[str] = []
     stderr_all: list[str] = []
@@ -1952,7 +2033,10 @@ def run_maa_resilient(
     notes: list[str] = []
     retries = 0
     offline_retries = 0
+    game_exits = 0
     attempts = 0
+    # 这一趟实际要跑的计划：游戏中途退出后只剩没跑完的任务链（进度和战报仍按原计划）。
+    attempt_plan = cast(Plan, dict(plan or {}))
 
     def say(message: str) -> None:
         notes.append(message)
@@ -1961,6 +2045,8 @@ def run_maa_resilient(
 
     while True:
         remaining = budget - int(time.monotonic() - started)
+        # 游戏中途退出过时，前几趟真跑完的任务链要留给战报（掉线重开只丢这一趟的输出）。
+        kept_out, kept_err = list(stdout_all), list(stderr_all)
         code, out, err = run_maa(
             config,
             log_path,
@@ -1972,11 +2058,59 @@ def run_maa_resilient(
             carry_lines=list(carry_lines or []) + stdout_all + stderr_all,
             append=attempts > 0 or bool(log_preamble),
             progress=progress,
+            game_watch=maa_playcover.GameExitWatch(config),
         )
         attempts += 1
         stdout_all += out
         stderr_all += err
         spent = int(time.monotonic() - started)
+        if code == GAME_EXITED_CODE:
+            if (
+                game_exits >= exit_limit
+                or budget - spent - RESTART_ALLOWANCE_SECONDS < MIN_RUN_TIMEOUT_SECONDS
+            ):
+                say(f"{GAME_EXITED_NOTE}，已重开 {game_exits} 次，{GAME_EXIT_GAVE_UP}。")
+                if progress is not None:
+                    progress.note("game_exit_gave_up")
+                return code, stdout_all, stderr_all, retries, offline_retries
+            game_exits += 1
+            attempt_plan = game_exit_plan(attempt_plan, out + err)
+            left = [
+                label
+                for flag, label in (
+                    ("infrast", "基建"),
+                    ("recruit", "公招"),
+                    ("mall", "商店"),
+                    ("award", "领奖"),
+                )
+                if (attempt_plan.get("tasks") or {}).get(flag, True)
+            ]
+            if (attempt_plan.get("tasks") or {}).get("fight", True):
+                left[:0] = [
+                    *(["剿灭"] if attempt_plan.get("annihilation") else []),
+                    *(["刷理智"] if attempt_plan.get("farming", True) else []),
+                ]
+            say(
+                f"{GAME_EXITED_NOTE}后重启游戏、接着跑第 {game_exits} 趟："
+                + ("、".join(left) if left else "只登录并回主界面")
+                + "。"
+            )
+            if progress is not None:
+                progress.note("game_exited", n=game_exits, limit=exit_limit)
+            if task_path is not None:
+                atomic_write_text(task_path, render_daily_toml(attempt_plan, config))
+            exit_trail: list[str] = []
+            try:
+                warnings = maa_playcover.restart_game(config)
+                settled = maa_playcover.settle_game_window(config, trail=exit_trail)
+                warning = "；".join([*warnings, *([settled] if settled else [])])
+            except Exception as exc:  # noqa: BLE001 — (c) 重启尽力而为，下一趟 maa run 自己会报连接失败
+                warning = f"重启游戏失败：{exc}"
+            for step in exit_trail:
+                _append_log(log_path, step)
+            if warning:
+                say(warning)
+            continue
         marker = connect_failed(out + err, code)
         if marker:
             if retries >= limit or budget - spent - delay < MIN_RUN_TIMEOUT_SECONDS:
@@ -2034,9 +2168,14 @@ def run_maa_resilient(
             if warning:
                 say(warning)
             # 死掉那一趟什么都没做成（never_logged_in 的第三条），它的输出只会让战报
-            # 读到假 Completed；现场在日志文件里。
-            stdout_all = []
-            stderr_all = list(notes)
+            # 读到假 Completed；现场在日志文件里。游戏中途退出过时，退出前那几趟真跑完的
+            # 任务链留着（#68），只丢这一趟。
+            if game_exits:
+                stdout_all = kept_out
+                stderr_all = kept_err + [note for note in notes if note not in kept_err]
+            else:
+                stdout_all = []
+                stderr_all = list(notes)
             continue
         return code, stdout_all, stderr_all, retries, offline_retries
 
@@ -2073,6 +2212,52 @@ def salvage_plan(plan: Plan) -> Plan | None:
         return None
     tasks["fight"] = False
     return {**plan, "tasks": tasks}
+
+
+def _summary_completed(lines: list[str], key: str, label: str) -> bool:
+    """maa-cli 收尾汇总里这条任务链报了 Completed。只认汇总的 `[名字]` 行，不认流式的
+    `<Task> Completed`：剿灭和刷理智都是 Fight，流式行分不清是哪一块。"""
+    names = _task_display_names(key, label)
+    return any(
+        _SUMMARY_HEAD_RE.match(line.strip()) and "Completed" in line
+        for line in lines
+        if any(f"[{name}]" in line for name in names)
+    )
+
+
+def _started_past_startup(lines: list[str]) -> bool:
+    """StartUp 之外有任务链开过头（流式 `<Task> Start`，或汇总里带了开始时间）。"""
+    for kind, _body in _stream_segments(lines):
+        if kind != "StartUp":
+            return True
+    return any(
+        _SUMMARY_HEAD_RE.match(line.strip()) and not line.strip().startswith("[启动国服]")
+        for line in lines
+    )
+
+
+def game_exit_plan(plan: Plan, lines: list[str]) -> Plan:
+    """游戏中途退出后接着跑的计划（不变量 #68）：去掉死掉那一趟已经跑完的任务链。
+
+    - 基建 / 公招 / 商店 / 领奖：汇总里报了 Completed 的不再跑。
+    - 刷理智：两块都跑完（没有第二块时第一块跑完）才不再跑；没跑完就照原计划再跑，
+      理智花多少由游戏决定，`stone` / `medicine` / `series` 都不变。
+    - 剿灭：StartUp 之外有任何任务链开过头就不再进，免得重复消耗代理卡。
+    - StartUp 和返回主界面每趟都跑。只改 `tasks` / `annihilation` / `farming`，不动快照（#10）。
+    """
+    tasks = dict(plan.get("tasks", {}))
+    for key, flag in (("Infrast", "infrast"), ("Recruit", "recruit"), ("Mall", "mall"), ("Award", "award")):
+        if _summary_completed(lines, key, _TASK_LABELS[key]):
+            tasks[flag] = False
+    second_planned = bool(plan.get("farming_drops") and plan.get("farming_fallback_stage"))
+    farming_done = _summary_completed(lines, "Fight", FARMING_TASK_NAMES[0]) and (
+        not second_planned or _summary_completed(lines, "Fight2", FARMING_TASK_NAMES[1])
+    )
+    annihilation = bool(plan.get("annihilation", True)) and not _started_past_startup(lines)
+    farming = bool(plan.get("farming", True)) and not farming_done
+    if not annihilation and not farming:
+        tasks["fight"] = False
+    return {**plan, "tasks": tasks, "annihilation": annihilation, "farming": farming}
 
 
 def fallback_fight_plan(plan: Plan) -> Plan | None:
@@ -2156,6 +2341,7 @@ def _fallback_fight_run(
         timeout=remaining,
         carry_lines=carry_lines,
         progress=progress,
+        game_watch=maa_playcover.GameExitWatch(config),
     )
     note = (
         f"刷理智 {plan_stage_label(plan)} 失败且未消耗理智，"
@@ -2203,6 +2389,7 @@ def _salvage_run(
         timeout=remaining,
         carry_lines=carry_lines,
         progress=progress,
+        game_watch=maa_playcover.GameExitWatch(config),
     )
     return code, out, ["代理指挥失误熔断，已补跑剩余任务（不含刷理智）。", *err]
 
@@ -2226,11 +2413,20 @@ def report_payload(
     offline_retries: int = 0,
     offline_gave_up: bool = False,
     cancelled: bool = False,
+    game_exits: int = 0,
+    game_exit_gave_up: bool = False,
 ) -> dict[str, Any]:
     label = PHASE_LABELS[phase]
     notes: list[str] = []
     if cancelled:
         notes.append(CANCELLED_NOTE)
+    if game_exit_gave_up:
+        notes.append(
+            f"游戏中途退出 {game_exits} 次，重启后没能接着跑完。"
+            "运行日志里有退出时刻和崩溃报告路径。"
+        )
+    elif game_exits:
+        notes.append(f"游戏中途退出过 {game_exits} 次，已重启游戏接着跑剩下的任务。")
     if offline_gave_up:
         notes.append(
             f"游戏一直没登录上（获取网络配置失败），重启游戏 {offline_retries} 次都没恢复。"
@@ -2535,12 +2731,15 @@ def daily_failure(
     home_verified: bool | None,
     cleanup_errors: list[str],
     inventory_error: str,
+    game_exit_gave_up: bool = False,
 ) -> str:
     """一场日常没成功的主因（场次索引 `failure`，#66）：按下面的先后取第一条。"""
     if startup_error:
         return "startup"
     if offline_gave_up:
         return "offline"
+    if game_exit_gave_up:
+        return "game_exited"
     if connect_gave_up:
         return "screen_lost"
     if timed_out:
@@ -2571,10 +2770,11 @@ def record_daily_run(
     skip_reason: str | None = None,
     retries: int | None = None,
     restarts: int | None = None,
+    game_exits: int | None = None,
 ) -> None:
     """一场日常结束，往 `runs/index.jsonl` 追加一行（#66）。永不抛。
 
-    `retries` / `restarts` 拿不到就是 None；`window_fixes` / `rescue` 来自进度文件的说明计数。
+    `retries` / `restarts` / `game_exits` 拿不到就是 None；`window_fixes` / `rescue` 来自进度文件的说明计数。
     """
     try:
         finished = now_beijing()
@@ -2598,6 +2798,7 @@ def record_daily_run(
             "skip_reason": skip_reason if status == "skipped" else None,
             "retries": retries,
             "restarts": restarts,
+            "game_exits": game_exits,
             "window_fixes": counts.get("screen_lost", 0) if counts is not None else None,
             "rescue": rescue,
             "report": report,
@@ -2879,15 +3080,18 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
                 carry_lines=prior_errors,
                 log_preamble=settle_trail,
                 progress=progress,
+                task_path=task_path,
             )
             stderr_lines = prior_errors + run_errors
             cancelled = return_code == CANCEL_EXIT_CODE
-            # 重开到底还是拿不到游戏画面 / 登录不上：补跑只是换个关卡 / 换条链，在同一个
-            # 死掉的游戏上救不回来，跳过（2026-11-09 早场的后备关补跑就是白跑）。
+            # 重开到底还是拿不到游戏画面 / 登录不上 / 游戏又退了：补跑只是换个关卡 / 换条链，
+            # 在同一个死掉的游戏上救不回来，跳过（2026-11-09 早场的后备关补跑就是白跑）。
             if any(CONNECT_GAVE_UP in line for line in run_errors):
                 lost_note = SCREEN_LOST_SKIP_NOTE
             elif any(OFFLINE_GAVE_UP in line for line in run_errors):
                 lost_note = OFFLINE_SKIP_NOTE
+            elif return_code == GAME_EXITED_CODE:
+                lost_note = GAME_EXIT_SKIP_NOTE
             else:
                 lost_note = ""
             # 125 也可能是 maa 自己的退出码，所以还要确认日志里真有代理失误，
@@ -2997,6 +3201,10 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
         # 代理指挥失误到一关没打成，就算后面的链条都补回来了也不算成功——得让人
         # 看见红色去修作战录像，否则理智白挂在那儿谁也不知道。
         proxy_batches, proxy_refunded = fight_wiped_out(stdout_lines + stderr_lines)
+        game_exits = game_exit_count(stderr_lines)
+        game_exit_gave_up = return_code == GAME_EXITED_CODE or any(
+            GAME_EXIT_GAVE_UP in line and line.startswith(GAME_EXITED_NOTE) for line in stderr_lines
+        )
         ok = (
             not cancelled
             and return_code == 0
@@ -3057,6 +3265,8 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
             offline_retries=offline_retries,
             offline_gave_up=any(OFFLINE_GAVE_UP in line for line in stderr_lines),
             cancelled=cancelled,
+            game_exits=game_exits,
+            game_exit_gave_up=game_exit_gave_up and not cancelled,
         )
         report_error = write_report_file(report_path, payload)
         if (session_open or cancelled) and token and channel_id:
@@ -3102,6 +3312,7 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
             "proxy_failure_sanity_refunded": proxy_refunded,
             "connect_retries": connect_retries,
             "offline_retries": offline_retries,
+            "game_exits": game_exits,
             "inventory_error": inventory_error or None,
             "report": None if report_error else str(report_path),
         }
@@ -3124,9 +3335,11 @@ def _execute(phase: Phase, manual_token: str, marks: dict[str, Any]) -> int:
                 home_verified=home_verified,
                 cleanup_errors=cleanup_errors,
                 inventory_error=inventory_error,
+                game_exit_gave_up=game_exit_gave_up,
             ),
             retries=connect_retries,
             restarts=offline_retries,
+            game_exits=game_exits,
         )
         merge_last_run(finished)
         marks["finished"] = True

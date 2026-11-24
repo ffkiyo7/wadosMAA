@@ -124,6 +124,7 @@ public enum RunHistory {
         "startup": "游戏没打开",
         "upstream": "游戏资源状态不对，没有开始",
         "offline": "游戏一直没登录上",
+        "game_exited": "游戏中途退出了，没能接着跑完",
         "screen_lost": "游戏画面一直拿不到",
         "timeout": "超时了",
         "proxy": "代理指挥失误，一关没打成",

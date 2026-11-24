@@ -35,7 +35,7 @@ import maa_copilot
 import maa_gamedata
 import maa_notify
 import maa_playcover
-from maa_daily import HOME_TASK_NAMES, PROGRESS_SCHEMA_VERSION
+from maa_daily import GAME_EXITED_CODE, GAME_EXITED_NOTE, HOME_TASK_NAMES, PROGRESS_SCHEMA_VERSION
 from maa_common import (
     BUTTONS_PATH,
     RUNS_DIR,
@@ -173,6 +173,9 @@ RAID_DISABLED_NOTICE = (
 POPUP_MARK = "确认要接管作战"
 POPUP_CONFIRM_X_OFFSET = 130
 POPUP_CONFIRM_Y_OFFSET = 171
+# 打一关时隔多久查一次游戏进程（#68），和日常 `PROGRESS_INTERVAL_SECONDS` 一样。
+GAME_EXIT_CHECK_SECONDS = 5
+GAME_EXITED_STOP = f"{GAME_EXITED_NOTE}，这一轮停下"
 
 def _search_path(token: str) -> Path:
     return maa_copilot.SEARCHES_DIR / f"{token}.json"
@@ -502,6 +505,7 @@ def _run_copilot_with_watchdog(
     timeout: int | None = None,
     stall: tuple[str, int] | None = None,
     on_marks: Callable[[int], None] | None = None,
+    game_watch: maa_playcover.GameExitWatch | None = None,
 ) -> tuple[int, int]:
     """Run maa copilot; watchdog taps the takeover popup if it appears.
 
@@ -513,6 +517,9 @@ def _run_copilot_with_watchdog(
     `stall = (标记, 秒)` 是多作业的「无进展」超时：日志里这个标记（每开始一份作业
     出现一次）隔这么久都没多出一个，就当它卡在地图弹窗上了，结束进程
     （2026-09-08 SR-6 塔罗牌弹窗让列表模式空转 9 分钟）。
+
+    `game_watch` 不为 None 时盯住游戏进程：中途退出或换了一个就结束进程、返回
+    `GAME_EXITED_CODE`（不变量 #68）。MaaCore 不会重连新进程，接着等只会空转到超时。
     """
     ocrbox = SCRIPTS_DIR / "ocrbox"
     watch_png = RUNS_DIR / ".watch.png"
@@ -532,9 +539,28 @@ def _run_copilot_with_watchdog(
     stall_deadline = time.monotonic() + (stall[1] if stall else timeout)
     mark_interval = 5 if on_marks is not None else 30
     next_stall_check = time.monotonic() + mark_interval
+    if game_watch is not None:
+        game_watch.check()
+    next_exit_check = time.monotonic() + GAME_EXIT_CHECK_SECONDS
     try:
         while proc.poll() is None:
             now = time.monotonic()
+            if game_watch is not None and now >= next_exit_check:
+                next_exit_check = now + GAME_EXIT_CHECK_SECONDS
+                exited = game_watch.check()
+                if exited:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=10)
+                    with log_path.open("a", encoding="utf-8") as handle:
+                        handle.write(
+                            f"{GAME_EXITED_NOTE}（{now_beijing():%H:%M:%S} 发现，{exited}），"
+                            "MaaCore 不会重连，已停掉 maa copilot。\n"
+                        )
+                    return GAME_EXITED_CODE, taps
             if stall and now >= next_stall_check:
                 next_stall_check = now + mark_interval
                 marks = _log_since(log_path, start_offset).count(stall[0])
@@ -1363,7 +1389,7 @@ def _batch_run_locked(
                     break
                 progress.start_stage(stage, mode)
                 outcome, detail = _fight_one(config, entry, env, log_path)
-                if outcome != "nav":
+                if outcome not in ("nav", "exited"):
                     # 进过战斗就要正常收尾：跳过首通剧情、回主界面，再往下走（或退游戏）。
                     # 直接 closedown 会把结算流程掐断——SR-8 三星却没解锁代理指挥（2026-09-09）。
                     settled, settle_note = settle_after_battle(config, stage, env, log_path)
@@ -1398,8 +1424,9 @@ def _batch_run_locked(
                     continue
                 # 突袭没过 → 这一关不算通关（D7），下一轮只排它剩下的模式。
                 failed_stages.add(stage)
-                if outcome == "nav":
-                    # 导航 / 切难度失败说明环境坏了，后面几关只会一路失败。
+                if outcome in ("nav", "exited"):
+                    # 导航 / 切难度失败说明环境坏了，后面几关只会一路失败；游戏中途退出了
+                    # 也一样，这一轮不自动重开（#68）。
                     stop_reason = detail
                     break
     except KeyboardInterrupt:
@@ -1975,6 +2002,7 @@ def _run_copilot_list(
                 timeout=per_item * len(items) + 300,
                 stall=(maa_clearing.LIST_ITEM_EVENT, per_item),
                 on_marks=on_marks,
+                game_watch=maa_playcover.GameExitWatch(config),
             )
     output = _log_since(log_path, offset)
     return maa_clearing.list_outcomes([str(path) for _e, path in items], output, return_code)
@@ -2179,8 +2207,9 @@ def _fight_one(
 ) -> tuple[str, str]:
     """打一关一种模式，返回 `(结论, 明细)`。
 
-    结论 ∈ {`"won"`, `"nav"`, `"failed"`, `"unknown"`}：`nav` 是导航 / 切难度失败，
-    说明环境坏了，调用方停止整轮；其余两种只影响这一关，下一关照打。
+    结论 ∈ {`"won"`, `"nav"`, `"exited"`, `"failed"`, `"unknown"`}：`nav` 是导航 / 切难度失败，
+    `exited` 是游戏中途退出（#68），都说明环境坏了，调用方停止整轮；其余两种只影响这一关，
+    下一关照打。
     """
     stage = str(entry.get("stage") or "")
     stage_id = str(entry.get("stage_id") or "")
@@ -2212,9 +2241,12 @@ def _fight_one(
         handle.flush()
         offset = os.fstat(handle.fileno()).st_size
         return_code, _taps = _run_copilot_with_watchdog(
-            config, command, handle, log_path, env
+            config, command, handle, log_path, env,
+            game_watch=maa_playcover.GameExitWatch(config),
         )
     this_run = _log_since(log_path, offset)
+    if return_code == GAME_EXITED_CODE:
+        return "exited", GAME_EXITED_STOP
     outcome, detail = maa_clearing.copilot_outcome(this_run, return_code)
     if outcome == "won":
         return "won", ""

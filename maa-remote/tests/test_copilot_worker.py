@@ -882,7 +882,7 @@ class CopilotBatchExecutionTests(unittest.TestCase):
 
         commands: list[list[str]] = []
 
-        def watchdog(_config, command, handle, _log_path, _env):
+        def watchdog(_config, command, handle, _log_path, _env, **_kwargs):
             commands.append(command)
             handle.write("Copilot Completed\n")
             return 0, 0
@@ -962,7 +962,7 @@ class CopilotLogMarkerTests(unittest.TestCase):
     def _fight(self, log_path: Path) -> tuple[str, str]:
         import maa_copilot_worker as worker
 
-        def watchdog(_config, _command, handle, _log_path, _env):
+        def watchdog(_config, _command, handle, _log_path, _env, **_kwargs):
             # 真子进程 + 共享 fd：与 `maa copilot` 的写法一致。
             proc = subprocess.Popen(
                 [sys.executable, "-c", "print('MissionStart')\nprint('Copilot Completed')"],
