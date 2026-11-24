@@ -8,13 +8,11 @@
 
 ## 当前进度
 
-更新于 2026-11-24 09:43（北京时间）。
+更新于 2026-11-24 11:05（北京时间）。
 
-- **S3-1 / S3-2 / S3-3 / S3-4a~d**：已全部完成并确认。
-- **S3-5**：已在 iPhone Air + `devhome` 完成全链路真机验收（含 `2026-11-24-copilot-3524e07dfa1e-000816` 跑通 `OS-EX-1` 普通 + 突袭逐关进度与战报，以及冷启动缓存/断连置灰 UX 修复）。
-- **Gate 3**：完整通过，无遗留阻塞。
-- **S3-6**：已完成模拟 HOME 全流程演练（`--dry-run` → 切线 → 旧脚本置桩拒跑 → 非 MAA 数据无损 → `--rollback` 还原）及线上 `5/17/18/14` 只读预检通过。
-- **下一步**：执行 S3-7 分支合入与单步生产切线。
+- **Phase 3（S3-1 ~ S3-7）已全部完成并上线生产环境 `~/.wados-maa`**。
+- **切线记录**：备份包位于 `~/.wados-maa/backups/cutover-20261124T095249`；双 LaunchAgent（`wados-maa.daemon` + `wados-maa.cloudflared`）已常驻运行，iPhone 与新版 Mac GUI 已接入线上 `~/.wados-maa`；线上首场 `2026-11-24-am-095250` 已完成全链路落盘与加密 Bark 战报推送（`OS-7` 关卡内代理指挥失误触发 `salvage` 补跑完成基建/公招/商店/领奖并 9/9 通过主页校验）；`devhome/scripts` 已恢复软链，临时 worktree 已清理。
+- **下一步**：进入 [Phase 4](./P4_AUTO_RESIGN_AND_P2.md)（无线自动续签与设置页 P2 完善）。
 
 ---
 
@@ -193,9 +191,9 @@
   5. 执行 `cutover.py` 完成备份、停旧、迁状态与路径改写、改 Mac GUI 偏好；
   6. 启动线上 `wados-maa-daemon` 与 `wados-maa-cloudflared` LaunchAgent；重编安装新版 Mac GUI 与绑定线上的 iOS App；
   7. 切线稳定后将 `~/Developer/forks/maa-remote-devhome/scripts` 软链改回 `~/Developer/wados-maa/maa-remote/scripts`，清理临时 worktree `~/Developer/wados-maa-decouple`。
-- **切线验收清单**：
-  - [ ] iOS App 与 Mac GUI 均正常读写 `~/.wados-maa`，Mac GUI 拒绝旧 `~/.hermes`
-  - [ ] 线上跑通首场日常并收到加密 Bark 战报
-  - [ ] `~/.hermes` 其余 17 条非 MAA cron、14 条非 MAA 按钮与 Discord webhook 无损运行
-  - [ ] 手动尝试执行旧 `~/.hermes/scripts/maa_action.py` 被拒绝桩拦截
-  - [ ] 回滚备份目录完整可核验
+- **切线验收清单（✅ 2026-11-24 全部通过）**：
+  - [x] iOS App 与 Mac GUI 均正常读写 `~/.wados-maa`，Mac GUI 拒绝旧 `~/.hermes`
+  - [x] 线上跑通首场日常并收到加密 Bark 战报（`2026-11-24-am-095250`：`OS-7` 游戏内代理失误熔断后自动走完 `salvage` 补跑基建/公招/商店/领奖、9/9 主页截图校验、还原台前调度并送达加密 Bark 战报）
+  - [x] `~/.hermes` 其余 17 条非 MAA cron、14 条非 MAA 按钮与 Discord webhook 无损运行
+  - [x] 手动尝试执行旧 `~/.hermes/scripts/maa_action.py` 被拒绝桩拦截
+  - [x] 回滚备份目录完整可核验（`~/.wados-maa/backups/cutover-20261124T095249`）
