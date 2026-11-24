@@ -2,22 +2,20 @@
 
 ## 现在的状态
 
-- 解耦与 iOS 规划的 Phase 0～3 已全部完成。11-24 09:52 生产切线，线上运行根目录是 `~/.wados-maa`，细节见 `docs/specs/P3_IOS_APP_AND_CUTOVER.md`「当前进度」。
+- 解耦与 iOS 规划的 Phase 0～3 已全部完成；Phase 4 代码已部署，等真机验收（见下）。11-24 09:52 生产切线，线上运行根目录是 `~/.wados-maa`，细节见 `docs/specs/P3_IOS_APP_AND_CUTOVER.md`「当前进度」。
 - 常驻进程：LaunchAgent `io.github.ffkiyo7.wados-maa.daemon`（调度器 + HTTPS API，端口 18170）和 `io.github.ffkiyo7.wados-maa.cloudflared`（隧道 `maa.luxraykit.com`）。
 - 切线后线上首场 `2026-11-24-am-095250` 跑通，Bark 战报送达。iPhone 和 Mac App 都连着线上。
 - `~/.hermes`：MAA 的 cron 已停，按钮已删，`scripts/maa_*.py` 是拒绝桩；17 条非 MAA cron、`ai.hermes.gateway` 照常跑。
-- 代码：`dev` = `main` = e1ca406，两个 worktree 都干净；比 `origin` 多 100 个提交，**还没 push**。
-- 11-24 核对：maa-remote 913 个单测通过，ruff、pyright 0 报错；`shared` 20 个测试通过。
+- 代码：`dev` = `main`，两个 worktree 都干净；**还没 push**。
+- 11-24 核对：maa-remote 935 个单测通过，ruff、pyright 0 报错；`shared` 21 个测试通过；iOS、Mac App 编译通过。
 
 ## 接下来做什么
 
-1. **Phase 4**（`docs/specs/P4_AUTO_RESIGN_AND_P2.md`，一项都没开始）：
-   - S4-1 Mac 侧无线自动续签 `maa_ios_resign.py`。现在 `POST /api/v1/ios/resign` 只回 `not_configured`（501），`daemon.json` 里也还没有 iPhone 的局域网 IP。
-   - S4-2 快捷指令归家自动续签。
-   - S4-3 iOS 设置页 P2：续签卡片、调度器卡片、高级设置。
-   - S4-4 证书到期告警与双指纹轮换演练（`rotate_tls.py --stage` / `--activate` 已有）。
-   - S4-5 终验。
-   - 在 S4-1 上线前，iPhone 上的 App 每 7 天要手动用 Xcode 重签一次。
+1. **Phase 4 验收**（`docs/specs/P4_AUTO_RESIGN_AND_P2.md`「当前进度」）：代码 11-24 13:52 已部署。
+   - 真机续签：手机在家连 Wi-Fi 时跑 `python3 ~/.wados-maa/scripts/maa_ios_resign.py run --trigger cli`，看 `ExpirationDate` 后移、新版 App 装上、Bark 静默回执。不手动跑的话，自动窗口 11-28 21:34 打开。
+   - 快捷指令：`maa_ios_resign.py shortcut-token` 拿 Token，按 `docs/IOS_RESIGN_SHORTCUT.md` 建自动化。
+   - 证书轮换演练：`rotate_tls.py --stage` → 打开 App 刷新 → `--activate` → App 不用重新配对。
+   - 全部通过后勾 S4-5 清单。
 2. **抄作业导航通用化**（用户 11-24 确认要做，等放行）：
    - 「进度未知」不要当成「没通」去补前置关。手动轮直达目标区域，自动轮停下并说明原因。
    - 区域入口识别别再靠 `ZONE_OCR_TILES` 固定裁剪，改成通用方案。

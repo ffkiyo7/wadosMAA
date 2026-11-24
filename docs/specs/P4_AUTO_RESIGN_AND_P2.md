@@ -3,6 +3,17 @@
 > 对应总 Spec：[SPEC_DECOUPLE_AND_IOS.md §6.4 & §7 & §9 Phase 4](../SPEC_DECOUPLE_AND_IOS.md)
 > 前提：Phase 3 生产切线（S3-7）已稳定运行，且 Phase 0 S0-1 已实证无线续签 `ExpirationDate` 后移机制成立。
 
+## 当前进度
+
+更新于 2026-11-24 14:00（北京时间）。
+
+- **代码已完成并部署**（`dev` = `main` = 5699f72，11-24 13:52 `deploy.py --standalone` + `--check` 全绿，守护进程已重启）：
+  - S4-1：`maa_ios_resign.py` + 守护进程 `ResignMonitor` + `POST /api/v1/ios/resign`。线上 `daemon.json` 已配 `ios_device_udid` / `ios_device_lan_ip`；`resign.json` 按本机缓存的描述文件补记为 11-23 21:34 签名、11-30 21:34 到期，自动窗口 11-28 21:34 打开。
+  - S4-2：配法见 [IOS_RESIGN_SHORTCUT.md](../IOS_RESIGN_SHORTCUT.md)，Token 还没生成。
+  - S4-3：签名页（立即续签，只在局域网可点）、调度器页的仓库对表开关、「高级」页按 schema 编辑全部白名单配置。模拟器 Demo 走查过。
+  - S4-4：快照带 `tls` 块，App 自动把预备证书指纹存为备用、换证后升为主指纹。到期告警与 `rotate_tls.py --stage` / `--activate` 沿用已有实现。
+- **等用户验收**：真机续签（新版 iOS App 也还没装到手机）、快捷指令、证书轮换演练，即 S4-5 清单。
+
 ---
 
 ## 执行顺序与并行安排

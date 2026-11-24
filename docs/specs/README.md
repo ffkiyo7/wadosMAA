@@ -3,7 +3,7 @@
 > 上游总规划：[SPEC_DECOUPLE_AND_IOS.md](../SPEC_DECOUPLE_AND_IOS.md)（二轮复核定稿，2026-11-21）
 > 后端既有不变量与外部契约：[maa-remote/docs/DEV_GUIDE.md](../../maa-remote/docs/DEV_GUIDE.md)
 > 说明：本目录将总 Spec 按**执行顺序、门禁（Gate）与可并行边界**拆分为 5 个阶段、25 个可执行子 Spec，每个子 Spec 均自带依赖声明、修改范围、接口/契约细节与勾选式验收清单。
-> **当前进度（2026-11-24）**：Phase 3 生产切线（S3-7）已全部完成并稳定运行于 `~/.wados-maa`；下一步进入 [Phase 4](./P4_AUTO_RESIGN_AND_P2.md)（无线自动续签 + 设置页 P2 完善）。详见 [P3 当前进度](./P3_IOS_APP_AND_CUTOVER.md#当前进度)。
+> **当前进度（2026-11-24）**：Phase 0～3 已完成，线上运行于 `~/.wados-maa`。[Phase 4](./P4_AUTO_RESIGN_AND_P2.md) 代码（S4-1～S4-4）已完成并部署，等真机续签、快捷指令和证书轮换演练（S4-5 终验）。详见 [P4 当前进度](./P4_AUTO_RESIGN_AND_P2.md#当前进度)。
 
 ---
 
